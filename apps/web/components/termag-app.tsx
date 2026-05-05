@@ -123,6 +123,7 @@ export function TermagApp({ user, initialProjects, roots }: TermagAppProps) {
     ws.onmessage = (event) => {
       const msg = JSON.parse(event.data);
       if (msg.type === 'agent') setAgentConnected(Boolean(msg.connected));
+      if (msg.type === 'refresh') reloadProjects();
     };
     return () => ws.close();
   }, []);
@@ -332,6 +333,11 @@ export function TermagApp({ user, initialProjects, roots }: TermagAppProps) {
           setActiveTabId(project.tabs[0]?.id ?? '');
         }}
         onNewTab={() => activeProject && createTab(activeProject.id)}
+        onKill={() => {
+          if (activeTab?.session) {
+            window.dispatchEvent(new CustomEvent('termag:kill-session', { detail: { sessionId: activeTab.session.id } }));
+          }
+        }}
         onTheme={cycleTheme}
         onSettings={() => setSettingsOpen(true)}
       />
@@ -347,6 +353,7 @@ function CommandPalette({
   projects,
   onProject,
   onNewTab,
+  onKill,
   onTheme,
   onSettings
 }: {
@@ -355,6 +362,7 @@ function CommandPalette({
   projects: Project[];
   onProject: (project: Project) => void;
   onNewTab: () => void;
+  onKill: () => void;
   onTheme: () => void;
   onSettings: () => void;
 }) {
@@ -382,6 +390,7 @@ function CommandPalette({
           </Command.Group>
           <Command.Group heading="Commands">
             <Command.Item className="flex cursor-pointer items-center gap-2 px-3 py-2 text-sm aria-selected:bg-panel2" onSelect={() => { onNewTab(); onOpenChange(false); }}><Plus className="h-4 w-4" /> New session</Command.Item>
+            <Command.Item className="flex cursor-pointer items-center gap-2 px-3 py-2 text-sm aria-selected:bg-panel2" onSelect={() => { onKill(); onOpenChange(false); }}><Trash2 className="h-4 w-4" /> Kill current session</Command.Item>
             <Command.Item className="flex cursor-pointer items-center gap-2 px-3 py-2 text-sm aria-selected:bg-panel2" onSelect={() => { onTheme(); onOpenChange(false); }}><Moon className="h-4 w-4" /> Toggle theme</Command.Item>
             <Command.Item className="flex cursor-pointer items-center gap-2 px-3 py-2 text-sm aria-selected:bg-panel2" onSelect={() => { onSettings(); onOpenChange(false); }}><Settings className="h-4 w-4" /> Settings</Command.Item>
             <Command.Item className="flex cursor-pointer items-center gap-2 px-3 py-2 text-sm aria-selected:bg-panel2" onSelect={() => signOut({ callbackUrl: '/login' })}><LogOut className="h-4 w-4" /> Sign out</Command.Item>

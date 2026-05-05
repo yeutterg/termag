@@ -72,6 +72,15 @@ export function TerminalPane({ sessionId, active, title, status }: TerminalPaneP
           ws.send(JSON.stringify({ type: 'input', data }));
         }
       });
+
+      const onKill = (event: Event) => {
+        const custom = event as CustomEvent<{ sessionId: string }>;
+        if (custom.detail?.sessionId === sessionId && ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: 'kill' }));
+        }
+      };
+      window.addEventListener('termag:kill-session', onKill);
+      (term as unknown as { _termagKill?: (event: Event) => void })._termagKill = onKill;
     });
 
     let resizeTimer: ReturnType<typeof setTimeout> | null = null;
@@ -95,6 +104,8 @@ export function TerminalPane({ sessionId, active, title, status }: TerminalPaneP
       if (resizeTimer) clearTimeout(resizeTimer);
       wsRef.current?.close();
       wsRef.current = null;
+      const onKill = (term as unknown as { _termagKill?: (event: Event) => void })._termagKill;
+      if (onKill) window.removeEventListener('termag:kill-session', onKill);
       term.dispose();
       termRef.current = null;
       setConnected(false);
@@ -111,6 +122,32 @@ export function TerminalPane({ sessionId, active, title, status }: TerminalPaneP
         <span className="text-muted">{status ?? 'sleeping'}</span>
       </header>
       <div ref={hostRef} className="min-h-0 flex-1 bg-[#07090d]" />
+      <div className="flex h-10 shrink-0 items-center gap-1 border-t border-line bg-panel2 px-2 md:hidden">
+        {[
+          ['Esc', '\u001b'],
+          ['Tab', '\t'],
+          ['←', '\u001b[D'],
+          ['↓', '\u001b[B'],
+          ['↑', '\u001b[A'],
+          ['→', '\u001b[C'],
+          ['C-c', '\u0003'],
+          ['C-d', '\u0004']
+        ].map(([label, data]) => (
+          <button
+            key={label}
+            className="h-7 min-w-8 border border-line bg-bg px-2 text-xs"
+            onClick={() => {
+              const ws = wsRef.current;
+              if (ws?.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ type: 'input', data }));
+              }
+              termRef.current?.focus();
+            }}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
     </section>
   );
 }

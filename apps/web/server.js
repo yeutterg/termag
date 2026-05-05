@@ -111,7 +111,7 @@ app.prepare().then(() => {
       where: { project: { userId: record.userId } },
       data: { status: 'idle', lastSeenAt: new Date() }
     });
-    broadcastStatus(record.userId);
+    broadcastStatus(record.userId, true);
 
     ws.on('message', async (raw) => {
       let msg;
@@ -148,7 +148,7 @@ app.prepare().then(() => {
           where: { id: msg.sessionId },
           data: { status: msg.status, lastSeenAt: new Date() }
         }).catch(() => {});
-        broadcastStatus(record.userId);
+        broadcastStatus(record.userId, true);
       }
     });
 
@@ -167,7 +167,7 @@ app.prepare().then(() => {
           where: { project: { userId: record.userId } },
           data: { status: 'sleeping' }
         });
-        broadcastStatus(record.userId);
+        broadcastStatus(record.userId, true);
       }
     });
 
@@ -228,8 +228,18 @@ app.prepare().then(() => {
         cols,
         rows
       });
+      await prisma.session.update({
+        where: { id: session.id },
+        data: { status: 'idle', lastSeenAt: new Date() }
+      });
+      if (session.tabId) {
+        await prisma.tab.update({ where: { id: session.tabId }, data: { status: 'idle' } });
+      }
+      await prisma.project.update({ where: { id: session.projectId }, data: { status: 'idle' } });
+      broadcastStatus(userId, true);
       sendJson(ws, { type: 'ready' });
     } catch (err) {
+      await prisma.session.update({ where: { id: session.id }, data: { status: 'sleeping' } }).catch(() => {});
       sendJson(ws, { type: 'sleeping', message: 'Agent offline; open termag-agent on your laptop to reconnect.' });
     }
 
@@ -252,10 +262,11 @@ app.prepare().then(() => {
     });
   }
 
-  function broadcastStatus(userId) {
+  function broadcastStatus(userId, refresh = false) {
     for (const client of wss.clients) {
       if (client._termagStatusUserId === userId && client.readyState === WebSocket.OPEN) {
         sendJson(client, { type: 'agent', connected: Boolean(agentForUser(userId)) });
+        if (refresh) sendJson(client, { type: 'refresh' });
       }
     }
   }
