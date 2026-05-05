@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { type FormEvent, useEffect, useMemo, useRef, useState } from 'react';
 import { signOut } from 'next-auth/react';
 import { Command } from 'cmdk';
 import {
@@ -68,10 +68,20 @@ export function TermagApp({ user, initialProjects, roots }: TermagAppProps) {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [agentConnected, setAgentConnected] = useState(false);
   const [theme, setTheme] = useState(user.theme);
+  const activeProjectIdRef = useRef(activeProjectId);
+  const activeTabIdRef = useRef(activeTabId);
 
   const activeProject = projects.find((project) => project.id === activeProjectId) ?? projects[0];
   const activeTab = activeProject?.tabs.find((tab) => tab.id === activeTabId) ?? activeProject?.tabs[0];
   const ctrlSession = activeProject?.sessions.find((session) => session.kind === 'ctrl');
+
+  useEffect(() => {
+    activeProjectIdRef.current = activeProjectId;
+  }, [activeProjectId]);
+
+  useEffect(() => {
+    activeTabIdRef.current = activeTabId;
+  }, [activeTabId]);
 
   useEffect(() => {
     const root = document.documentElement;
@@ -128,13 +138,17 @@ export function TermagApp({ user, initialProjects, roots }: TermagAppProps) {
     return () => ws.close();
   }, []);
 
-  async function reloadProjects(nextProjectId = activeProjectId, nextTabId = activeTabId) {
+  async function reloadProjects(nextProjectId?: string, nextTabId?: string) {
     const res = await fetch('/api/projects');
+    if (!res.ok) return;
     const next = await res.json();
+    const desiredProjectId = nextProjectId ?? activeProjectIdRef.current;
+    const desiredTabId = nextTabId ?? activeTabIdRef.current;
     setProjects(next);
-    setActiveProjectId(nextProjectId || next[0]?.id || '');
-    const project = next.find((item: Project) => item.id === nextProjectId) ?? next[0];
-    setActiveTabId(nextTabId || project?.tabs[0]?.id || '');
+    const project = next.find((item: Project) => item.id === desiredProjectId) ?? next[0];
+    setActiveProjectId(project?.id || '');
+    const tab = project?.tabs.find((item: Tab) => item.id === desiredTabId) ?? project?.tabs[0];
+    setActiveTabId(tab?.id || '');
   }
 
   async function createProject(formData: FormData) {
@@ -153,6 +167,12 @@ export function TermagApp({ user, initialProjects, roots }: TermagAppProps) {
     if (!res.ok) return;
     const project = await res.json();
     await reloadProjects(project.id, project.tabs?.[0]?.id);
+  }
+
+  async function createProjectFromForm(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    await createProject(new FormData(event.currentTarget));
+    event.currentTarget.reset();
   }
 
   async function createTab(projectId: string) {
@@ -201,7 +221,7 @@ export function TermagApp({ user, initialProjects, roots }: TermagAppProps) {
 
         <div className="min-h-0 flex-1 overflow-y-auto p-2">
           {sidebarOpen && (
-            <form action={createProject} className="mb-3 border border-line bg-bg p-2">
+            <form onSubmit={createProjectFromForm} className="mb-3 border border-line bg-bg p-2">
               <div className="mb-2 text-xs font-medium text-muted">New project</div>
               <input name="name" placeholder="name" className="mb-2 h-8 w-full border border-line bg-panel px-2 text-sm outline-none focus:border-accent" />
               <div className="mb-2 grid grid-cols-[82px_1fr] gap-2">
@@ -458,9 +478,16 @@ function SettingsDialog({
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ name: formData.get('name') || 'laptop' })
     });
+    if (!res.ok) return;
     const body = await res.json();
     setCreatedToken(body.token);
     setTokens((items) => [body, ...items]);
+  }
+
+  async function createTokenFromForm(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    await createToken(new FormData(event.currentTarget));
+    event.currentTarget.reset();
   }
 
   if (!open) return null;
@@ -476,7 +503,7 @@ function SettingsDialog({
             {agentConnected ? 'Agent connected' : 'Agent sleeping'}
           </span>
         </div>
-        <form action={createToken} className="mb-4 flex gap-2">
+        <form onSubmit={createTokenFromForm} className="mb-4 flex gap-2">
           <input name="name" placeholder="token name" className="h-9 min-w-0 flex-1 border border-line bg-bg px-2 text-sm outline-none focus:border-accent" />
           <button className="h-9 bg-accent px-3 text-sm font-medium text-bg">Create token</button>
         </form>

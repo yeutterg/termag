@@ -29,7 +29,7 @@ Important WebSocket paths:
 The laptop agent is intentionally small.
 
 - Connects outbound to `/api/ws/agent`.
-- Expands named roots, for example `WIP -> /Users/greg/WIP`.
+- Expands named roots, for example `WIP -> ~/WIP`.
 - Creates or attaches deterministic tmux sessions.
 - Spawns the configured agent command inside tmux.
 - Bridges `node-pty` output back through the VPS broker.
@@ -88,7 +88,7 @@ NEXTAUTH_SECRET="replace-with-openssl-rand-hex-32"
 GOOGLE_CLIENT_ID="..."
 GOOGLE_CLIENT_SECRET="..."
 TERMAG_ALLOWED_EMAIL="your-email@example.com"
-TERMAG_ROOTS='{"WIP":"/Users/greg/WIP"}'
+TERMAG_ROOTS='{"WIP":"~/WIP"}'
 ```
 
 Do not commit real emails, OAuth secrets, or agent tokens.
@@ -111,7 +111,7 @@ Create an agent token in the UI, then run the laptop agent:
 ```bash
 TERMAG_URL=ws://localhost:3000/api/ws/agent \
 TERMAG_AGENT_TOKEN=tmag_... \
-TERMAG_AGENT_ROOTS='{"WIP":"/Users/greg/WIP"}' \
+TERMAG_AGENT_ROOTS='{"WIP":"~/WIP"}' \
 npm run agent
 ```
 
@@ -156,7 +156,7 @@ The laptop agent connects to the deployed hostname:
 ```bash
 TERMAG_URL=wss://termag.example.com/api/ws/agent \
 TERMAG_AGENT_TOKEN=tmag_... \
-TERMAG_AGENT_ROOTS='{"WIP":"/Users/greg/WIP"}' \
+TERMAG_AGENT_ROOTS='{"WIP":"~/WIP"}' \
 npx @termag/agent
 ```
 

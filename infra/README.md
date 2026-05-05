@@ -12,7 +12,7 @@ NEXTAUTH_SECRET=...
 GOOGLE_CLIENT_ID=...
 GOOGLE_CLIENT_SECRET=...
 TERMAG_ALLOWED_EMAIL=...
-TERMAG_ROOTS={"WIP":"/Users/greg/WIP"}
+TERMAG_ROOTS={"WIP":"~/WIP"}
 ```
 
 3. Start the stack:
@@ -26,7 +26,7 @@ docker compose --env-file .env -f infra/docker-compose.yml up -d --build
 ```bash
 TERMAG_URL=wss://termag.example.com/api/ws/agent \
 TERMAG_AGENT_TOKEN=tmag_... \
-TERMAG_AGENT_ROOTS='{"WIP":"/Users/greg/WIP"}' \
+TERMAG_AGENT_ROOTS='{"WIP":"~/WIP"}' \
 npx @termag/agent
 ```
 

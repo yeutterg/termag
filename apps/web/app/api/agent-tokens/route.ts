@@ -18,7 +18,11 @@ export async function GET() {
 
 export async function POST(request: Request) {
   const user = await requireUser();
-  const { name } = createSchema.parse(await request.json());
+  const parsed = createSchema.safeParse(await request.json().catch(() => null));
+  if (!parsed.success) {
+    return NextResponse.json({ error: 'Invalid token payload' }, { status: 400 });
+  }
+  const { name } = parsed.data;
   const raw = createRawToken();
   const token = await prisma.agentToken.create({
     data: {

@@ -179,17 +179,32 @@ function resolveCwd(cwd?: Json) {
   const relativePath = String(cwd?.relativePath || '').replace(/^\//, '');
   const root = roots[rootKey];
   if (!root) throw new Error(`Unknown root ${rootKey}`);
-  return path.resolve(root, relativePath);
+  const resolvedRoot = path.resolve(root);
+  const resolvedPath = path.resolve(resolvedRoot, relativePath);
+  if (resolvedPath !== resolvedRoot && !resolvedPath.startsWith(`${resolvedRoot}${path.sep}`)) {
+    throw new Error(`Path escapes root ${rootKey}`);
+  }
+  return resolvedPath;
 }
 
 function parseRoots(raw?: string): Record<string, string> {
   if (!raw) return { WIP: path.join(os.homedir(), 'WIP') };
   try {
     const parsed = JSON.parse(raw) as Record<string, string>;
-    return Object.keys(parsed).length ? parsed : { WIP: path.join(os.homedir(), 'WIP') };
+    return Object.keys(parsed).length
+      ? Object.fromEntries(Object.entries(parsed).map(([key, value]) => [key, expandRoot(value)]))
+      : { WIP: path.join(os.homedir(), 'WIP') };
   } catch {
     return { WIP: path.join(os.homedir(), 'WIP') };
   }
+}
+
+function expandRoot(root: string) {
+  if (root === '~') return os.homedir();
+  if (root.startsWith('~/')) return path.join(os.homedir(), root.slice(2));
+  if (root === '$HOME') return os.homedir();
+  if (root.startsWith('$HOME/')) return path.join(os.homedir(), root.slice(6));
+  return root;
 }
 
 function respond(ws: WebSocket, requestId: string | undefined, data: unknown, error?: string) {

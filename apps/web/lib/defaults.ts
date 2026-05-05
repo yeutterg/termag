@@ -20,12 +20,12 @@ export function agentSpawnCommand(agentType: string): string {
 }
 
 export function parseRoots(value = process.env.TERMAG_ROOTS): Record<string, string> {
-  if (!value) return { WIP: '/Users/greg/WIP' };
+  if (!value) return { WIP: '~/WIP' };
   try {
     const parsed = JSON.parse(value) as Record<string, string>;
-    return Object.keys(parsed).length > 0 ? parsed : { WIP: '/Users/greg/WIP' };
+    return Object.keys(parsed).length > 0 ? parsed : { WIP: '~/WIP' };
   } catch {
-    return { WIP: '/Users/greg/WIP' };
+    return { WIP: '~/WIP' };
   }
 }
 

@@ -80,6 +80,17 @@ app.prepare().then(() => {
     });
   }
 
+  async function updateProjectStatus(projectId) {
+    const sessions = await prisma.session.findMany({
+      where: { projectId },
+      select: { status: true }
+    });
+    const statuses = sessions.map((session) => session.status);
+    const status = ['error', 'waiting', 'working', 'idle'].find((candidate) => statuses.includes(candidate)) || 'sleeping';
+    await prisma.project.update({ where: { id: projectId }, data: { status } }).catch(() => {});
+    return status;
+  }
+
   async function registerAgent(ws, token) {
     const record = await prisma.agentToken.findFirst({
       where: { tokenHash: hashToken(token), revokedAt: null },
@@ -111,6 +122,10 @@ app.prepare().then(() => {
       where: { project: { userId: record.userId } },
       data: { status: 'idle', lastSeenAt: new Date() }
     });
+    await prisma.tab.updateMany({
+      where: { project: { userId: record.userId } },
+      data: { status: 'idle' }
+    });
     broadcastStatus(record.userId, true);
 
     ws.on('message', async (raw) => {
@@ -139,15 +154,38 @@ app.prepare().then(() => {
 
       if (msg.type === 'terminal-exit' && msg.streamId) {
         const stream = browserStreams.get(msg.streamId);
-        if (stream) sendJson(stream.ws, { type: 'exit' });
+        if (stream) {
+          sendJson(stream.ws, { type: 'exit' });
+          await prisma.session.update({
+            where: { id: stream.sessionId },
+            data: { status: 'sleeping' }
+          }).catch(() => {});
+          const exitedSession = await prisma.session.findUnique({
+            where: { id: stream.sessionId },
+            select: { tabId: true, projectId: true }
+          }).catch(() => null);
+          if (exitedSession?.tabId) {
+            await prisma.tab.update({ where: { id: exitedSession.tabId }, data: { status: 'sleeping' } }).catch(() => {});
+          }
+          if (exitedSession?.projectId) {
+            await updateProjectStatus(exitedSession.projectId);
+          }
+          broadcastStatus(stream.userId, true);
+        }
         return;
       }
 
       if (msg.type === 'status' && msg.sessionId && msg.status) {
-        await prisma.session.update({
+        const updated = await prisma.session.update({
           where: { id: msg.sessionId },
           data: { status: msg.status, lastSeenAt: new Date() }
         }).catch(() => {});
+        if (updated?.tabId) {
+          await prisma.tab.update({ where: { id: updated.tabId }, data: { status: msg.status } }).catch(() => {});
+        }
+        if (updated?.projectId) {
+          await updateProjectStatus(updated.projectId);
+        }
         broadcastStatus(record.userId, true);
       }
     });
@@ -164,6 +202,10 @@ app.prepare().then(() => {
           data: { status: 'sleeping' }
         });
         await prisma.session.updateMany({
+          where: { project: { userId: record.userId } },
+          data: { status: 'sleeping' }
+        });
+        await prisma.tab.updateMany({
           where: { project: { userId: record.userId } },
           data: { status: 'sleeping' }
         });
@@ -216,49 +258,76 @@ app.prepare().then(() => {
 
     const streamId = `stream_${nextRequestId()}`;
     browserStreams.set(streamId, { ws, userId, sessionId });
+    let attached = false;
+    let attachPromise = null;
 
-    try {
-      await sendToAgent(userId, 'terminal-attach', {
-        streamId,
-        sessionId,
-        tmuxName: session.tmuxName,
-        kind: session.kind,
-        cwd: { rootKey: session.project.rootKey, relativePath: session.project.relativePath },
-        spawnCommand: session.kind === 'ctrl' ? session.project.ctrlSpawnCommand : session.project.agentSpawnCommand,
-        cols,
-        rows
-      });
+    async function markSessionStatus(status) {
       await prisma.session.update({
         where: { id: session.id },
-        data: { status: 'idle', lastSeenAt: new Date() }
-      });
+        data: { status, lastSeenAt: status === 'sleeping' ? session.lastSeenAt : new Date() }
+      }).catch(() => {});
       if (session.tabId) {
-        await prisma.tab.update({ where: { id: session.tabId }, data: { status: 'idle' } });
+        await prisma.tab.update({ where: { id: session.tabId }, data: { status } }).catch(() => {});
       }
-      await prisma.project.update({ where: { id: session.projectId }, data: { status: 'idle' } });
+      await updateProjectStatus(session.projectId);
       broadcastStatus(userId, true);
-      sendJson(ws, { type: 'ready' });
-    } catch (err) {
-      await prisma.session.update({ where: { id: session.id }, data: { status: 'sleeping' } }).catch(() => {});
-      sendJson(ws, { type: 'sleeping', message: 'Agent offline; open termag-agent on your laptop to reconnect.' });
     }
 
-    ws.on('message', (raw) => {
+    async function attachToAgent() {
+      if (attached) return true;
+      if (attachPromise) return attachPromise;
+      attachPromise = (async () => {
+        try {
+          await sendToAgent(userId, 'terminal-attach', {
+            streamId,
+            sessionId,
+            tmuxName: session.tmuxName,
+            kind: session.kind,
+            cwd: { rootKey: session.project.rootKey, relativePath: session.project.relativePath },
+            spawnCommand: session.kind === 'ctrl' ? session.project.ctrlSpawnCommand : session.project.agentSpawnCommand,
+            cols,
+            rows
+          });
+          attached = true;
+          await markSessionStatus('idle');
+          sendJson(ws, { type: 'ready' });
+          return true;
+        } catch (err) {
+          attached = false;
+          await markSessionStatus('sleeping');
+          sendJson(ws, { type: 'sleeping', message: 'Agent offline; open termag-agent on your laptop to reconnect.' });
+          return false;
+        } finally {
+          attachPromise = null;
+        }
+      })();
+      return attachPromise;
+    }
+
+    await attachToAgent();
+
+    ws.on('message', async (raw) => {
       let msg;
       try {
         msg = JSON.parse(raw.toString());
       } catch {
         return;
       }
-      if (!agentForUser(userId)) return;
-      if (msg.type === 'input') sendToAgent(userId, 'terminal-input', { streamId, data: msg.data }, 1000).catch(() => {});
-      if (msg.type === 'resize') sendToAgent(userId, 'terminal-resize', { streamId, cols: msg.cols, rows: msg.rows }, 1000).catch(() => {});
-      if (msg.type === 'kill') sendToAgent(userId, 'tmux-kill', { tmuxName: session.tmuxName }, 5000).catch(() => {});
+      if (msg.type === 'input') {
+        if (!(await attachToAgent())) return;
+        sendToAgent(userId, 'terminal-input', { streamId, data: msg.data }, 1000).catch(() => {});
+      }
+      if (msg.type === 'resize' && attached) {
+        sendToAgent(userId, 'terminal-resize', { streamId, cols: msg.cols, rows: msg.rows }, 1000).catch(() => {});
+      }
+      if (msg.type === 'kill' && agentForUser(userId)) {
+        sendToAgent(userId, 'tmux-kill', { tmuxName: session.tmuxName }, 5000).catch(() => {});
+      }
     });
 
     ws.on('close', () => {
       browserStreams.delete(streamId);
-      sendToAgent(userId, 'terminal-close', { streamId }, 1000).catch(() => {});
+      if (attached) sendToAgent(userId, 'terminal-close', { streamId }, 1000).catch(() => {});
     });
   }
 
