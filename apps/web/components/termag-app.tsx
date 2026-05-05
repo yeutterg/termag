@@ -1,6 +1,6 @@
 'use client';
 
-import { type FormEvent, useEffect, useMemo, useRef, useState } from 'react';
+import { type FormEvent, type ReactNode, useEffect, useMemo, useRef, useState } from 'react';
 import { signOut } from 'next-auth/react';
 import { Command } from 'cmdk';
 import {
@@ -66,6 +66,7 @@ export function TermagApp({ user, initialProjects, roots }: TermagAppProps) {
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [createOpen, setCreateOpen] = useState(false);
   const [agentConnected, setAgentConnected] = useState(false);
   const [theme, setTheme] = useState(user.theme);
   const activeProjectIdRef = useRef(activeProjectId);
@@ -98,9 +99,15 @@ export function TermagApp({ user, initialProjects, roots }: TermagAppProps) {
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       const mod = event.metaKey || event.ctrlKey;
+      if (event.key === 'Escape') {
+        setPaletteOpen(false);
+        setSearchOpen(false);
+        setSettingsOpen(false);
+        return;
+      }
       if (mod && event.key.toLowerCase() === 'k') {
         event.preventDefault();
-        setPaletteOpen(true);
+        setPaletteOpen((value) => !value);
       }
       if (mod && event.shiftKey && event.key.toLowerCase() === 'f') {
         event.preventDefault();
@@ -110,7 +117,7 @@ export function TermagApp({ user, initialProjects, roots }: TermagAppProps) {
         event.preventDefault();
         setSidebarOpen((value) => !value);
       }
-      if (mod && event.key.toLowerCase() === 't') {
+      if (mod && ['n', 't'].includes(event.key.toLowerCase())) {
         event.preventDefault();
         if (activeProject) createTab(activeProject.id);
       }
@@ -121,6 +128,10 @@ export function TermagApp({ user, initialProjects, roots }: TermagAppProps) {
       if (mod && event.key === '.') {
         event.preventDefault();
         cycleTheme();
+      }
+      if (mod && event.key === ',') {
+        event.preventDefault();
+        setSettingsOpen(true);
       }
     };
     window.addEventListener('keydown', onKey);
@@ -211,43 +222,54 @@ export function TermagApp({ user, initialProjects, roots }: TermagAppProps) {
 
   return (
     <main className="flex h-dvh bg-bg text-text">
-      <aside className={cn('flex shrink-0 flex-col border-r border-line bg-panel transition-[width] duration-150', sidebarOpen ? 'w-[280px]' : 'w-[56px]')}>
-        <div className="flex h-12 items-center justify-between border-b border-line px-3">
+      <aside className={cn('flex shrink-0 flex-col border-r border-line bg-panel/95 transition-[width] duration-150', sidebarOpen ? 'w-[292px]' : 'w-[60px]')}>
+        <div className="flex h-14 items-center justify-between border-b border-line px-3">
           {sidebarOpen ? <span className="text-sm font-semibold">termag</span> : <TerminalSquare className="mx-auto h-4 w-4" />}
-          <button className="grid h-8 w-8 place-items-center hover:bg-panel2" onClick={() => setSidebarOpen((value) => !value)}>
+          <button className="grid h-8 w-8 place-items-center rounded-md hover:bg-panel2" title="Toggle sidebar (⌘\\)" onClick={() => setSidebarOpen((value) => !value)}>
             {sidebarOpen ? <PanelLeftClose className="h-4 w-4" /> : <PanelLeftOpen className="h-4 w-4" />}
           </button>
         </div>
 
-        <div className="min-h-0 flex-1 overflow-y-auto p-2">
+        <div className="min-h-0 flex-1 overflow-y-auto p-3">
           {sidebarOpen && (
-            <form onSubmit={createProjectFromForm} className="mb-3 border border-line bg-bg p-2">
-              <div className="mb-2 text-xs font-medium text-muted">New project</div>
-              <input name="name" placeholder="name" className="mb-2 h-8 w-full border border-line bg-panel px-2 text-sm outline-none focus:border-accent" />
-              <div className="mb-2 grid grid-cols-[82px_1fr] gap-2">
-                <select name="rootKey" className="h-8 border border-line bg-panel px-2 text-sm">
-                  {Object.keys(roots).map((root) => <option key={root}>{root}</option>)}
-                </select>
-                <input name="relativePath" placeholder="repo/path" className="h-8 border border-line bg-panel px-2 text-sm outline-none focus:border-accent" />
-              </div>
-              <select name="agentType" className="mb-2 h-8 w-full border border-line bg-panel px-2 text-sm">
-                {(Object.entries(AGENT_DEFAULTS) as Array<[string, { label: string }]>).map(([id, item]) => <option key={id} value={id}>{item.label}</option>)}
-              </select>
-              <button className="flex h-8 w-full items-center justify-center gap-2 bg-accent px-2 text-sm font-medium text-bg">
-                <Plus className="h-4 w-4" /> Create
+            <div className="mb-4">
+              <button
+                className="flex h-9 w-full items-center justify-between rounded-md border border-line bg-panel px-3 text-sm font-medium shadow-sm hover:bg-panel2"
+                onClick={() => setCreateOpen((value) => !value)}
+              >
+                <span className="flex items-center gap-2"><Plus className="h-4 w-4" /> New project</span>
+                <span className="text-xs text-muted">{createOpen ? 'Hide' : 'Create'}</span>
               </button>
-            </form>
+              {createOpen && (
+                <form onSubmit={createProjectFromForm} className="mt-2 rounded-lg border border-line bg-panel p-3 shadow-sm">
+                  <div className="mb-2 text-xs font-medium text-muted">Project details</div>
+                  <input name="name" placeholder="Name" className="mb-2 h-9 w-full rounded-md border border-line bg-bg px-3 text-sm outline-none focus:border-accent" />
+                  <div className="mb-2 grid grid-cols-[82px_1fr] gap-2">
+                    <select name="rootKey" className="h-9 rounded-md border border-line bg-bg px-2 text-sm">
+                      {Object.keys(roots).map((root) => <option key={root}>{root}</option>)}
+                    </select>
+                    <input name="relativePath" placeholder="Repo path" className="h-9 rounded-md border border-line bg-bg px-3 text-sm outline-none focus:border-accent" />
+                  </div>
+                  <select name="agentType" className="mb-3 h-9 w-full rounded-md border border-line bg-bg px-2 text-sm">
+                    {(Object.entries(AGENT_DEFAULTS) as Array<[string, { label: string }]>).map(([id, item]) => <option key={id} value={id}>{item.label}</option>)}
+                  </select>
+                  <button className="flex h-9 w-full items-center justify-center gap-2 rounded-md bg-accent px-3 text-sm font-medium text-bg">
+                    <Plus className="h-4 w-4" /> Create project
+                  </button>
+                </form>
+              )}
+            </div>
           )}
 
-          <div className="space-y-3">
+          <div className="space-y-4">
             {groups.map(([group, groupProjects]) => (
               <section key={group}>
-                {sidebarOpen && <div className="mb-1 px-1 text-[11px] uppercase text-muted">{group}</div>}
+                {sidebarOpen && <div className="mb-1.5 px-1 text-[11px] font-medium uppercase text-muted">{group}</div>}
                 <div className="space-y-1">
                   {groupProjects.map((project) => (
                     <button
                       key={project.id}
-                      className={cn('flex h-9 w-full items-center gap-2 px-2 text-left text-sm hover:bg-panel2', project.id === activeProject?.id && 'bg-panel2')}
+                      className={cn('flex h-9 w-full items-center gap-2 rounded-md px-2 text-left text-sm hover:bg-panel2', project.id === activeProject?.id && 'bg-panel2 shadow-sm')}
                       title={`${project.rootKey}/${project.relativePath}`}
                       onClick={() => {
                         setActiveProjectId(project.id);
@@ -271,20 +293,20 @@ export function TermagApp({ user, initialProjects, roots }: TermagAppProps) {
           </div>
         </div>
 
-        <div className="border-t border-line p-2">
-          <button className="flex h-9 w-full items-center gap-2 px-2 text-sm hover:bg-panel2" onClick={() => setPaletteOpen(true)}>
+        <div className="border-t border-line p-3">
+          <button className="flex h-9 w-full items-center gap-2 rounded-md px-2 text-sm hover:bg-panel2" onClick={() => setPaletteOpen(true)}>
             <CommandIcon className="h-4 w-4" />
-            {sidebarOpen && <span>Command</span>}
+            {sidebarOpen && <><span className="flex-1 text-left">Command</span><Kbd>⌘K</Kbd></>}
           </button>
-          <button className="flex h-9 w-full items-center gap-2 px-2 text-sm hover:bg-panel2" onClick={() => setSettingsOpen(true)}>
+          <button className="flex h-9 w-full items-center gap-2 rounded-md px-2 text-sm hover:bg-panel2" onClick={() => setSettingsOpen(true)}>
             <Settings className="h-4 w-4" />
-            {sidebarOpen && <span>Settings</span>}
+            {sidebarOpen && <><span className="flex-1 text-left">Settings</span><Kbd>⌘,</Kbd></>}
           </button>
         </div>
       </aside>
 
       <section className="flex min-w-0 flex-1 flex-col">
-        <header className="flex h-12 shrink-0 items-center justify-between border-b border-line bg-panel px-3">
+        <header className="flex h-14 shrink-0 items-center justify-between border-b border-line bg-panel px-4">
           <div className="min-w-0">
             <div className="flex items-center gap-2">
               <span className={cn('h-2 w-2 rounded-full', statusDot(agentConnected ? activeProject?.status : 'sleeping'))} />
@@ -295,29 +317,29 @@ export function TermagApp({ user, initialProjects, roots }: TermagAppProps) {
             </div>
           </div>
           <div className="flex items-center gap-1">
-            <button className="grid h-8 w-8 place-items-center hover:bg-panel2" title="Search" onClick={() => setSearchOpen(true)}><Search className="h-4 w-4" /></button>
-            <button className="grid h-8 w-8 place-items-center hover:bg-panel2" title="Toggle ctrl" onClick={() => setShowCtrl((value) => !value)}>
+            <IconButton title="Search scrollback (⌘⇧F)" onClick={() => setSearchOpen(true)}><Search className="h-4 w-4" /></IconButton>
+            <IconButton title="Toggle ctrl pane" onClick={() => setShowCtrl((value) => !value)}>
               {showCtrl ? <ChevronRight className="h-4 w-4" /> : <ChevronLeft className="h-4 w-4" />}
-            </button>
-            <button className="grid h-8 w-8 place-items-center hover:bg-panel2" title="Theme" onClick={cycleTheme}>
+            </IconButton>
+            <IconButton title="Cycle theme (⌘.)" onClick={cycleTheme}>
               {theme === 'light' ? <Sun className="h-4 w-4" /> : theme === 'dark' ? <Moon className="h-4 w-4" /> : <Monitor className="h-4 w-4" />}
-            </button>
+            </IconButton>
           </div>
         </header>
 
         {activeProject && (
-          <div className="flex h-10 shrink-0 items-center gap-1 border-b border-line bg-panel px-2">
+          <div className="flex h-12 shrink-0 items-center gap-1 border-b border-line bg-panel px-3">
             {activeProject.tabs.map((tab) => (
               <button
                 key={tab.id}
-                className={cn('flex h-8 max-w-[180px] items-center gap-2 border border-transparent px-2 text-sm hover:bg-panel2', tab.id === activeTab?.id && 'border-line bg-panel2')}
+                className={cn('flex h-8 max-w-[180px] items-center gap-2 rounded-md border border-transparent px-2 text-sm hover:bg-panel2', tab.id === activeTab?.id && 'border-line bg-panel2 shadow-sm')}
                 onClick={() => setActiveTabId(tab.id)}
               >
                 <span className={cn('h-2 w-2 rounded-full', statusDot(agentConnected ? tab.status : 'sleeping'))} />
                 <span className="truncate">{tab.name}</span>
                 {activeProject.tabs.length > 1 && (
                   <span
-                    className="grid h-5 w-5 place-items-center text-muted hover:text-text"
+                    className="grid h-5 w-5 place-items-center rounded text-muted hover:bg-bg hover:text-text"
                     onClick={(event) => {
                       event.stopPropagation();
                       closeTab(activeProject.id, tab.id);
@@ -328,15 +350,17 @@ export function TermagApp({ user, initialProjects, roots }: TermagAppProps) {
                 )}
               </button>
             ))}
-            <button className="grid h-8 w-8 place-items-center hover:bg-panel2" onClick={() => createTab(activeProject.id)}><Plus className="h-4 w-4" /></button>
+            <button className="ml-1 flex h-8 items-center gap-2 rounded-md border border-line bg-panel px-2 text-sm hover:bg-panel2" title="New session (⌘N or ⌘T)" onClick={() => createTab(activeProject.id)}>
+              <Plus className="h-4 w-4" /><Kbd>⌘N</Kbd>
+            </button>
           </div>
         )}
 
-        <div className="flex min-h-0 flex-1">
+        <div className="flex min-h-0 flex-1 gap-3 bg-bg p-3">
           {activeTab?.session ? (
             <TerminalPane key={activeTab.session.id} active sessionId={activeTab.session.id} title={activeTab.name} status={agentConnected ? activeTab.session.status : 'sleeping'} />
           ) : (
-            <div className="grid flex-1 place-items-center text-sm text-muted">Create a project to open a terminal.</div>
+            <div className="grid flex-1 place-items-center rounded-lg border border-dashed border-line bg-panel text-sm text-muted">Create a project to open a session.</div>
           )}
           {showCtrl && ctrlSession && (
             <TerminalPane key={ctrlSession.id} active sessionId={ctrlSession.id} title="ctrl" status={agentConnected ? ctrlSession.status : 'sleeping'} />
@@ -389,8 +413,12 @@ function CommandPalette({
   if (!open) return null;
   return (
     <div className="fixed inset-0 z-50 bg-black/35 p-4" onClick={() => onOpenChange(false)}>
-      <Command className="mx-auto mt-[12vh] max-w-xl border border-line bg-panel shadow-2xl" onClick={(event) => event.stopPropagation()}>
-        <Command.Input className="h-12 w-full border-b border-line bg-transparent px-4 outline-none" placeholder="Jump to project or run command" />
+      <Command className="mx-auto mt-[12vh] max-w-xl overflow-hidden rounded-lg border border-line bg-panel shadow-2xl" onClick={(event) => event.stopPropagation()}>
+        <div className="flex items-center gap-2 border-b border-line px-3">
+          <CommandIcon className="h-4 w-4 text-muted" />
+          <Command.Input className="h-12 min-w-0 flex-1 bg-transparent text-sm outline-none" placeholder="Jump to project or run command" />
+          <Kbd>Esc</Kbd>
+        </div>
         <Command.List className="max-h-[420px] overflow-auto p-2">
           <Command.Empty className="px-3 py-6 text-sm text-muted">No results.</Command.Empty>
           <Command.Group heading="Projects">
@@ -398,22 +426,24 @@ function CommandPalette({
               <Command.Item
                 key={project.id}
                 value={`project ${project.name} ${project.relativePath}`}
-                className="flex cursor-pointer items-center gap-2 px-3 py-2 text-sm aria-selected:bg-panel2"
+                className="flex cursor-pointer items-center gap-2 rounded-md px-3 py-2 text-sm aria-selected:bg-panel2"
                 onSelect={() => {
                   onProject(project);
                   onOpenChange(false);
                 }}
               >
-                <TerminalSquare className="h-4 w-4" /> {project.name}
+                <TerminalSquare className="h-4 w-4 text-muted" />
+                <span className="flex-1">{project.name}</span>
+                <span className="text-xs text-muted">{project.rootKey}/{project.relativePath}</span>
               </Command.Item>
             ))}
           </Command.Group>
           <Command.Group heading="Commands">
-            <Command.Item className="flex cursor-pointer items-center gap-2 px-3 py-2 text-sm aria-selected:bg-panel2" onSelect={() => { onNewTab(); onOpenChange(false); }}><Plus className="h-4 w-4" /> New session</Command.Item>
-            <Command.Item className="flex cursor-pointer items-center gap-2 px-3 py-2 text-sm aria-selected:bg-panel2" onSelect={() => { onKill(); onOpenChange(false); }}><Trash2 className="h-4 w-4" /> Kill current session</Command.Item>
-            <Command.Item className="flex cursor-pointer items-center gap-2 px-3 py-2 text-sm aria-selected:bg-panel2" onSelect={() => { onTheme(); onOpenChange(false); }}><Moon className="h-4 w-4" /> Toggle theme</Command.Item>
-            <Command.Item className="flex cursor-pointer items-center gap-2 px-3 py-2 text-sm aria-selected:bg-panel2" onSelect={() => { onSettings(); onOpenChange(false); }}><Settings className="h-4 w-4" /> Settings</Command.Item>
-            <Command.Item className="flex cursor-pointer items-center gap-2 px-3 py-2 text-sm aria-selected:bg-panel2" onSelect={() => signOut({ callbackUrl: '/login' })}><LogOut className="h-4 w-4" /> Sign out</Command.Item>
+            <Command.Item className="flex cursor-pointer items-center gap-2 rounded-md px-3 py-2 text-sm aria-selected:bg-panel2" onSelect={() => { onNewTab(); onOpenChange(false); }}><Plus className="h-4 w-4 text-muted" /> <span className="flex-1">New session</span><Kbd>⌘N</Kbd></Command.Item>
+            <Command.Item className="flex cursor-pointer items-center gap-2 rounded-md px-3 py-2 text-sm aria-selected:bg-panel2" onSelect={() => { onKill(); onOpenChange(false); }}><Trash2 className="h-4 w-4 text-muted" /> <span className="flex-1">Kill current session</span></Command.Item>
+            <Command.Item className="flex cursor-pointer items-center gap-2 rounded-md px-3 py-2 text-sm aria-selected:bg-panel2" onSelect={() => { onTheme(); onOpenChange(false); }}><Moon className="h-4 w-4 text-muted" /> <span className="flex-1">Toggle theme</span><Kbd>⌘.</Kbd></Command.Item>
+            <Command.Item className="flex cursor-pointer items-center gap-2 rounded-md px-3 py-2 text-sm aria-selected:bg-panel2" onSelect={() => { onSettings(); onOpenChange(false); }}><Settings className="h-4 w-4 text-muted" /> <span className="flex-1">Settings</span><Kbd>⌘,</Kbd></Command.Item>
+            <Command.Item className="flex cursor-pointer items-center gap-2 rounded-md px-3 py-2 text-sm aria-selected:bg-panel2" onSelect={() => signOut({ callbackUrl: '/login' })}><LogOut className="h-4 w-4 text-muted" /> <span className="flex-1">Sign out</span></Command.Item>
           </Command.Group>
         </Command.List>
       </Command>
@@ -439,11 +469,15 @@ function SearchPalette({ open, onOpenChange }: { open: boolean; onOpenChange: (o
   if (!open) return null;
   return (
     <div className="fixed inset-0 z-50 bg-black/35 p-4" onClick={() => onOpenChange(false)}>
-      <div className="mx-auto mt-[12vh] max-w-2xl border border-line bg-panel shadow-2xl" onClick={(event) => event.stopPropagation()}>
-        <input className="h-12 w-full border-b border-line bg-transparent px-4 outline-none" autoFocus placeholder="Search terminal scrollback" value={query} onChange={(event) => setQuery(event.target.value)} />
+      <div className="mx-auto mt-[12vh] max-w-2xl overflow-hidden rounded-lg border border-line bg-panel shadow-2xl" onClick={(event) => event.stopPropagation()}>
+        <div className="flex items-center gap-2 border-b border-line px-3">
+          <Search className="h-4 w-4 text-muted" />
+          <input className="h-12 min-w-0 flex-1 bg-transparent text-sm outline-none" autoFocus placeholder="Search terminal scrollback" value={query} onChange={(event) => setQuery(event.target.value)} />
+          <Kbd>Esc</Kbd>
+        </div>
         <div className="max-h-[440px] overflow-auto p-2">
           {results.length === 0 ? <div className="px-3 py-6 text-sm text-muted">No results.</div> : results.map((result) => (
-            <div key={result.id} className="border-b border-line px-3 py-2 last:border-0">
+            <div key={result.id} className="rounded-md px-3 py-2 hover:bg-panel2">
               <div className="mb-1 text-xs text-muted">{result.projectName} / {result.tabName}</div>
               <pre className="whitespace-pre-wrap font-mono text-xs leading-5">{result.excerpt}</pre>
             </div>
@@ -493,7 +527,7 @@ function SettingsDialog({
   if (!open) return null;
   return (
     <div className="fixed inset-0 z-50 bg-black/35 p-4" onClick={() => onOpenChange(false)}>
-      <section className="mx-auto mt-[10vh] max-w-xl border border-line bg-panel p-4 shadow-2xl" onClick={(event) => event.stopPropagation()}>
+      <section className="mx-auto mt-[10vh] max-w-xl rounded-lg border border-line bg-panel p-4 shadow-2xl" onClick={(event) => event.stopPropagation()}>
         <div className="mb-4 flex items-center justify-between">
           <div>
             <h2 className="text-base font-semibold">Settings</h2>
@@ -504,8 +538,8 @@ function SettingsDialog({
           </span>
         </div>
         <form onSubmit={createTokenFromForm} className="mb-4 flex gap-2">
-          <input name="name" placeholder="token name" className="h-9 min-w-0 flex-1 border border-line bg-bg px-2 text-sm outline-none focus:border-accent" />
-          <button className="h-9 bg-accent px-3 text-sm font-medium text-bg">Create token</button>
+          <input name="name" placeholder="Token name" className="h-9 min-w-0 flex-1 rounded-md border border-line bg-bg px-3 text-sm outline-none focus:border-accent" />
+          <button className="h-9 rounded-md bg-accent px-3 text-sm font-medium text-bg">Create token</button>
         </form>
         {createdToken && (
           <div className="mb-4 border border-warn bg-warn/10 p-3">
@@ -515,13 +549,13 @@ function SettingsDialog({
         )}
         <div className="space-y-2">
           {tokens.map((token) => (
-            <div key={token.id} className="flex items-center justify-between border border-line bg-bg px-3 py-2 text-sm">
+            <div key={token.id} className="flex items-center justify-between rounded-md border border-line bg-bg px-3 py-2 text-sm">
               <div>
                 <div>{token.name}</div>
                 <div className="text-xs text-muted">{token.tokenPrefix}</div>
               </div>
               <button
-                className="grid h-8 w-8 place-items-center text-muted hover:bg-panel2 hover:text-bad"
+                className="grid h-8 w-8 place-items-center rounded-md text-muted hover:bg-panel2 hover:text-bad"
                 onClick={async () => {
                   await fetch(`/api/agent-tokens/${token.id}`, { method: 'DELETE' });
                   setTokens((items) => items.filter((item) => item.id !== token.id));
@@ -534,5 +568,21 @@ function SettingsDialog({
         </div>
       </section>
     </div>
+  );
+}
+
+function Kbd({ children }: { children: ReactNode }) {
+  return (
+    <kbd className="rounded border border-line bg-bg px-1.5 py-0.5 font-sans text-[11px] leading-none text-muted shadow-sm">
+      {children}
+    </kbd>
+  );
+}
+
+function IconButton({ children, title, onClick }: { children: ReactNode; title: string; onClick: () => void }) {
+  return (
+    <button className="grid h-8 w-8 place-items-center rounded-md hover:bg-panel2" title={title} onClick={onClick}>
+      {children}
+    </button>
   );
 }

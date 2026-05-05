@@ -92,8 +92,8 @@ async function ensureProject(user, data) {
 async function main() {
   const user = await prisma.user.upsert({
     where: { email: PREVIEW_EMAIL },
-    update: { displayName: 'Preview User', theme: 'dark' },
-    create: { email: PREVIEW_EMAIL, displayName: 'Preview User', theme: 'dark' }
+    update: { displayName: 'Preview User', theme: 'light' },
+    create: { email: PREVIEW_EMAIL, displayName: 'Preview User', theme: 'light' }
   });
 
   await prisma.agentToken.upsert({
