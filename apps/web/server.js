@@ -4,11 +4,12 @@ const { WebSocketServer, WebSocket } = require('ws');
 const { PrismaClient } = require('@prisma/client');
 const { getToken } = require('next-auth/jwt');
 const crypto = require('node:crypto');
+const path = require('node:path');
 
 const dev = process.env.NODE_ENV !== 'production';
 const hostname = process.env.HOSTNAME || '0.0.0.0';
 const port = Number(process.env.PORT || 3000);
-const app = next({ dev, hostname, port });
+const app = next({ dev, hostname, port, dir: path.resolve(__dirname) });
 const handle = app.getRequestHandler();
 const prisma = new PrismaClient();
 
