@@ -10,7 +10,8 @@
     "typecheck": "tsc --noEmit",
     "db:generate": "prisma generate",
     "db:migrate": "prisma migrate dev",
-    "db:deploy": "prisma migrate deploy"
+    "db:deploy": "prisma migrate deploy",
+    "preview:seed": "node scripts/seed-preview.js"
   },
   "dependencies": {
     "@prisma/client": "^5.22.0",

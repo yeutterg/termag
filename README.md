@@ -115,6 +115,33 @@ TERMAG_AGENT_ROOTS='{"WIP":"~/WIP"}' \
 npm run agent
 ```
 
+## Local UI Preview
+
+To preview the UI without Google OAuth or a real tmux laptop agent:
+
+```bash
+DATABASE_URL='file:./dev.db' npm run preview:seed -w apps/web
+
+PORT=3000 \
+DATABASE_URL='file:./dev.db' \
+NEXTAUTH_SECRET='dev-secret' \
+NEXTAUTH_URL='http://localhost:3000' \
+TERMAG_DEV_AUTH='true' \
+TERMAG_DEV_AUTH_EMAIL='preview@termag.local' \
+TERMAG_ROOTS='{"WIP":"~/WIP"}' \
+npm run dev -w apps/web
+```
+
+In a second shell:
+
+```bash
+TERMAG_URL='ws://localhost:3000/api/ws/agent' \
+TERMAG_AGENT_TOKEN='tmag_preview_local_agent_token' \
+npm run fake -w apps/agent
+```
+
+Open `http://localhost:3000/login` and use **Dev preview login**. The seeded preview user has sample projects, tabs, scrollback, and a fake connected agent that streams terminal output.
+
 ## UX Surface
 
 - Sidebar project creation and grouped project list.
