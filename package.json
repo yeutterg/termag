@@ -1,0 +1,22 @@
+{
+  "name": "termag",
+  "private": true,
+  "version": "0.1.0",
+  "workspaces": [
+    "apps/web",
+    "apps/agent"
+  ],
+  "scripts": {
+    "dev": "npm run dev -w apps/web",
+    "build": "npm run build -w apps/web && npm run build -w apps/agent",
+    "start": "npm run start -w apps/web",
+    "agent": "npm run dev -w apps/agent",
+    "db:generate": "npm run db:generate -w apps/web",
+    "db:migrate": "npm run db:migrate -w apps/web",
+    "lint": "npm run lint -w apps/web && npm run lint -w apps/agent",
+    "typecheck": "npm run typecheck -w apps/web && npm run typecheck -w apps/agent"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

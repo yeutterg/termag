@@ -1,0 +1,108 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id          String   @id @default(cuid())
+  email       String   @unique
+  displayName String?
+  image       String?
+  theme       String   @default("system")
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  projects    Project[]
+  agentTokens AgentToken[]
+}
+
+model AgentToken {
+  id          String    @id @default(cuid())
+  name        String
+  tokenHash   String    @unique
+  tokenPrefix String
+  createdAt   DateTime  @default(now())
+  lastUsedAt  DateTime?
+  revokedAt   DateTime?
+
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+model Project {
+  id                String   @id @default(cuid())
+  name              String
+  rootKey           String
+  relativePath      String
+  agentType         String
+  agentSpawnCommand String
+  ctrlSpawnCommand  String   @default("$SHELL")
+  status            String   @default("sleeping")
+  openedAt          DateTime @default(now())
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  tabs     Tab[]
+  sessions Session[]
+
+  @@unique([userId, name])
+  @@index([userId, openedAt])
+}
+
+model Tab {
+  id        String   @id @default(cuid())
+  name      String
+  ordinal   Int
+  status    String   @default("sleeping")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  projectId String
+  project   Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  session Session?
+
+  @@unique([projectId, ordinal])
+  @@index([projectId])
+}
+
+model Session {
+  id          String   @id @default(cuid())
+  kind        String
+  tmuxName    String   @unique
+  status      String   @default("sleeping")
+  lastSeenAt  DateTime?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  projectId String
+  project   Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  tabId String? @unique
+  tab   Tab?    @relation(fields: [tabId], references: [id], onDelete: Cascade)
+
+  scrollback ScrollbackChunk[]
+
+  @@index([projectId, kind])
+}
+
+model ScrollbackChunk {
+  id        String   @id @default(cuid())
+  data      String
+  lineCount Int
+  createdAt DateTime @default(now())
+
+  sessionId String
+  session   Session @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@index([sessionId, createdAt])
+}

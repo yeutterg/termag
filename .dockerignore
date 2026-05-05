@@ -1,0 +1,9 @@
+node_modules
+.next
+dist
+.git
+*.db
+*.log
+.env
+.env.*
+!*.example

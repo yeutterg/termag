@@ -1,0 +1,66 @@
+@import "@xterm/xterm/css/xterm.css";
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --bg: 210 18% 96%;
+  --panel: 0 0% 100%;
+  --panel-2: 210 18% 93%;
+  --line: 214 14% 83%;
+  --text: 220 22% 12%;
+  --muted: 215 11% 43%;
+  --accent: 199 86% 45%;
+  --good: 145 58% 38%;
+  --warn: 42 91% 48%;
+  --bad: 3 76% 56%;
+  --work: 213 92% 58%;
+}
+
+.dark {
+  --bg: 220 18% 8%;
+  --panel: 220 16% 11%;
+  --panel-2: 220 14% 15%;
+  --line: 220 12% 22%;
+  --text: 210 18% 91%;
+  --muted: 216 10% 57%;
+  --accent: 190 88% 55%;
+  --good: 142 58% 50%;
+  --warn: 43 92% 56%;
+  --bad: 4 84% 63%;
+  --work: 214 94% 63%;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  height: 100%;
+  overflow: hidden;
+}
+
+body {
+  margin: 0;
+  background: hsl(var(--bg));
+  color: hsl(var(--text));
+  font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+  letter-spacing: 0;
+}
+
+button,
+input,
+select {
+  font: inherit;
+}
+
+.xterm {
+  height: 100%;
+  padding: 10px;
+}
+
+.xterm .xterm-viewport {
+  background: transparent !important;
+}
