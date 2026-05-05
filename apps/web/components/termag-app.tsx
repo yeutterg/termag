@@ -69,6 +69,11 @@ export function TermagApp({ user, initialProjects, roots }: TermagAppProps) {
   const [createOpen, setCreateOpen] = useState(false);
   const [agentConnected, setAgentConnected] = useState(false);
   const [theme, setTheme] = useState(user.theme);
+  const [tabHistoryByProject, setTabHistoryByProject] = useState<Record<string, string[]>>(() => {
+    const project = initialProjects[0];
+    const tab = project?.tabs[0];
+    return project && tab ? { [project.id]: [tab.id] } : {};
+  });
   const activeProjectIdRef = useRef(activeProjectId);
   const activeTabIdRef = useRef(activeTabId);
 
@@ -113,6 +118,10 @@ export function TermagApp({ user, initialProjects, roots }: TermagAppProps) {
         event.preventDefault();
         setSearchOpen(true);
       }
+      if (event.ctrlKey && event.key === 'Tab') {
+        event.preventDefault();
+        switchRecentTab(event.shiftKey);
+      }
       if (mod && event.key === '\\') {
         event.preventDefault();
         setSidebarOpen((value) => !value);
@@ -140,8 +149,8 @@ export function TermagApp({ user, initialProjects, roots }: TermagAppProps) {
         setSettingsOpen(true);
       }
     };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
+    window.addEventListener('keydown', onKey, true);
+    return () => window.removeEventListener('keydown', onKey, true);
   });
 
   useEffect(() => {
@@ -166,6 +175,7 @@ export function TermagApp({ user, initialProjects, roots }: TermagAppProps) {
     setActiveProjectId(project?.id || '');
     const tab = project?.tabs.find((item: Tab) => item.id === desiredTabId) ?? project?.tabs[0];
     setActiveTabId(tab?.id || '');
+    if (project?.id && tab?.id && nextTabId) rememberTab(project.id, tab.id);
   }
 
   async function createProject(formData: FormData) {
@@ -203,8 +213,40 @@ export function TermagApp({ user, initialProjects, roots }: TermagAppProps) {
     const project = projects.find((item) => item.id === projectId);
     if (!project || project.tabs.length <= 1) return;
     await fetch(`/api/projects/${projectId}/tabs/${tabId}`, { method: 'DELETE' });
-    const nextTab = project.tabs.find((tab) => tab.id !== tabId);
-    await reloadProjects(projectId, nextTab?.id);
+    const nextTabId = activeTabIdRef.current === tabId ? nextRecentTabId(project, tabId) : activeTabIdRef.current;
+    await reloadProjects(projectId, nextTabId);
+  }
+
+  function rememberTab(projectId: string, tabId: string) {
+    setTabHistoryByProject((current) => ({
+      ...current,
+      [projectId]: [tabId, ...(current[projectId] ?? []).filter((id) => id !== tabId)]
+    }));
+  }
+
+  function tabHistoryForProject(project: Project) {
+    const tabIds = project.tabs.map((tab) => tab.id);
+    const remembered = (tabHistoryByProject[project.id] ?? []).filter((id) => tabIds.includes(id));
+    return [...remembered, ...tabIds.filter((id) => !remembered.includes(id))];
+  }
+
+  function nextRecentTabId(project: Project, excludedTabId?: string) {
+    return tabHistoryForProject(project).find((id) => id !== excludedTabId) ?? project.tabs.find((tab) => tab.id !== excludedTabId)?.id;
+  }
+
+  function selectTab(projectId: string, tabId: string) {
+    setActiveProjectId(projectId);
+    setActiveTabId(tabId);
+    rememberTab(projectId, tabId);
+  }
+
+  function switchRecentTab(reverse: boolean) {
+    if (!activeProject) return;
+    const history = tabHistoryForProject(activeProject);
+    if (history.length <= 1) return;
+    const currentIndex = Math.max(0, history.indexOf(activeTab?.id ?? activeTabIdRef.current));
+    const nextIndex = reverse ? (currentIndex - 1 + history.length) % history.length : (currentIndex + 1) % history.length;
+    selectTab(activeProject.id, history[nextIndex]);
   }
 
   async function cycleTheme() {
@@ -278,8 +320,9 @@ export function TermagApp({ user, initialProjects, roots }: TermagAppProps) {
                       className={cn('flex h-9 w-full items-center gap-2 rounded-md px-2 text-left text-sm hover:bg-panel2', project.id === activeProject?.id && 'bg-panel2 shadow-sm')}
                       title={`${project.rootKey}/${project.relativePath}`}
                       onClick={() => {
-                        setActiveProjectId(project.id);
-                        setActiveTabId(project.tabs[0]?.id ?? '');
+                        const tabId = project.tabs[0]?.id;
+                        if (tabId) selectTab(project.id, tabId);
+                        else setActiveProjectId(project.id);
                       }}
                     >
                       <span className={cn('h-2 w-2 rounded-full', statusDot(agentConnected ? project.status : 'sleeping'))} />
@@ -339,7 +382,7 @@ export function TermagApp({ user, initialProjects, roots }: TermagAppProps) {
               <button
                 key={tab.id}
                 className={cn('flex h-8 max-w-[180px] items-center gap-2 rounded-md border border-transparent px-2 text-sm hover:bg-panel2', tab.id === activeTab?.id && 'border-line bg-panel2 shadow-sm')}
-                onClick={() => setActiveTabId(tab.id)}
+                onClick={() => selectTab(activeProject.id, tab.id)}
               >
                 <span className={cn('h-2 w-2 rounded-full', statusDot(agentConnected ? tab.status : 'sleeping'))} />
                 <span className="truncate">{tab.name}</span>
@@ -379,8 +422,9 @@ export function TermagApp({ user, initialProjects, roots }: TermagAppProps) {
         onOpenChange={setPaletteOpen}
         projects={projects}
         onProject={(project) => {
-          setActiveProjectId(project.id);
-          setActiveTabId(project.tabs[0]?.id ?? '');
+          const tabId = project.tabs[0]?.id;
+          if (tabId) selectTab(project.id, tabId);
+          else setActiveProjectId(project.id);
         }}
         onNewTab={() => activeProject && createTab(activeProject.id)}
         onKill={() => {
