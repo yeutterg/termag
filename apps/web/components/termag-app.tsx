@@ -117,7 +117,13 @@ export function TermagApp({ user, initialProjects, roots }: TermagAppProps) {
         event.preventDefault();
         setSidebarOpen((value) => !value);
       }
-      if (mod && ['n', 't'].includes(event.key.toLowerCase())) {
+      if (mod && event.altKey && event.key.toLowerCase() === 'n') {
+        event.preventDefault();
+        setSidebarOpen(true);
+        setCreateOpen((value) => !value);
+        return;
+      }
+      if (mod && event.altKey && event.key.toLowerCase() === 't') {
         event.preventDefault();
         if (activeProject) createTab(activeProject.id);
       }
@@ -129,7 +135,7 @@ export function TermagApp({ user, initialProjects, roots }: TermagAppProps) {
         event.preventDefault();
         cycleTheme();
       }
-      if (mod && event.key === ',') {
+      if (mod && event.key === ';') {
         event.preventDefault();
         setSettingsOpen(true);
       }
@@ -238,17 +244,17 @@ export function TermagApp({ user, initialProjects, roots }: TermagAppProps) {
                 onClick={() => setCreateOpen((value) => !value)}
               >
                 <span className="flex items-center gap-2"><Plus className="h-4 w-4" /> New project</span>
-                <span className="text-xs text-muted">{createOpen ? 'Hide' : 'Create'}</span>
+                <Kbd>⌥⌘N</Kbd>
               </button>
               {createOpen && (
                 <form onSubmit={createProjectFromForm} className="mt-2 rounded-lg border border-line bg-panel p-3 shadow-sm">
                   <div className="mb-2 text-xs font-medium text-muted">Project details</div>
                   <input name="name" placeholder="Name" className="mb-2 h-9 w-full rounded-md border border-line bg-bg px-3 text-sm outline-none focus:border-accent" />
-                  <div className="mb-2 grid grid-cols-[82px_1fr] gap-2">
-                    <select name="rootKey" className="h-9 rounded-md border border-line bg-bg px-2 text-sm">
+                  <div className="mb-2 grid grid-cols-[72px_150px] gap-2">
+                    <select name="rootKey" className="h-9 min-w-0 rounded-md border border-line bg-bg px-2 text-sm">
                       {Object.keys(roots).map((root) => <option key={root}>{root}</option>)}
                     </select>
-                    <input name="relativePath" placeholder="Repo path" className="h-9 rounded-md border border-line bg-bg px-3 text-sm outline-none focus:border-accent" />
+                    <input name="relativePath" placeholder="Repo path" className="h-9 min-w-0 rounded-md border border-line bg-bg px-3 text-sm outline-none focus:border-accent" />
                   </div>
                   <select name="agentType" className="mb-3 h-9 w-full rounded-md border border-line bg-bg px-2 text-sm">
                     {(Object.entries(AGENT_DEFAULTS) as Array<[string, { label: string }]>).map(([id, item]) => <option key={id} value={id}>{item.label}</option>)}
@@ -300,7 +306,7 @@ export function TermagApp({ user, initialProjects, roots }: TermagAppProps) {
           </button>
           <button className="flex h-9 w-full items-center gap-2 rounded-md px-2 text-sm hover:bg-panel2" onClick={() => setSettingsOpen(true)}>
             <Settings className="h-4 w-4" />
-            {sidebarOpen && <><span className="flex-1 text-left">Settings</span><Kbd>⌘,</Kbd></>}
+            {sidebarOpen && <><span className="flex-1 text-left">Settings</span><Kbd>⌘;</Kbd></>}
           </button>
         </div>
       </aside>
@@ -350,8 +356,8 @@ export function TermagApp({ user, initialProjects, roots }: TermagAppProps) {
                 )}
               </button>
             ))}
-            <button className="ml-1 flex h-8 items-center gap-2 rounded-md border border-line bg-panel px-2 text-sm hover:bg-panel2" title="New session (⌘N or ⌘T)" onClick={() => createTab(activeProject.id)}>
-              <Plus className="h-4 w-4" /><Kbd>⌘N</Kbd>
+            <button className="ml-1 flex h-8 items-center gap-2 rounded-md border border-line bg-panel px-2 text-sm hover:bg-panel2" title="New session (⌥⌘T)" onClick={() => createTab(activeProject.id)}>
+              <Plus className="h-4 w-4" /><Kbd>⌥⌘T</Kbd>
             </button>
           </div>
         )}
@@ -413,10 +419,10 @@ function CommandPalette({
   if (!open) return null;
   return (
     <div className="fixed inset-0 z-50 bg-black/35 p-4" onClick={() => onOpenChange(false)}>
-      <Command className="mx-auto mt-[12vh] max-w-xl overflow-hidden rounded-lg border border-line bg-panel shadow-2xl" onClick={(event) => event.stopPropagation()}>
+      <Command loop className="mx-auto mt-[12vh] max-w-xl overflow-hidden rounded-lg border border-line bg-panel shadow-2xl" onClick={(event) => event.stopPropagation()}>
         <div className="flex items-center gap-2 border-b border-line px-3">
           <CommandIcon className="h-4 w-4 text-muted" />
-          <Command.Input className="h-12 min-w-0 flex-1 bg-transparent text-sm outline-none" placeholder="Jump to project or run command" />
+          <Command.Input autoFocus className="h-12 min-w-0 flex-1 bg-transparent text-sm outline-none" placeholder="Jump to project or run command" />
           <Kbd>Esc</Kbd>
         </div>
         <Command.List className="max-h-[420px] overflow-auto p-2">
@@ -439,10 +445,10 @@ function CommandPalette({
             ))}
           </Command.Group>
           <Command.Group heading="Commands">
-            <Command.Item className="flex cursor-pointer items-center gap-2 rounded-md px-3 py-2 text-sm aria-selected:bg-panel2" onSelect={() => { onNewTab(); onOpenChange(false); }}><Plus className="h-4 w-4 text-muted" /> <span className="flex-1">New session</span><Kbd>⌘N</Kbd></Command.Item>
+            <Command.Item className="flex cursor-pointer items-center gap-2 rounded-md px-3 py-2 text-sm aria-selected:bg-panel2" onSelect={() => { onNewTab(); onOpenChange(false); }}><Plus className="h-4 w-4 text-muted" /> <span className="flex-1">New session</span><Kbd>⌥⌘T</Kbd></Command.Item>
             <Command.Item className="flex cursor-pointer items-center gap-2 rounded-md px-3 py-2 text-sm aria-selected:bg-panel2" onSelect={() => { onKill(); onOpenChange(false); }}><Trash2 className="h-4 w-4 text-muted" /> <span className="flex-1">Kill current session</span></Command.Item>
             <Command.Item className="flex cursor-pointer items-center gap-2 rounded-md px-3 py-2 text-sm aria-selected:bg-panel2" onSelect={() => { onTheme(); onOpenChange(false); }}><Moon className="h-4 w-4 text-muted" /> <span className="flex-1">Toggle theme</span><Kbd>⌘.</Kbd></Command.Item>
-            <Command.Item className="flex cursor-pointer items-center gap-2 rounded-md px-3 py-2 text-sm aria-selected:bg-panel2" onSelect={() => { onSettings(); onOpenChange(false); }}><Settings className="h-4 w-4 text-muted" /> <span className="flex-1">Settings</span><Kbd>⌘,</Kbd></Command.Item>
+            <Command.Item className="flex cursor-pointer items-center gap-2 rounded-md px-3 py-2 text-sm aria-selected:bg-panel2" onSelect={() => { onSettings(); onOpenChange(false); }}><Settings className="h-4 w-4 text-muted" /> <span className="flex-1">Settings</span><Kbd>⌘;</Kbd></Command.Item>
             <Command.Item className="flex cursor-pointer items-center gap-2 rounded-md px-3 py-2 text-sm aria-selected:bg-panel2" onSelect={() => signOut({ callbackUrl: '/login' })}><LogOut className="h-4 w-4 text-muted" /> <span className="flex-1">Sign out</span></Command.Item>
           </Command.Group>
         </Command.List>
