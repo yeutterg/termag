@@ -32,11 +32,12 @@ export function parseRoots(value = process.env.TERMAG_ROOTS): Record<string, str
 export function normalizeRelativePath(input: string): string {
   return input
     .trim()
-    .replace(/^~?\//, '')
     .replace(/\\/g, '/')
+    .replace(/^~/, '')
+    .replace(/\.\./g, '')
     .replace(/\/+/g, '/')
     .replace(/^\.\//, '')
-    .replace(/\.\./g, '')
+    .replace(/^\/+/, '')
     .replace(/\/$/, '');
 }
 

@@ -1,4 +1,5 @@
 const http = require('node:http');
+const fs = require('node:fs');
 const next = require('next');
 const { WebSocketServer, WebSocket } = require('ws');
 const { PrismaClient } = require('@prisma/client');
@@ -12,6 +13,50 @@ const port = Number(process.env.PORT || 3000);
 const app = next({ dev, hostname, port, dir: path.resolve(__dirname) });
 const handle = app.getRequestHandler();
 const prisma = new PrismaClient();
+const pidFile = path.join(__dirname, '.termag-server.json');
+let httpServer;
+
+function writePidFile() {
+  fs.writeFileSync(
+    pidFile,
+    JSON.stringify(
+      {
+        pid: process.pid,
+        dev,
+        hostname,
+        port,
+        startedAt: new Date().toISOString()
+      },
+      null,
+      2
+    )
+  );
+}
+
+function removePidFile() {
+  try {
+    const info = JSON.parse(fs.readFileSync(pidFile, 'utf8'));
+    if (info.pid !== process.pid) return;
+  } catch (err) {
+    if (err.code === 'ENOENT') return;
+  }
+  fs.rmSync(pidFile, { force: true });
+}
+
+function shutdown() {
+  removePidFile();
+  if (!httpServer) {
+    process.exit(0);
+    return;
+  }
+  httpServer.close(() => process.exit(0));
+  setTimeout(() => process.exit(0), 5000).unref();
+}
+
+process.once('exit', removePidFile);
+process.once('SIGINT', shutdown);
+process.once('SIGTERM', shutdown);
+process.once('SIGHUP', shutdown);
 
 function hashToken(token) {
   return crypto.createHash('sha256').update(token).digest('hex');
@@ -19,6 +64,33 @@ function hashToken(token) {
 
 function lineCount(data) {
   return Math.max(1, (data.match(/\n/g) || []).length);
+}
+
+function parseCookieHeader(header) {
+  const cookies = {};
+  if (!header) return cookies;
+  const value = Array.isArray(header) ? header.join(';') : header;
+  for (const part of value.split(';')) {
+    const index = part.indexOf('=');
+    if (index === -1) continue;
+    const name = part.slice(0, index).trim();
+    if (!name) continue;
+    const rawCookieValue = part.slice(index + 1).trim();
+    try {
+      cookies[name] = decodeURIComponent(rawCookieValue);
+    } catch {
+      cookies[name] = rawCookieValue;
+    }
+  }
+  return cookies;
+}
+
+async function userIdFromRequest(req) {
+  const token = await getToken({
+    req: { headers: req.headers, cookies: parseCookieHeader(req.headers.cookie) },
+    secret: process.env.NEXTAUTH_SECRET
+  });
+  return token?.sub;
 }
 
 async function appendScrollback(sessionId, data) {
@@ -33,9 +105,10 @@ async function appendScrollback(sessionId, data) {
 
   let total = 0;
   const deleteIds = [];
-  for (const chunk of chunks) {
-    total += chunk.lineCount;
-    if (total > 10000) deleteIds.push(chunk.id);
+  // chunks[0] is the most recent; always keep it, even if it alone exceeds the cap.
+  for (let i = 0; i < chunks.length; i += 1) {
+    total += chunks[i].lineCount;
+    if (i > 0 && total > 10000) deleteIds.push(chunks[i].id);
   }
   if (deleteIds.length) {
     await prisma.scrollbackChunk.deleteMany({ where: { id: { in: deleteIds } } });
@@ -49,7 +122,9 @@ function sendJson(ws, msg) {
 }
 
 app.prepare().then(() => {
+  const handleUpgrade = app.getUpgradeHandler();
   const server = http.createServer((req, res) => handle(req, res));
+  httpServer = server;
   const wss = new WebSocketServer({ noServer: true });
 
   const agents = new Map();
@@ -129,6 +204,13 @@ app.prepare().then(() => {
     });
     broadcastStatus(record.userId, true);
 
+    // Re-attach any browser streams that were left orphaned by a prior agent disconnect.
+    for (const stream of browserStreams.values()) {
+      if (stream.userId === record.userId && !stream.attached && typeof stream.reattach === 'function') {
+        stream.reattach().catch(() => {});
+      }
+    }
+
     ws.on('message', async (raw) => {
       let msg;
       try {
@@ -156,6 +238,7 @@ app.prepare().then(() => {
       if (msg.type === 'terminal-exit' && msg.streamId) {
         const stream = browserStreams.get(msg.streamId);
         if (stream) {
+          stream.attached = false;
           sendJson(stream.ws, { type: 'exit' });
           await prisma.session.update({
             where: { id: stream.sessionId },
@@ -198,6 +281,12 @@ app.prepare().then(() => {
           clearTimeout(pending.timer);
           pending.reject(new Error('Agent disconnected'));
         }
+        for (const stream of browserStreams.values()) {
+          if (stream.userId === record.userId && stream.attached) {
+            stream.attached = false;
+            sendJson(stream.ws, { type: 'sleeping', message: 'Agent disconnected; reconnect termag-agent on your laptop.' });
+          }
+        }
         await prisma.project.updateMany({
           where: { userId: record.userId },
           data: { status: 'sleeping' }
@@ -218,8 +307,7 @@ app.prepare().then(() => {
   }
 
   async function registerBrowser(ws, req, url) {
-    const token = await getToken({ req, secret: process.env.NEXTAUTH_SECRET });
-    const userId = token?.sub;
+    const userId = await userIdFromRequest(req);
     if (!userId) {
       ws.close(1008, 'login required');
       return;
@@ -258,9 +346,17 @@ app.prepare().then(() => {
     for (const chunk of chunks) sendJson(ws, { type: 'output', data: chunk.data });
 
     const streamId = `stream_${nextRequestId()}`;
-    browserStreams.set(streamId, { ws, userId, sessionId });
-    let attached = false;
-    let attachPromise = null;
+    const stream = {
+      ws,
+      userId,
+      sessionId,
+      attached: false,
+      attachPromise: null,
+      cols,
+      rows,
+      reattach: () => attachToAgent()
+    };
+    browserStreams.set(streamId, stream);
 
     async function markSessionStatus(status) {
       await prisma.session.update({
@@ -275,9 +371,9 @@ app.prepare().then(() => {
     }
 
     async function attachToAgent() {
-      if (attached) return true;
-      if (attachPromise) return attachPromise;
-      attachPromise = (async () => {
+      if (stream.attached) return true;
+      if (stream.attachPromise) return stream.attachPromise;
+      stream.attachPromise = (async () => {
         try {
           await sendToAgent(userId, 'terminal-attach', {
             streamId,
@@ -286,23 +382,23 @@ app.prepare().then(() => {
             kind: session.kind,
             cwd: { rootKey: session.project.rootKey, relativePath: session.project.relativePath },
             spawnCommand: session.kind === 'ctrl' ? session.project.ctrlSpawnCommand : session.project.agentSpawnCommand,
-            cols,
-            rows
+            cols: stream.cols,
+            rows: stream.rows
           });
-          attached = true;
+          stream.attached = true;
           await markSessionStatus('idle');
           sendJson(ws, { type: 'ready' });
           return true;
         } catch (err) {
-          attached = false;
+          stream.attached = false;
           await markSessionStatus('sleeping');
           sendJson(ws, { type: 'sleeping', message: 'Agent offline; open termag-agent on your laptop to reconnect.' });
           return false;
         } finally {
-          attachPromise = null;
+          stream.attachPromise = null;
         }
       })();
-      return attachPromise;
+      return stream.attachPromise;
     }
 
     await attachToAgent();
@@ -318,8 +414,14 @@ app.prepare().then(() => {
         if (!(await attachToAgent())) return;
         sendToAgent(userId, 'terminal-input', { streamId, data: msg.data }, 1000).catch(() => {});
       }
-      if (msg.type === 'resize' && attached) {
-        sendToAgent(userId, 'terminal-resize', { streamId, cols: msg.cols, rows: msg.rows }, 1000).catch(() => {});
+      if (msg.type === 'resize') {
+        if (typeof msg.cols === 'number' && typeof msg.rows === 'number') {
+          stream.cols = msg.cols;
+          stream.rows = msg.rows;
+        }
+        if (stream.attached) {
+          sendToAgent(userId, 'terminal-resize', { streamId, cols: msg.cols, rows: msg.rows }, 1000).catch(() => {});
+        }
       }
       if (msg.type === 'kill' && agentForUser(userId)) {
         sendToAgent(userId, 'tmux-kill', { tmuxName: session.tmuxName }, 5000).catch(() => {});
@@ -327,8 +429,9 @@ app.prepare().then(() => {
     });
 
     ws.on('close', () => {
+      const wasAttached = stream.attached;
       browserStreams.delete(streamId);
-      if (attached) sendToAgent(userId, 'terminal-close', { streamId }, 1000).catch(() => {});
+      if (wasAttached) sendToAgent(userId, 'terminal-close', { streamId }, 1000).catch(() => {});
     });
   }
 
@@ -341,10 +444,27 @@ app.prepare().then(() => {
     }
   }
 
+  // Expose a tiny broker surface to Next.js route handlers (same Node process)
+  // so things like project/tab deletion can ask the laptop agent to kill tmux.
+  globalThis.termagBroker = {
+    isAgentOnline(userId) {
+      return Boolean(agentForUser(userId));
+    },
+    killTmux(userId, tmuxName, timeoutMs = 5000) {
+      if (!tmuxName || !agentForUser(userId)) return Promise.resolve(false);
+      return sendToAgent(userId, 'tmux-kill', { tmuxName }, timeoutMs)
+        .then(() => true)
+        .catch(() => false);
+    }
+  };
+
   server.on('upgrade', (req, socket, head) => {
     const url = new URL(req.url || '/', `http://${req.headers.host}`);
     if (!url.pathname.startsWith('/api/ws/')) {
-      socket.destroy();
+      handleUpgrade(req, socket, head).catch((err) => {
+        console.error('[next-upgrade]', err);
+        socket.destroy();
+      });
       return;
     }
     wss.handleUpgrade(req, socket, head, (ws) => {
@@ -368,6 +488,7 @@ app.prepare().then(() => {
   });
 
   server.listen(port, hostname, () => {
+    writePidFile();
     console.log(`termag listening on http://${hostname}:${port}`);
   });
 });
