@@ -5,28 +5,60 @@ import { mkdir } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
-import * as pty from 'node-pty';
 import WebSocket from 'ws';
 
 const execAsync = promisify(exec);
 
 type Json = Record<string, unknown>;
+type PtyModule = typeof import('node-pty');
 
-interface Stream {
-  pty: pty.IPty;
+interface RealStream {
+  kind: 'real';
+  pty: ReturnType<PtyModule['spawn']>;
   tmuxName: string;
 }
 
-const streams = new Map<string, Stream>();
+interface FakeStream {
+  kind: 'fake';
+  timer: ReturnType<typeof setInterval>;
+  tmuxName: string;
+}
 
-const termagUrl = process.env.TERMAG_URL;
-const token = process.env.TERMAG_AGENT_TOKEN;
-const reconnectMs = Number(process.env.TERMAG_RECONNECT_MS || 3000);
+type Stream = RealStream | FakeStream;
+
+const streams = new Map<string, Stream>();
+const isFake = process.env.TERMAG_AGENT_FAKE === 'true';
+const tag = isFake ? 'fake-agent' : 'agent';
+
+const termagUrl = process.env.TERMAG_URL || (isFake ? 'ws://localhost:3000/api/ws/agent' : undefined);
+const token = process.env.TERMAG_AGENT_TOKEN
+  || process.env.TERMAG_PREVIEW_AGENT_TOKEN
+  || (isFake ? 'tmag_preview_local_agent_token' : undefined);
+const baseReconnectMs = Number(process.env.TERMAG_RECONNECT_MS || 1000);
+const maxReconnectMs = Number(process.env.TERMAG_RECONNECT_MAX_MS || 30000);
 const roots = parseRoots(process.env.TERMAG_AGENT_ROOTS);
 
 if (!termagUrl || !token) {
   console.error('TERMAG_URL and TERMAG_AGENT_TOKEN are required.');
   process.exit(1);
+}
+
+let reconnectAttempts = 0;
+
+function nextReconnectDelay() {
+  const delay = baseReconnectMs * 2 ** Math.min(reconnectAttempts, 6);
+  return Math.min(maxReconnectMs, delay);
+}
+
+// node-pty is a native module; load it lazily so fake mode runs on machines
+// that can't compile it.
+let ptyModule: PtyModule | null = null;
+function getPty(): PtyModule {
+  if (!ptyModule) {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    ptyModule = require('node-pty') as PtyModule;
+  }
+  return ptyModule;
 }
 
 connect();
@@ -37,7 +69,8 @@ function connect() {
   const ws = new WebSocket(url);
 
   ws.on('open', () => {
-    console.log(`[agent] connected to ${url.origin}${url.pathname}`);
+    reconnectAttempts = 0;
+    console.log(`[${tag}] connected to ${url.origin}${url.pathname}`);
   });
 
   ws.on('message', async (raw) => {
@@ -58,7 +91,7 @@ function connect() {
           respond(ws, requestId, { ok: true });
           break;
         case 'terminal-input':
-          writeInput(msg);
+          writeInput(ws, msg);
           if (requestId) respond(ws, requestId, { ok: true });
           break;
         case 'terminal-resize':
@@ -70,7 +103,7 @@ function connect() {
           if (requestId) respond(ws, requestId, { ok: true });
           break;
         case 'tmux-kill':
-          await killTmux(String(msg.tmuxName || ''));
+          if (!isFake) await killTmux(String(msg.tmuxName || ''));
           if (requestId) respond(ws, requestId, { ok: true });
           break;
         case 'hello':
@@ -84,17 +117,23 @@ function connect() {
   });
 
   ws.on('close', () => {
-    console.log(`[agent] disconnected; reconnecting in ${reconnectMs}ms`);
+    const delay = nextReconnectDelay();
+    reconnectAttempts += 1;
+    console.log(`[${tag}] disconnected; reconnecting in ${delay}ms`);
     for (const streamId of [...streams.keys()]) closeStream(streamId);
-    setTimeout(connect, reconnectMs);
+    setTimeout(connect, delay);
   });
 
   ws.on('error', (err) => {
-    console.error(`[agent] ${err.message}`);
+    console.error(`[${tag}] ${err.message}`);
   });
 }
 
 async function handleAttach(ws: WebSocket, msg: Json) {
+  return isFake ? handleAttachFake(ws, msg) : handleAttachReal(ws, msg);
+}
+
+async function handleAttachReal(ws: WebSocket, msg: Json) {
   const streamId = String(msg.streamId || '');
   const tmuxName = String(msg.tmuxName || '');
   const spawnCommand = String(msg.spawnCommand || '$SHELL');
@@ -107,7 +146,9 @@ async function handleAttach(ws: WebSocket, msg: Json) {
   await mkdir(cwd, { recursive: true });
   await ensureTmuxSession(tmuxName, cwd, spawnCommand);
 
-  const term = pty.spawn('tmux', ['attach-session', '-t', tmuxName], {
+  closeStream(streamId);
+
+  const term = getPty().spawn('tmux', ['attach-session', '-t', tmuxName], {
     name: 'xterm-256color',
     cols,
     rows,
@@ -121,7 +162,7 @@ async function handleAttach(ws: WebSocket, msg: Json) {
     }
   });
 
-  streams.set(streamId, { pty: term, tmuxName });
+  streams.set(streamId, { kind: 'real', pty: term, tmuxName });
 
   term.onData((data) => {
     send(ws, { type: 'terminal-data', streamId, data });
@@ -131,6 +172,40 @@ async function handleAttach(ws: WebSocket, msg: Json) {
     streams.delete(streamId);
     send(ws, { type: 'terminal-exit', streamId });
   });
+}
+
+function handleAttachFake(ws: WebSocket, msg: Json) {
+  const streamId = String(msg.streamId || '');
+  const kind = String(msg.kind || 'agent');
+  const tmuxName = String(msg.tmuxName || 'termag-preview');
+  const cwd = msg.cwd as { rootKey?: string; relativePath?: string } | undefined;
+  if (!streamId) return;
+
+  closeStream(streamId);
+
+  send(ws, {
+    type: 'terminal-data',
+    streamId,
+    data: `\r\n[fake-agent] attached ${kind} ${tmuxName}\r\n[fake-agent] cwd ${cwd?.rootKey || 'WIP'}/${cwd?.relativePath || ''}\r\n$ `
+  });
+
+  let tick = 0;
+  const lines = [
+    'reading project context',
+    'checking git status',
+    'streaming terminal output',
+    'waiting for browser input',
+    'writing preview scrollback'
+  ];
+  const timer = setInterval(() => {
+    tick += 1;
+    send(ws, {
+      type: 'terminal-data',
+      streamId,
+      data: `\r\n[fake-agent] ${new Date().toLocaleTimeString()} ${lines[tick % lines.length]}\r\n$ `
+    });
+  }, 3500);
+  streams.set(streamId, { kind: 'fake', timer, tmuxName });
 }
 
 async function ensureTmuxSession(tmuxName: string, cwd: string, command: string) {
@@ -150,28 +225,45 @@ async function killTmux(tmuxName: string) {
   try {
     await execAsync(`tmux kill-session -t ${sh(tmuxName)}`);
   } catch {
-    // Already gone.
+    // already gone
   }
 }
 
-function writeInput(msg: Json) {
-  const stream = streams.get(String(msg.streamId || ''));
+function writeInput(ws: WebSocket, msg: Json) {
+  const streamId = String(msg.streamId || '');
+  const stream = streams.get(streamId);
   const data = typeof msg.data === 'string' ? msg.data : '';
-  if (stream && data) stream.pty.write(data);
+  if (!stream || !data) return;
+  if (stream.kind === 'real') {
+    stream.pty.write(data);
+    return;
+  }
+  // Fake mode: echo input back so the browser sees something happen.
+  const printable = data.replace(/\r/g, '\\r').replace(/\n/g, '\\n').replace(//g, 'Esc');
+  send(ws, { type: 'terminal-data', streamId, data: `${data}\r\n[fake-agent] received input: ${printable}\r\n$ ` });
 }
 
 function resize(msg: Json) {
   const stream = streams.get(String(msg.streamId || ''));
+  if (!stream || stream.kind !== 'real') return;
   const cols = Number(msg.cols || 0);
   const rows = Number(msg.rows || 0);
-  if (stream && cols > 0 && rows > 0) stream.pty.resize(cols, rows);
+  if (cols > 0 && rows > 0) stream.pty.resize(cols, rows);
 }
 
 function closeStream(streamId: string) {
   const stream = streams.get(streamId);
   if (!stream) return;
-  stream.pty.kill();
   streams.delete(streamId);
+  if (stream.kind === 'real') {
+    try {
+      stream.pty.kill();
+    } catch {
+      // already gone
+    }
+  } else {
+    clearInterval(stream.timer);
+  }
 }
 
 function resolveCwd(cwd?: Json) {
@@ -188,14 +280,15 @@ function resolveCwd(cwd?: Json) {
 }
 
 function parseRoots(raw?: string): Record<string, string> {
-  if (!raw) return { WIP: path.join(os.homedir(), 'WIP') };
+  const fallback = { WIP: path.join(os.homedir(), 'WIP') };
+  if (!raw) return fallback;
   try {
     const parsed = JSON.parse(raw) as Record<string, string>;
     return Object.keys(parsed).length
       ? Object.fromEntries(Object.entries(parsed).map(([key, value]) => [key, expandRoot(value)]))
-      : { WIP: path.join(os.homedir(), 'WIP') };
+      : fallback;
   } catch {
-    return { WIP: path.join(os.homedir(), 'WIP') };
+    return fallback;
   }
 }
 

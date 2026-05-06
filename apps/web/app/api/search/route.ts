@@ -1,9 +1,8 @@
 import { NextResponse } from 'next/server';
-import { requireUser } from '@/lib/auth';
+import { withAuth } from '@/lib/auth';
 import { prisma } from '@/lib/prisma';
 
-export async function GET(request: Request) {
-  const user = await requireUser();
+export const GET = withAuth(async (user, request: Request) => {
   const url = new URL(request.url);
   const q = url.searchParams.get('q')?.trim();
   if (!q) return NextResponse.json([]);
@@ -29,7 +28,7 @@ export async function GET(request: Request) {
     excerpt: excerpt(chunk.data, q),
     createdAt: chunk.createdAt
   })));
-}
+});
 
 function excerpt(data: string, q: string) {
   const idx = data.toLowerCase().indexOf(q.toLowerCase());

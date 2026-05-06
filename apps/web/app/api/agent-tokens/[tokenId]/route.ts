@@ -1,9 +1,8 @@
 import { NextResponse } from 'next/server';
-import { requireUser } from '@/lib/auth';
+import { withAuth } from '@/lib/auth';
 import { prisma } from '@/lib/prisma';
 
-export async function DELETE(_request: Request, { params }: { params: Promise<{ tokenId: string }> }) {
-  const user = await requireUser();
+export const DELETE = withAuth(async (user, _request: Request, { params }: { params: Promise<{ tokenId: string }> }) => {
   const { tokenId } = await params;
   const existing = await prisma.agentToken.findFirst({ where: { id: tokenId, userId: user.id } });
   if (!existing) return NextResponse.json({ error: 'Not found' }, { status: 404 });
@@ -12,4 +11,4 @@ export async function DELETE(_request: Request, { params }: { params: Promise<{ 
     data: { revokedAt: new Date() }
   });
   return NextResponse.json({ ok: true });
-}
+});

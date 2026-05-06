@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { z } from 'zod';
-import { requireUser } from '@/lib/auth';
+import { withAuth } from '@/lib/auth';
 import { prisma } from '@/lib/prisma';
 import { normalizeRelativePath, parseRoots } from '@/lib/defaults';
 import { killTmuxSessions } from '@/lib/broker';
@@ -12,8 +12,9 @@ const updateSchema = z.object({
   agentSpawnCommand: z.string().min(1).optional()
 });
 
-export async function PATCH(request: Request, { params }: { params: Promise<{ projectId: string }> }) {
-  const user = await requireUser();
+type Params = { params: Promise<{ projectId: string }> };
+
+export const PATCH = withAuth(async (user, request: Request, { params }: Params) => {
   const { projectId } = await params;
   const parsed = updateSchema.safeParse(await request.json().catch(() => null));
   if (!parsed.success) return NextResponse.json({ error: 'Invalid project payload' }, { status: 400 });
@@ -39,10 +40,9 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ pr
     }
     throw error;
   }
-}
+});
 
-export async function DELETE(_request: Request, { params }: { params: Promise<{ projectId: string }> }) {
-  const user = await requireUser();
+export const DELETE = withAuth(async (user, _request: Request, { params }: Params) => {
   const { projectId } = await params;
   const existing = await prisma.project.findFirst({
     where: { id: projectId, userId: user.id },
@@ -52,4 +52,4 @@ export async function DELETE(_request: Request, { params }: { params: Promise<{ 
   await prisma.project.delete({ where: { id: projectId } });
   await killTmuxSessions(user.id, existing.sessions.map((s) => s.tmuxName));
   return NextResponse.json({ ok: true });
-}
+});

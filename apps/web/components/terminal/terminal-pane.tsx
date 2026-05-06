@@ -1,20 +1,25 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import { memo, useEffect, useRef } from 'react';
 import type { Terminal as XTerm } from '@xterm/xterm';
+import { cn, statusDot } from '@/lib/utils';
 
 interface TerminalPaneProps {
   sessionId: string;
   active: boolean;
   title: string;
   status?: string;
+  onTitleChange?: (sessionId: string, title: string) => void;
 }
 
-export function TerminalPane({ sessionId, active, title, status }: TerminalPaneProps) {
+function TerminalPaneImpl({ sessionId, active, title, status, onTitleChange }: TerminalPaneProps) {
   const hostRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<XTerm | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
-  const [connected, setConnected] = useState(false);
+  // Capture latest onTitleChange so the xterm listener (set up once) always
+  // invokes the current callback without rebinding the terminal.
+  const onTitleChangeRef = useRef(onTitleChange);
+  onTitleChangeRef.current = onTitleChange;
 
   useEffect(() => {
     if (!active || !hostRef.current) return;
@@ -52,6 +57,13 @@ export function TerminalPane({ sessionId, active, title, status }: TerminalPaneP
       term.open(hostRef.current);
       termRef.current = term;
 
+      // OSC 0/2 escape sequences fire here whenever a tool inside the
+      // terminal changes its window title (e.g. shells, vim, claude).
+      term.onTitleChange((next) => {
+        const trimmed = next?.trim();
+        if (trimmed) onTitleChangeRef.current?.(sessionId, trimmed);
+      });
+
       raf = requestAnimationFrame(() => {
       if (disposed) return;
       fit.fit();
@@ -60,7 +72,6 @@ export function TerminalPane({ sessionId, active, title, status }: TerminalPaneP
       wsRef.current = ws;
 
       ws.onopen = () => {
-        setConnected(true);
         fit.fit();
         ws.send(JSON.stringify({ type: 'resize', cols: term!.cols, rows: term!.rows }));
         term!.focus();
@@ -72,7 +83,6 @@ export function TerminalPane({ sessionId, active, title, status }: TerminalPaneP
         if (msg.type === 'exit') term!.write('\r\n[session ended]\r\n');
       };
       ws.onclose = () => {
-        setConnected(false);
         if (!disposed) term!.write('\r\n[disconnected]\r\n');
       };
       ws.onerror = () => {
@@ -118,7 +128,6 @@ export function TerminalPane({ sessionId, active, title, status }: TerminalPaneP
       if (onKill) window.removeEventListener('termag:kill-session', onKill);
       term?.dispose();
       termRef.current = null;
-      setConnected(false);
     };
   }, [active, sessionId]);
 
@@ -126,7 +135,7 @@ export function TerminalPane({ sessionId, active, title, status }: TerminalPaneP
     <section className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-lg border border-line bg-panel shadow-sm">
       <header className="flex h-10 shrink-0 items-center justify-between border-b border-line bg-panel px-3 text-xs">
         <div className="flex min-w-0 items-center gap-2">
-          <span className={`h-2 w-2 rounded-full ${connected ? 'bg-good' : 'bg-muted'}`} />
+          <span className={cn('h-2 w-2 rounded-full', statusDot(status))} />
           <span className="truncate font-medium">{title}</span>
         </div>
         <span className="rounded-md bg-panel2 px-2 py-1 text-muted">{status ?? 'sleeping'}</span>
@@ -161,3 +170,6 @@ export function TerminalPane({ sessionId, active, title, status }: TerminalPaneP
     </section>
   );
 }
+
+export const TerminalPane = memo(TerminalPaneImpl);
+

@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { z } from 'zod';
-import { requireUser } from '@/lib/auth';
+import { withAuth } from '@/lib/auth';
 import { createProject, listProjects } from '@/lib/projects';
 import { AGENT_DEFAULTS, DEFAULT_AGENT_TYPE, parseRoots } from '@/lib/defaults';
 
@@ -12,13 +12,11 @@ const createSchema = z.object({
   agentSpawnCommand: z.string().optional()
 });
 
-export async function GET() {
-  const user = await requireUser();
+export const GET = withAuth(async (user) => {
   return NextResponse.json(await listProjects(user.id));
-}
+});
 
-export async function POST(request: Request) {
-  const user = await requireUser();
+export const POST = withAuth(async (user, request: Request) => {
   const parsed = createSchema.safeParse(await request.json().catch(() => null));
   if (!parsed.success) {
     return NextResponse.json({ error: 'Invalid project payload' }, { status: 400 });
@@ -48,4 +46,4 @@ export async function POST(request: Request) {
     }
     throw error;
   }
-}
+});

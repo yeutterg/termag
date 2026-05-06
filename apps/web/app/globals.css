@@ -46,7 +46,7 @@ body {
   margin: 0;
   background: hsl(var(--bg));
   color: hsl(var(--text));
-  font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+  font-family: var(--font-sans), ui-sans-serif, system-ui, sans-serif;
   letter-spacing: 0;
 }
 

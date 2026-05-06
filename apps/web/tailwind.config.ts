@@ -19,8 +19,8 @@ const config: Config = {
         work: 'hsl(var(--work))'
       },
       fontFamily: {
-        sans: ['Inter', 'ui-sans-serif', 'system-ui', 'sans-serif'],
-        mono: ['JetBrains Mono', 'SFMono-Regular', 'Consolas', 'monospace']
+        sans: ['var(--font-sans)', 'ui-sans-serif', 'system-ui', 'sans-serif'],
+        mono: ['var(--font-mono)', 'SFMono-Regular', 'Consolas', 'monospace']
       }
     }
   },

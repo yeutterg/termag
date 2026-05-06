@@ -1,18 +1,26 @@
+import { headers } from 'next/headers';
 import { redirect } from 'next/navigation';
-import { currentUser } from '@/lib/auth';
+import { currentUser, passwordGateEnabled, trustedNetworkEnabled } from '@/lib/auth';
 import { listProjects } from '@/lib/projects';
 import { parseRoots } from '@/lib/defaults';
+import { detectPlatformFromUserAgent } from '@/lib/platform';
 import { TermagApp } from '@/components/termag-app';
 
 export default async function HomePage() {
   const user = await currentUser();
   if (!user) redirect('/login');
-  const projects = await listProjects(user.id);
+  const [projects, headerList] = await Promise.all([listProjects(user.id), headers()]);
+  const platform = detectPlatformFromUserAgent(headerList.get('user-agent'));
+  const authMode: 'oauth' | 'password' | 'trusted' = trustedNetworkEnabled()
+    ? (passwordGateEnabled() ? 'password' : 'trusted')
+    : 'oauth';
   return (
     <TermagApp
       user={{ id: user.id, email: user.email, name: user.displayName, theme: user.theme }}
       initialProjects={JSON.parse(JSON.stringify(projects))}
       roots={parseRoots()}
+      platform={platform}
+      authMode={authMode}
     />
   );
 }

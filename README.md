@@ -1,8 +1,10 @@
-# termag
+# termag-next
 
-termag is a personal coding-agent dashboard. The browser UI can run from a VPS, while the laptop runs a thin outbound agent that owns tmux and `node-pty`. This keeps the laptop private: no inbound port, no tunnel, and no public tmux surface.
+termag-next is a web interface to remote tmux sessions on remote machines. Forked from [termag](https://github.com/yeutterg/termag), this is re-implemented in Next.js with a responsive shadcn UI.
 
-The rebuild target is a single-user tool for parallel Claude Code, Codex, and future agent sessions.
+The browser UI runs from anywhere — your laptop, a homelab box, a VPS — while a thin outbound agent on each remote machine owns tmux and `node-pty`. The remote stays private: no inbound port, no public tmux surface.
+
+> ⚠️ **Auth is off by default.** termag-next assumes it's reachable only through a private network — Tailscale, WireGuard, ssh tunnel, or a LAN. Anyone who can hit the URL gets a session. See [Authentication](#authentication) for the three available modes.
 
 ## Components
 
@@ -10,13 +12,13 @@ The rebuild target is a single-user tool for parallel Claude Code, Codex, and fu
 
 The web app is both frontend and backend.
 
-- **Frontend:** Next.js 15 App Router, Tailwind, shadcn-style dense UI, `cmdk`, xterm.js.
-- **Backend:** Next.js route handlers for auth, projects, tabs, tokens, theme, and scrollback search.
+- **Frontend:** Next.js 15 App Router, Tailwind, shadcn-style dense UI, `cmdk`, xterm.js, lazy-loaded dialogs, `next/font` for Inter / JetBrains Mono.
+- **Backend:** Next.js route handlers for projects, tabs, tokens, theme, and scrollback search.
 - **Custom server:** [apps/web/server.js](apps/web/server.js) wraps Next.js and handles WebSocket upgrades.
-- **Broker:** the custom server keeps the in-process maps for connected laptop agents and browser terminal streams.
-- **Database:** Prisma + SQLite. The schema is in [apps/web/prisma/schema.prisma](apps/web/prisma/schema.prisma).
+- **Broker:** [apps/web/server/broker.js](apps/web/server/broker.js) keeps the in-process maps for connected laptop agents and browser terminal streams.
+- **Database:** Prisma + SQLite. Schema in [apps/web/prisma/schema.prisma](apps/web/prisma/schema.prisma).
 
-Important WebSocket paths:
+WebSocket paths:
 
 | Path | Client | Purpose |
 | --- | --- | --- |
@@ -29,11 +31,12 @@ Important WebSocket paths:
 The laptop agent is intentionally small.
 
 - Connects outbound to `/api/ws/agent`.
-- Expands named roots, for example `WIP -> ~/WIP`.
+- Expands named roots, e.g. `WIP -> ~/WIP`.
 - Creates or attaches deterministic tmux sessions.
 - Spawns the configured agent command inside tmux.
-- Bridges `node-pty` output back through the VPS broker.
-- Reconnects automatically when the VPS or network drops.
+- Bridges `node-pty` output back through the broker.
+- Reconnects with exponential backoff (1s → 30s ceiling) on drop.
+- Has a fake mode (`TERMAG_AGENT_FAKE=true`) for UI preview without `node-pty`.
 
 The main entry point is [apps/agent/src/index.ts](apps/agent/src/index.ts).
 
@@ -45,17 +48,62 @@ Deployment files for one Hetzner CX22 or similar VPS:
 - [infra/Caddyfile](infra/Caddyfile): TLS reverse proxy.
 - [infra/README.md](infra/README.md): VPS setup notes.
 
+## Authentication
+
+termag-next has three browser auth modes. Pick the one that matches how the URL is reachable. The laptop-agent WebSocket (`/api/ws/agent`) is unaffected — it always requires a hashed bearer token created in the **Settings** dialog.
+
+| Mode | Env vars | When to use |
+| --- | --- | --- |
+| 1. **Trusted (default)** | *none* | URL is reachable **only** through a private network (Tailscale, WireGuard, ssh tunnel, LAN). |
+| 2. **Trusted + password** | `TERMAG_PASSWORD=…` | Same as above, but you want a thin safety net in case the URL leaks. |
+| 3. **OAuth (Google)** | `TERMAG_TRUSTED_NETWORK=false` + `NEXTAUTH_SECRET`, `GOOGLE_CLIENT_*`, `TERMAG_ALLOWED_EMAIL` | **Recommended for any public hostname.** Single allowlisted Google account. |
+
+### 1. Trusted (default)
+
+No login screen, no auth check. The first request auto-creates a single user keyed by `TERMAG_TRUSTED_USER_EMAIL` (defaults to `trusted@termag.local`). Open the URL, you're in.
+
+```bash
+TERMAG_TRUSTED_USER_EMAIL="me@local"   # optional, only affects the DB key
+```
+
+**Only safe behind a private-network ACL.** No second factor; whoever reaches the URL gets full session access. Don't expose this on a public hostname.
+
+### 2. Trusted + password
+
+Layers a single shared password on top of trusted mode. Useful as an "oops I leaked the URL into Slack" safety net. Not a substitute for OAuth on the open internet.
+
+```bash
+TERMAG_PASSWORD="pick-a-long-random-string"
+```
+
+How it works: `/login` shows a password form; on success the server sets a `httpOnly` cookie (`termag-auth`) holding `sha256(password)` for 30 days. The constant-time comparison happens server-side on every request and on the browser WebSocket. The command palette gains a Sign out item that clears the cookie.
+
+### 3. OAuth (Google)
+
+Full Google sign-in with a single-address allowlist. This turns trusted mode off and goes through NextAuth.
+
+```bash
+TERMAG_TRUSTED_NETWORK="false"
+NEXTAUTH_URL="https://termag.example.com"
+NEXTAUTH_SECRET="$(openssl rand -hex 32)"
+GOOGLE_CLIENT_ID="..."
+GOOGLE_CLIENT_SECRET="..."
+TERMAG_ALLOWED_EMAIL="you@example.com"
+```
+
+Only the address in `TERMAG_ALLOWED_EMAIL` is allowed past the `signIn` callback. Everyone else gets bounced back to `/login`.
+
 ## Data Model
 
 The SQLite schema is deliberately flat for v1.
 
 | Model | Purpose |
 | --- | --- |
-| `User` | Google identity, display preferences. Single allowlisted account in practice. |
-| `Project` | One working directory, one agent type, one spawn command. Stores `rootKey` and `relativePath`, not laptop absolute-path assumptions. |
+| `User` | Identity + display preferences. Auto-created in trusted-network mode. |
+| `Project` | One working directory, one agent type, one spawn command. Stores `rootKey` + `relativePath`, never absolute laptop paths. |
 | `Tab` | A parallel agent session within a project. |
 | `Session` | A tmux-backed terminal. Agent tabs use `kind = agent`; the shared project terminal uses `kind = ctrl`. |
-| `ScrollbackChunk` | Browser-side replay buffer, capped by the broker to roughly 10K lines per session. |
+| `ScrollbackChunk` | Browser-side replay buffer, capped to ~10K lines per session. |
 | `AgentToken` | Hashed bearer token for the laptop agent. Raw token is shown once. |
 
 Tmux names are deterministic:
@@ -73,25 +121,20 @@ Install dependencies:
 npm install
 ```
 
-Create local web config:
+Create local config:
 
 ```bash
 cp .env.example apps/web/.env.local
 ```
 
-Set at least:
+The defaults are auth-less and ready to run. Set at minimum:
 
 ```bash
 DATABASE_URL="file:./dev.db"
 NEXTAUTH_URL="http://localhost:3000"
-NEXTAUTH_SECRET="replace-with-openssl-rand-hex-32"
-GOOGLE_CLIENT_ID="..."
-GOOGLE_CLIENT_SECRET="..."
-TERMAG_ALLOWED_EMAIL="your-email@example.com"
+TERMAG_TRUSTED_USER_EMAIL="me@local"
 TERMAG_ROOTS='{"WIP":"~/WIP"}'
 ```
-
-Do not commit real emails, OAuth secrets, or agent tokens.
 
 Initialize SQLite:
 
@@ -106,7 +149,7 @@ Run the web app:
 npm run dev
 ```
 
-Create an agent token in the UI, then run the laptop agent:
+Open `http://localhost:3000` — you're in. Create an agent token in **Settings**, then on each machine you want to run agents on:
 
 ```bash
 TERMAG_URL=ws://localhost:3000/api/ws/agent \
@@ -115,21 +158,15 @@ TERMAG_AGENT_ROOTS='{"WIP":"~/WIP"}' \
 npm run agent
 ```
 
+To layer on a password gate or switch to OAuth, see [Authentication](#authentication).
+
 ## Local UI Preview
 
-To preview the UI without Google OAuth or a real tmux laptop agent:
+To preview the UI with seeded fake data and a fake agent (no `node-pty`):
 
 ```bash
 DATABASE_URL='file:./dev.db' npm run preview:seed -w apps/web
-
-PORT=3000 \
-DATABASE_URL='file:./dev.db' \
-NEXTAUTH_SECRET='dev-secret' \
-NEXTAUTH_URL='http://localhost:3000' \
-TERMAG_DEV_AUTH='true' \
-TERMAG_DEV_AUTH_EMAIL='preview@termag.local' \
-TERMAG_ROOTS='{"WIP":"~/WIP"}' \
-npm run dev -w apps/web
+npm run dev
 ```
 
 In a second shell:
@@ -140,18 +177,19 @@ TERMAG_AGENT_TOKEN='tmag_preview_local_agent_token' \
 npm run fake -w apps/agent
 ```
 
-Open `http://localhost:3000/login` and use **Dev preview login**. The seeded preview user has sample projects, tabs, scrollback, and a fake connected agent that streams terminal output.
+Open `http://localhost:3000`. The seeded preview user has sample projects, tabs, scrollback, and a fake connected agent that streams terminal output.
 
 ## UX Surface
 
-- Sidebar project creation and grouped project list.
-- Project tab strip for parallel agent sessions.
+- Sidebar project creation, grouped project list with nested tabs and inline `+` to add a session.
+- Project tab strip for parallel agent sessions; tab labels mirror live xterm titles (OSC 0/2).
 - Shared `ctrl` terminal beside the active agent tab.
-- Cmd+K omni palette for project jumps and core commands.
-- Cmd+Shift+F scrollback search.
-- Tri-state theme: system, dark, light.
-- Mobile terminal helper row for Esc, Tab, arrows, Ctrl-C, and Ctrl-D.
-- Sleeping state when the laptop agent is offline.
+- Cmd+K (Ctrl+K) command palette for project jumps and core commands.
+- Cmd+Shift+F (Ctrl+Shift+F) scrollback search.
+- Ctrl+Tab / Ctrl+Shift+Tab cycle most-recent tab order.
+- Tri-state theme: system, dark, light. No flash on first paint (server-rendered class + inline boot script).
+- Mobile-aware: keyboard hints hidden on phones; on-screen helper row for Esc, Tab, arrows, Ctrl-C, Ctrl-D.
+- Sleeping state when the laptop agent is offline; auto-reattach on reconnect.
 
 ## Verification
 
@@ -160,19 +198,17 @@ npm run typecheck
 npm run build
 ```
 
-The web production build needs environment placeholders for auth:
+The production build needs at least:
 
 ```bash
 DATABASE_URL='file:./dev.db' \
-NEXTAUTH_SECRET='dev-secret' \
 NEXTAUTH_URL='http://localhost:3000' \
-TERMAG_ALLOWED_EMAIL='local@example.com' \
 npm run build -w apps/web
 ```
 
 ## Deployment
 
-For the VPS path, use Docker Compose in `infra/`. The domain can be filled in later; local or staging can use `localhost`.
+For the VPS path, use Docker Compose in `infra/`:
 
 ```bash
 docker compose --env-file infra/.env -f infra/docker-compose.yml up -d --build
@@ -189,4 +225,4 @@ npx @termag/agent
 
 ## Deferred From v1
 
-The old codebase had Slack, Discord, Chrome relay, project sharing, Postgres, and multi-user Unix-account mapping. Those are intentionally removed from the active rebuild and can be reintroduced later against the simpler project/tab/session model.
+The original termag had Slack, Discord, Chrome relay, project sharing, Postgres, and multi-user Unix-account mapping. Those are intentionally out of scope for the rebuild and can be reintroduced later against the simpler project/tab/session model.

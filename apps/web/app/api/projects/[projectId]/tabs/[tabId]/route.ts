@@ -1,13 +1,30 @@
 import { NextResponse } from 'next/server';
-import { requireUser } from '@/lib/auth';
+import { z } from 'zod';
+import { withAuth } from '@/lib/auth';
 import { prisma } from '@/lib/prisma';
 import { killTmuxSessions } from '@/lib/broker';
 
-export async function DELETE(
-  _request: Request,
-  { params }: { params: Promise<{ projectId: string; tabId: string }> }
-) {
-  const user = await requireUser();
+type Params = { params: Promise<{ projectId: string; tabId: string }> };
+
+const updateSchema = z.object({ name: z.string().min(1).max(80) });
+
+export const PATCH = withAuth(async (user, request: Request, { params }: Params) => {
+  const { projectId, tabId } = await params;
+  const parsed = updateSchema.safeParse(await request.json().catch(() => null));
+  if (!parsed.success) return NextResponse.json({ error: 'Invalid tab payload' }, { status: 400 });
+  const tab = await prisma.tab.findFirst({
+    where: { id: tabId, project: { id: projectId, userId: user.id } }
+  });
+  if (!tab) return NextResponse.json({ error: 'Not found' }, { status: 404 });
+  const updated = await prisma.tab.update({
+    where: { id: tab.id },
+    data: { name: parsed.data.name.trim() },
+    include: { session: true }
+  });
+  return NextResponse.json(updated);
+});
+
+export const DELETE = withAuth(async (user, _request: Request, { params }: Params) => {
   const { projectId, tabId } = await params;
   const tab = await prisma.tab.findFirst({
     where: { id: tabId, project: { id: projectId, userId: user.id } },
@@ -17,4 +34,4 @@ export async function DELETE(
   await prisma.tab.delete({ where: { id: tab.id } });
   await killTmuxSessions(user.id, [tab.session?.tmuxName]);
   return NextResponse.json({ ok: true });
-}
+});

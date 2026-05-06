@@ -24,6 +24,7 @@ COPY --from=builder /app/apps/web/.next ./apps/web/.next
 COPY --from=builder /app/apps/web/public ./apps/web/public
 COPY --from=builder /app/apps/web/prisma ./apps/web/prisma
 COPY --from=builder /app/apps/web/server.js ./apps/web/server.js
+COPY --from=builder /app/apps/web/server ./apps/web/server
 WORKDIR /app/apps/web
 EXPOSE 3000
 CMD ["sh", "-c", "npx prisma migrate deploy && node server.js"]
