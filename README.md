@@ -95,16 +95,24 @@ Only the address in `TERMAG_ALLOWED_EMAIL` is allowed past the `signIn` callback
 
 ## Data Model
 
+The hierarchy users see is **device → project → tab**:
+
+- A **device** is a physical machine (your laptop, a homelab box, a VPS) running the `termag-agent` daemon. Devices appear as group labels in the sidebar (e.g. `laptop`, `homelab`) and are derived from `Project.rootKey` — each rootKey represents one device root.
+- A **project** is a specific folder on one device (e.g. `~/WIP/api/termag-next`). Stored as `rootKey` + `relativePath` so termag-next never assumes an absolute path that's only valid on one machine.
+- A **tab** is one coding agent running inside that folder (Claude Code, Codex, etc.). A project can host many tabs running in parallel — each is its own tmux session, its own context window, its own task. Tabs default to the agent's name (`Claude Code`, `Codex`) and are renameable.
+
+Plus each project has one shared `ctrl` shell (a regular `$SHELL`, not an agent) for git, tests, and ad-hoc inspection — that's the right-hand pane in the main view.
+
 The SQLite schema is deliberately flat for v1.
 
 | Model | Purpose |
 | --- | --- |
 | `User` | Identity + display preferences. Auto-created in trusted-network mode. |
-| `Project` | One working directory, one agent type, one spawn command. Stores `rootKey` + `relativePath`, never absolute laptop paths. |
-| `Tab` | A parallel agent session within a project. |
-| `Session` | A tmux-backed terminal. Agent tabs use `kind = agent`; the shared project terminal uses `kind = ctrl`. |
+| `Project` | A folder on a device. Stores `rootKey` (device root, e.g. `laptop`) + `relativePath` (folder under that root). Never absolute paths — those only make sense on one machine. |
+| `Tab` | One coding agent running inside a project. Default name = the agent's name (`Claude Code`, `Codex`); user-renameable. |
+| `Session` | The tmux process behind a tab or `ctrl` shell. `kind = agent` for tabs; `kind = ctrl` for the project's shared shell. |
 | `ScrollbackChunk` | Browser-side replay buffer, capped to ~10K lines per session. |
-| `AgentToken` | Hashed bearer token for the laptop agent. Raw token is shown once. |
+| `AgentToken` | Hashed bearer token for the `termag-agent` daemon — one per device. Raw token shown once. |
 
 Tmux names are deterministic:
 

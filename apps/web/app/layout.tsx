@@ -1,16 +1,17 @@
 import type { Metadata } from 'next';
-import { Inter, JetBrains_Mono } from 'next/font/google';
+import { Geist, DM_Mono } from 'next/font/google';
 import { currentUser } from '@/lib/auth';
 import './globals.css';
 
-const inter = Inter({
+const geist = Geist({
   subsets: ['latin'],
   display: 'swap',
   variable: '--font-sans'
 });
 
-const jetbrainsMono = JetBrains_Mono({
+const dmMono = DM_Mono({
   subsets: ['latin'],
+  weight: ['400', '500'],
   display: 'swap',
   variable: '--font-mono'
 });
@@ -33,7 +34,7 @@ export default async function RootLayout({ children }: { children: React.ReactNo
     <html
       lang="en"
       suppressHydrationWarning
-      className={`${inter.variable} ${jetbrainsMono.variable}${initialDark ? ' dark' : ''}`}
+      className={`${geist.variable} ${dmMono.variable}${initialDark ? ' dark' : ''}`}
       data-termag-theme={theme}
     >
       <head>

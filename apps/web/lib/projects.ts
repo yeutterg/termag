@@ -1,5 +1,5 @@
 import { prisma } from './prisma';
-import { agentSpawnCommand, normalizeRelativePath, tmuxName } from './defaults';
+import { AGENT_DEFAULTS, agentSpawnCommand, normalizeRelativePath, tmuxName } from './defaults';
 
 export async function listProjects(userId: string) {
   return prisma.project.findMany({
@@ -31,7 +31,10 @@ export async function createProject(input: {
     }
   });
 
-  await createTab(project.id, 'Session 1');
+  // Default tab name = the coding agent's display name (Claude Code, Codex).
+  // The user can rename later, and live xterm titles from the running tool
+  // override this for display.
+  await createTab(project.id, AGENT_DEFAULTS[input.agentType as keyof typeof AGENT_DEFAULTS]?.label);
   await ensureCtrlSession(project.id);
   return prisma.project.findUnique({
     where: { id: project.id },
@@ -52,15 +55,17 @@ export async function ensureCtrlSession(projectId: string) {
 }
 
 export async function createTab(projectId: string, name?: string) {
-  const last = await prisma.tab.findFirst({
-    where: { projectId },
-    orderBy: { ordinal: 'desc' }
-  });
+  const [last, project] = await Promise.all([
+    prisma.tab.findFirst({ where: { projectId }, orderBy: { ordinal: 'desc' } }),
+    prisma.project.findUnique({ where: { id: projectId }, select: { agentType: true } })
+  ]);
   const ordinal = (last?.ordinal ?? 0) + 1;
+  const agentLabel = project ? AGENT_DEFAULTS[project.agentType as keyof typeof AGENT_DEFAULTS]?.label : undefined;
+  const fallback = agentLabel ? (ordinal === 1 ? agentLabel : `${agentLabel} ${ordinal}`) : `Session ${ordinal}`;
   const tab = await prisma.tab.create({
     data: {
       projectId,
-      name: name?.trim() || `Session ${ordinal}`,
+      name: name?.trim() || fallback,
       ordinal
     }
   });

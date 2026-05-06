@@ -9,6 +9,43 @@ function sendJson(ws, msg) {
   }
 }
 
+// Terminal output goes as a raw binary frame — drops JSON-string overhead
+// (escape chars, type wrapper) and combines well with permessage-deflate.
+// Browser sets ws.binaryType='arraybuffer' and writes received bytes directly
+// into xterm. Control messages (ready/sleeping/exit/refresh/agent) stay JSON.
+function sendOutput(ws, data) {
+  if (ws.readyState !== WebSocket.OPEN || !data) return;
+  ws.send(Buffer.isBuffer(data) ? data : Buffer.from(data, 'utf8'));
+}
+
+const COALESCE_MS = 16;       // ~60fps flush — imperceptible latency
+const PAUSE_DROP_LIMIT = 64 * 1024; // bytes buffered while paused; older bytes dropped
+
+function bufferAndFlush(stream, data) {
+  if (!stream || !data) return;
+  stream.outBuffer = (stream.outBuffer || '') + data;
+  if (stream.paused) {
+    if (stream.outBuffer.length > PAUSE_DROP_LIMIT) {
+      stream.outBuffer = stream.outBuffer.slice(-PAUSE_DROP_LIMIT);
+      stream.pausedTrimmed = true;
+    }
+    return;
+  }
+  if (stream.flushTimer) return;
+  stream.flushTimer = setTimeout(() => {
+    stream.flushTimer = null;
+    flushStream(stream);
+  }, COALESCE_MS);
+}
+
+function flushStream(stream) {
+  if (!stream || !stream.outBuffer) return;
+  if (stream.paused) return;
+  const data = stream.outBuffer;
+  stream.outBuffer = '';
+  sendOutput(stream.ws, data);
+}
+
 function hashToken(token) {
   return crypto.createHash('sha256').update(token).digest('hex');
 }
@@ -217,7 +254,7 @@ function createBroker({ prisma, wss }) {
       if (msg.type === 'terminal-data' && msg.streamId) {
         const stream = browserStreams.get(msg.streamId);
         if (!stream) return;
-        sendJson(stream.ws, { type: 'output', data: msg.data });
+        bufferAndFlush(stream, msg.data);
         if (sessionPrimary.get(stream.sessionId) === msg.streamId) {
           appendScrollback(prisma, stream.sessionId, msg.data).catch((err) => console.error('[scrollback]', err.message));
         }
@@ -310,6 +347,12 @@ function createBroker({ prisma, wss }) {
     const sessionId = url.searchParams.get('sessionId');
     const cols = Number(url.searchParams.get('cols') || 80);
     const rows = Number(url.searchParams.get('rows') || 24);
+    // Mobile / save-data hints. Browser appends `&saveData=1` when the user
+    // is on a metered connection or iOS Low Data Mode; UA detects phones.
+    const ua = req.headers['user-agent'] || '';
+    const saveData = url.searchParams.get('saveData') === '1';
+    const isPhone = /iPhone|iPod|Android.*Mobile/.test(ua);
+    const lowBandwidth = saveData || isPhone;
     if (!sessionId) {
       ws.close(1008, 'sessionId required');
       return;
@@ -326,12 +369,35 @@ function createBroker({ prisma, wss }) {
 
     await prisma.project.update({ where: { id: session.projectId }, data: { openedAt: new Date() } });
 
-    const chunks = await prisma.scrollbackChunk.findMany({
-      where: { sessionId },
-      orderBy: { createdAt: 'asc' },
-      select: { data: true }
-    });
-    for (const chunk of chunks) sendJson(ws, { type: 'output', data: chunk.data });
+    // On mobile/saveData: send only the most recent ~500 lines of scrollback.
+    // Otherwise replay everything (~10K-line cap from appendScrollback).
+    if (lowBandwidth) {
+      // Cap at 64 chunks newest-first; with the broker's coalesce-window
+      // sizing this comfortably covers 500+ lines without materializing
+      // the whole 10K-line history into Node memory just to slice it.
+      const recentChunks = await prisma.scrollbackChunk.findMany({
+        where: { sessionId },
+        orderBy: { createdAt: 'desc' },
+        select: { data: true, lineCount: true },
+        take: 64
+      });
+      let lines = 0;
+      const slice = [];
+      for (const chunk of recentChunks) {
+        slice.push(chunk);
+        lines += chunk.lineCount;
+        if (lines >= 500) break;
+      }
+      slice.reverse();
+      for (const chunk of slice) sendOutput(ws, chunk.data);
+    } else {
+      const chunks = await prisma.scrollbackChunk.findMany({
+        where: { sessionId },
+        orderBy: { createdAt: 'asc' },
+        select: { data: true }
+      });
+      for (const chunk of chunks) sendOutput(ws, chunk.data);
+    }
 
     const streamId = `stream_${nextRequestId()}`;
     const stream = {
@@ -415,10 +481,24 @@ function createBroker({ prisma, wss }) {
       if (msg.type === 'kill' && agentForUser(userId)) {
         sendToAgent(userId, 'tmux-kill', { tmuxName: session.tmuxName }, 5000).catch(() => {});
       }
+      if (msg.type === 'pause') {
+        // Browser tab/app is hidden — stop forwarding output. Buffer is
+        // capped at PAUSE_DROP_LIMIT to bound memory; older bytes drop.
+        stream.paused = true;
+      }
+      if (msg.type === 'resume') {
+        stream.paused = false;
+        if (stream.pausedTrimmed) {
+          sendOutput(stream.ws, '\r\n[output trimmed while paused]\r\n');
+          stream.pausedTrimmed = false;
+        }
+        flushStream(stream);
+      }
     });
 
     ws.on('close', () => {
       const wasAttached = stream.attached;
+      if (stream.flushTimer) clearTimeout(stream.flushTimer);
       browserStreams.delete(streamId);
       releasePrimary(sessionId, streamId);
       if (wasAttached) sendToAgent(userId, 'terminal-close', { streamId }, 1000).catch(() => {});

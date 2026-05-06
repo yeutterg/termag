@@ -63,7 +63,19 @@ app.prepare().then(() => {
   const handleUpgrade = app.getUpgradeHandler();
   const server = http.createServer((req, res) => handle(req, res));
   httpServer = server;
-  const wss = new WebSocketServer({ noServer: true });
+  // permessage-deflate: terminal output is highly compressible (repeating
+  // ANSI escapes, paths, tokens) — typically 60-80% reduction on the wire.
+  // threshold 1KB keeps small control messages uncompressed (no CPU cost
+  // for them, no context-takeover memory hit). level 3 balances CPU and ratio.
+  const wss = new WebSocketServer({
+    noServer: true,
+    perMessageDeflate: {
+      threshold: 1024,
+      zlibDeflateOptions: { level: 3 },
+      clientNoContextTakeover: true,
+      serverNoContextTakeover: true
+    }
+  });
   const broker = createBroker({ prisma, wss });
 
   // Route handlers reach the broker through globalThis (same Node process).
