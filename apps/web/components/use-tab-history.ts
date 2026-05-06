@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useState } from 'react';
+import { useCallback, useMemo, useState } from 'react';
 import type { Project } from './types';
 
 type History = Record<string, string[]>;
@@ -46,5 +46,5 @@ export function useTabHistory(initial: History = {}): TabHistory {
     return order[nextIndex];
   }, [orderFor]);
 
-  return { nextRecent, remember, cycle };
+  return useMemo(() => ({ nextRecent, remember, cycle }), [nextRecent, remember, cycle]);
 }

@@ -34,11 +34,11 @@ export function normalizeRelativePath(input: string): string {
     .trim()
     .replace(/\\/g, '/')
     .replace(/^~/, '')
-    .replace(/\.\./g, '')
     .replace(/\/+/g, '/')
-    .replace(/^\.\//, '')
     .replace(/^\/+/, '')
-    .replace(/\/$/, '');
+    .split('/')
+    .filter((part) => part && part !== '.' && part !== '..')
+    .join('/');
 }
 
 export function tmuxName(projectId: string, tabId: string | 'ctrl'): string {

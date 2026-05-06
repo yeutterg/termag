@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "node server.js",
+    "dev": "node scripts/dev.js",
     "build": "node scripts/guard-build.js && prisma generate && next build",
     "start": "NODE_ENV=production node server.js",
     "lint": "tsc --noEmit",

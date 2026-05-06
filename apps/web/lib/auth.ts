@@ -58,18 +58,22 @@ export function passwordCookieValue(): string {
   return crypto.createHash('sha256').update(process.env.TERMAG_PASSWORD || '').digest('hex');
 }
 
+function safeTimingEqual(left: string, right: string): boolean {
+  const leftBuffer = Buffer.from(left);
+  const rightBuffer = Buffer.from(right);
+  return leftBuffer.length === rightBuffer.length && crypto.timingSafeEqual(leftBuffer, rightBuffer);
+}
+
 export function checkPassword(provided: string): boolean {
   const expected = process.env.TERMAG_PASSWORD || '';
-  if (expected.length === 0 || expected.length !== provided.length) return false;
-  return crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(provided));
+  return expected.length > 0 && safeTimingEqual(expected, provided);
 }
 
 export async function passwordCookieValid(): Promise<boolean> {
   if (!passwordGateEnabled()) return true;
   const expected = passwordCookieValue();
   const got = (await cookies()).get(PASSWORD_COOKIE)?.value;
-  if (!got || got.length !== expected.length) return false;
-  return crypto.timingSafeEqual(Buffer.from(got), Buffer.from(expected));
+  return Boolean(got && safeTimingEqual(got, expected));
 }
 
 function providers() {

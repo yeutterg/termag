@@ -4,7 +4,7 @@ import { withAuth } from '@/lib/auth';
 import { prisma } from '@/lib/prisma';
 import { createRawToken, hashToken, tokenPrefix } from '@/lib/tokens';
 
-const createSchema = z.object({ name: z.string().min(1).max(80) });
+const createSchema = z.object({ name: z.string().trim().min(1).max(80) });
 
 // Explicit select to keep tokenHash off the wire.
 const tokenView = { id: true, name: true, tokenPrefix: true, createdAt: true } as const;

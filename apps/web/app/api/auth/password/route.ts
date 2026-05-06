@@ -28,6 +28,12 @@ export async function POST(request: Request) {
 
 export async function DELETE() {
   const response = NextResponse.json({ ok: true });
-  response.cookies.delete(PASSWORD_COOKIE);
+  response.cookies.set(PASSWORD_COOKIE, '', {
+    httpOnly: true,
+    sameSite: 'lax',
+    secure: process.env.NODE_ENV === 'production',
+    path: '/',
+    maxAge: 0
+  });
   return response;
 }

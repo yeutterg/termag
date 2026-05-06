@@ -2,7 +2,7 @@
 
 import { signIn } from 'next-auth/react';
 
-export function LoginButton() {
+export function LoginButton({ showDevLogin }: { showDevLogin: boolean }) {
   return (
     <div className="space-y-2">
       <button
@@ -11,7 +11,7 @@ export function LoginButton() {
       >
         Sign in with Google
       </button>
-      {process.env.NODE_ENV !== 'production' && (
+      {showDevLogin && (
         <button
           className="h-10 w-full border border-line bg-bg px-3 text-sm font-medium text-muted hover:bg-panel2 hover:text-text"
           onClick={() => signIn('dev', { callbackUrl: '/' })}

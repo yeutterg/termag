@@ -90,12 +90,17 @@ function expectedPasswordCookie() {
   return crypto.createHash('sha256').update(process.env.TERMAG_PASSWORD || '').digest('hex');
 }
 
+function safeTimingEqual(left, right) {
+  const leftBuffer = Buffer.from(left);
+  const rightBuffer = Buffer.from(right);
+  return leftBuffer.length === rightBuffer.length && crypto.timingSafeEqual(leftBuffer, rightBuffer);
+}
+
 function passwordCookieValid(cookies) {
   if (!passwordGateEnabled()) return true;
   const expected = expectedPasswordCookie();
   const got = cookies['termag-auth'];
-  if (!got || got.length !== expected.length) return false;
-  return crypto.timingSafeEqual(Buffer.from(got), Buffer.from(expected));
+  return Boolean(got && safeTimingEqual(got, expected));
 }
 
 async function userIdFromRequest(req, prisma) {

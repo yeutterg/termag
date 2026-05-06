@@ -15,6 +15,7 @@ export default async function LoginPage() {
   }
 
   const passwordMode = passwordGateEnabled();
+  const devAuthAvailable = process.env.NODE_ENV !== 'production' && process.env.TERMAG_DEV_AUTH === 'true';
 
   return (
     <main className="grid h-dvh place-items-center bg-bg px-6 text-text">
@@ -25,7 +26,7 @@ export default async function LoginPage() {
             {passwordMode ? 'Enter the shared password to continue.' : 'Sign in to your personal agent dashboard.'}
           </p>
         </div>
-        {passwordMode ? <PasswordForm /> : <LoginButton />}
+        {passwordMode ? <PasswordForm /> : <LoginButton showDevLogin={devAuthAvailable} />}
       </section>
     </main>
   );

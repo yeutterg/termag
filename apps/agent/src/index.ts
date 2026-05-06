@@ -34,8 +34,8 @@ const termagUrl = process.env.TERMAG_URL || (isFake ? 'ws://localhost:3000/api/w
 const token = process.env.TERMAG_AGENT_TOKEN
   || process.env.TERMAG_PREVIEW_AGENT_TOKEN
   || (isFake ? 'tmag_preview_local_agent_token' : undefined);
-const baseReconnectMs = Number(process.env.TERMAG_RECONNECT_MS || 1000);
-const maxReconnectMs = Number(process.env.TERMAG_RECONNECT_MAX_MS || 30000);
+const baseReconnectMs = positiveNumber(process.env.TERMAG_RECONNECT_MS, 1000);
+const maxReconnectMs = positiveNumber(process.env.TERMAG_RECONNECT_MAX_MS, 30000);
 const roots = parseRoots(process.env.TERMAG_AGENT_ROOTS);
 
 if (!termagUrl || !token) {
@@ -44,6 +44,11 @@ if (!termagUrl || !token) {
 }
 
 let reconnectAttempts = 0;
+
+function positiveNumber(raw: string | undefined, fallback: number) {
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
 
 function nextReconnectDelay() {
   const delay = baseReconnectMs * 2 ** Math.min(reconnectAttempts, 6);
@@ -268,7 +273,7 @@ function closeStream(streamId: string) {
 
 function resolveCwd(cwd?: Json) {
   const rootKey = String(cwd?.rootKey || Object.keys(roots)[0] || 'WIP');
-  const relativePath = String(cwd?.relativePath || '').replace(/^\//, '');
+  const relativePath = String(cwd?.relativePath || '').replace(/^\/+/, '');
   const root = roots[rootKey];
   if (!root) throw new Error(`Unknown root ${rootKey}`);
   const resolvedRoot = path.resolve(root);
@@ -284,9 +289,10 @@ function parseRoots(raw?: string): Record<string, string> {
   if (!raw) return fallback;
   try {
     const parsed = JSON.parse(raw) as Record<string, string>;
-    return Object.keys(parsed).length
-      ? Object.fromEntries(Object.entries(parsed).map(([key, value]) => [key, expandRoot(value)]))
-      : fallback;
+    const entries = Object.entries(parsed)
+      .filter((entry): entry is [string, string] => typeof entry[1] === 'string' && entry[1].trim().length > 0)
+      .map(([key, value]) => [key, expandRoot(value)]);
+    return entries.length ? Object.fromEntries(entries) : fallback;
   } catch {
     return fallback;
   }

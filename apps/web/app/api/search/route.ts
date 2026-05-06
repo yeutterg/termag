@@ -5,7 +5,8 @@ import { prisma } from '@/lib/prisma';
 export const GET = withAuth(async (user, request: Request) => {
   const url = new URL(request.url);
   const q = url.searchParams.get('q')?.trim();
-  if (!q) return NextResponse.json([]);
+  if (!q || q.length < 2) return NextResponse.json([]);
+  if (q.length > 200) return NextResponse.json({ error: 'Search query too long' }, { status: 400 });
 
   const chunks = await prisma.scrollbackChunk.findMany({
     where: {

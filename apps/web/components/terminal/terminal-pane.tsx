@@ -160,9 +160,14 @@ function TerminalPaneImpl({ sessionId, active, title, status, onTitleChange, hid
           term!.write(new Uint8Array(event.data as ArrayBuffer));
           return;
         }
-        const msg = JSON.parse(event.data);
-        if (msg.type === 'output') term!.write(msg.data); // legacy/control fallback
-        if (msg.type === 'sleeping') term!.write(`\r\n${msg.message}\r\n`);
+        let msg: { type?: string; data?: string; message?: string };
+        try {
+          msg = JSON.parse(event.data);
+        } catch {
+          return;
+        }
+        if (msg.type === 'output') term!.write(msg.data ?? ''); // legacy/control fallback
+        if (msg.type === 'sleeping') term!.write(`\r\n${msg.message ?? 'Agent sleeping'}\r\n`);
         if (msg.type === 'exit') term!.write('\r\n[session ended]\r\n');
       };
       ws.onclose = () => {
@@ -270,4 +275,3 @@ function TerminalPaneImpl({ sessionId, active, title, status, onTitleChange, hid
 }
 
 export const TerminalPane = memo(TerminalPaneImpl);
-

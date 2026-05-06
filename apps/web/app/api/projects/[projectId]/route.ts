@@ -6,10 +6,10 @@ import { normalizeRelativePath, parseRoots } from '@/lib/defaults';
 import { killTmuxSessions } from '@/lib/broker';
 
 const updateSchema = z.object({
-  name: z.string().min(1).max(80).optional(),
-  rootKey: z.string().min(1).optional(),
-  relativePath: z.string().min(1).optional(),
-  agentSpawnCommand: z.string().min(1).optional()
+  name: z.string().trim().min(1).max(80).optional(),
+  rootKey: z.string().trim().min(1).optional(),
+  relativePath: z.string().trim().min(1).optional(),
+  agentSpawnCommand: z.string().trim().min(1).max(1000).optional()
 });
 
 type Params = { params: Promise<{ projectId: string }> };
@@ -24,12 +24,16 @@ export const PATCH = withAuth(async (user, request: Request, { params }: Params)
   }
   const existing = await prisma.project.findFirst({ where: { id: projectId, userId: user.id } });
   if (!existing) return NextResponse.json({ error: 'Not found' }, { status: 404 });
+  const relativePath = body.relativePath ? normalizeRelativePath(body.relativePath) : undefined;
+  if (body.relativePath && !relativePath) {
+    return NextResponse.json({ error: 'Project path is required' }, { status: 400 });
+  }
   try {
     const project = await prisma.project.update({
       where: { id: projectId },
       data: {
         ...body,
-        relativePath: body.relativePath ? normalizeRelativePath(body.relativePath) : undefined
+        relativePath
       },
       include: { tabs: { orderBy: { ordinal: 'asc' }, include: { session: true } }, sessions: true }
     });
