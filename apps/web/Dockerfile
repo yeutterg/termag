@@ -14,6 +14,11 @@ RUN npm install
 FROM node:22-bookworm-slim AS builder
 WORKDIR /app
 ENV NEXT_TELEMETRY_DISABLED=1
+# Prisma runs during `next build`, so the builder stage must be able to
+# detect/load the same OpenSSL 3 engine target as the runtime stage.
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends openssl ca-certificates \
+  && rm -rf /var/lib/apt/lists/*
 # npm workspaces hoist everything to the root node_modules — apps/web/node_modules
 # usually doesn't exist in the deps stage, so don't try to copy it.
 COPY --from=deps /app/node_modules ./node_modules
