@@ -1,3 +1,5 @@
+name: termag-next
+
 services:
   web:
     build:
