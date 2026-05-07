@@ -1,48 +1,147 @@
 #!/usr/bin/env node
 
-import { exec } from 'node:child_process';
-import { mkdir } from 'node:fs/promises';
+import { execFile, spawn } from 'node:child_process';
+import { promisify } from 'node:util';
 import os from 'node:os';
 import path from 'node:path';
-import { promisify } from 'node:util';
+import { readFileSync } from 'node:fs';
 import WebSocket from 'ws';
+import { type Stream, attachReal, attachFake, killTmux } from './streams';
 
-const execAsync = promisify(exec);
+const execFileAsync = promisify(execFile);
 
 type Json = Record<string, unknown>;
-type PtyModule = typeof import('node-pty');
 
-interface RealStream {
-  kind: 'real';
-  pty: ReturnType<PtyModule['spawn']>;
-  tmuxName: string;
-}
-
-interface FakeStream {
-  kind: 'fake';
-  timer: ReturnType<typeof setInterval>;
-  tmuxName: string;
-}
-
-type Stream = RealStream | FakeStream;
-
-const streams = new Map<string, Stream>();
 const isFake = process.env.TERMAG_AGENT_FAKE === 'true';
 const tag = isFake ? 'fake-agent' : 'agent';
 
-const termagUrl = process.env.TERMAG_URL || (isFake ? 'ws://localhost:3000/api/ws/agent' : undefined);
-const token = process.env.TERMAG_AGENT_TOKEN
-  || process.env.TERMAG_PREVIEW_AGENT_TOKEN
-  || (isFake ? 'tmag_preview_local_agent_token' : undefined);
+const PING_INTERVAL_MS = 30_000;
+const PONG_TIMEOUT_MS = 60_000;
+const HEALTH_INTERVAL_MS = 60_000;
+
+const streams = new Map<string, Stream>();
+
+let pkgVersion = '0.0.0';
+try {
+  // CJS build: __dirname is the directory containing the compiled JS file.
+  // We walk one level up to find package.json next to dist/.
+  const pkgPath = path.join(__dirname, '..', 'package.json');
+  pkgVersion = JSON.parse(readFileSync(pkgPath, 'utf8')).version || '0.0.0';
+} catch {
+  // running without package.json available; version reporting falls back to 0.0.0
+}
+
+const subcommand = process.argv[2];
+if (subcommand === 'update') {
+  void runUpdate();
+} else if (subcommand === '--version' || subcommand === '-v') {
+  console.log(pkgVersion);
+  process.exit(0);
+} else if (subcommand === '--help' || subcommand === '-h') {
+  printHelp();
+  process.exit(0);
+} else {
+  void run();
+}
+
+function printHelp() {
+  console.log(`termag-agent ${pkgVersion}
+
+Usage:
+  termag-agent              connect to the broker and serve sessions (default)
+  termag-agent update       upgrade the agent in place (auto-detects npm vs brew)
+  termag-agent --version    print version
+  termag-agent --help       show this message
+
+Environment:
+  TERMAG_URL                wss://… or ws://localhost… of /api/ws/agent
+  TERMAG_AGENT_TOKEN        bearer token created in the web Settings dialog
+  TERMAG_AGENT_ROOTS        JSON map of named roots, e.g. {"WIP":"~/WIP"}
+  TERMAG_RECONNECT_MS       initial reconnect delay (default 1000)
+  TERMAG_RECONNECT_MAX_MS   max reconnect delay (default 30000)
+`);
+}
+
+async function runUpdate() {
+  const here = __filename;
+  const installedViaBrew = /\/Cellar\/|\/homebrew\//i.test(here);
+  if (installedViaBrew) {
+    console.log('[agent] detected brew install — running: brew upgrade termag-agent');
+    spawn('brew', ['upgrade', 'termag-agent'], { stdio: 'inherit' }).on('exit', (code) => process.exit(code ?? 1));
+  } else {
+    console.log('[agent] running: npm install -g @termag/agent');
+    spawn('npm', ['install', '-g', '@termag/agent'], { stdio: 'inherit' }).on('exit', (code) => process.exit(code ?? 1));
+  }
+}
+
+async function run() {
+  const termagUrl = process.env.TERMAG_URL || (isFake ? 'ws://localhost:3000/api/ws/agent' : undefined);
+  const token = process.env.TERMAG_AGENT_TOKEN
+    || process.env.TERMAG_PREVIEW_AGENT_TOKEN
+    || (isFake ? 'tmag_preview_local_agent_token' : undefined);
+
+  if (!termagUrl || !token) {
+    console.error('TERMAG_URL and TERMAG_AGENT_TOKEN are required.');
+    process.exit(1);
+  }
+
+  let validatedUrl: URL;
+  try {
+    validatedUrl = validateUrl(termagUrl);
+  } catch (err) {
+    console.error(`[${tag}] ${err instanceof Error ? err.message : String(err)}`);
+    process.exit(1);
+  }
+
+  await preflightTmux();
+
+  connect(validatedUrl, token);
+}
+
+// Reject ws:// for non-localhost. A misconfigured TERMAG_URL or DNS poisoning
+// would otherwise leak the agent token to whoever's at the other end. wss is
+// always allowed; ws is only allowed when pointed at the local machine.
+function validateUrl(raw: string): URL {
+  const url = new URL(raw);
+  if (url.protocol !== 'ws:' && url.protocol !== 'wss:') {
+    throw new Error(`TERMAG_URL must be ws:// or wss:// (got ${url.protocol})`);
+  }
+  if (url.protocol === 'ws:') {
+    const host = url.hostname;
+    const local = host === 'localhost' || host === '127.0.0.1' || host === '::1' || host === '[::1]';
+    if (!local) {
+      throw new Error(`TERMAG_URL must use wss:// for non-localhost hosts (got ${host}). Use a TLS reverse proxy or an SSH tunnel for the broker.`);
+    }
+  }
+  return url;
+}
+
+async function preflightTmux() {
+  if (isFake) return;
+  let stdout: string;
+  try {
+    const result = await execFileAsync('tmux', ['-V']);
+    stdout = result.stdout;
+  } catch {
+    console.error(`[${tag}] tmux is not installed. Install it first: brew install tmux  /  apt install tmux  /  dnf install tmux`);
+    process.exit(1);
+  }
+  const match = /tmux\s+(\d+)\.(\d+)/.exec(stdout);
+  if (!match) {
+    console.warn(`[${tag}] could not parse tmux version: ${stdout.trim()} — continuing anyway`);
+    return;
+  }
+  const major = Number(match[1]);
+  const minor = Number(match[2]);
+  if (major < 2 || (major === 2 && minor < 7)) {
+    console.error(`[${tag}] tmux ${major}.${minor} is too old. Install tmux 2.7+ (resize-window requires 2.7).`);
+    process.exit(1);
+  }
+}
+
 const baseReconnectMs = positiveNumber(process.env.TERMAG_RECONNECT_MS, 1000);
 const maxReconnectMs = positiveNumber(process.env.TERMAG_RECONNECT_MAX_MS, 30000);
 const roots = parseRoots(process.env.TERMAG_AGENT_ROOTS);
-
-if (!termagUrl || !token) {
-  console.error('TERMAG_URL and TERMAG_AGENT_TOKEN are required.');
-  process.exit(1);
-}
-
 let reconnectAttempts = 0;
 
 function positiveNumber(raw: string | undefined, fallback: number) {
@@ -55,27 +154,47 @@ function nextReconnectDelay() {
   return Math.min(maxReconnectMs, delay);
 }
 
-// node-pty is a native module; load it lazily so fake mode runs on machines
-// that can't compile it.
-let ptyModule: PtyModule | null = null;
-function getPty(): PtyModule {
-  if (!ptyModule) {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    ptyModule = require('node-pty') as PtyModule;
-  }
-  return ptyModule;
-}
-
-connect();
-
-function connect() {
-  const url = new URL(termagUrl!);
-  url.searchParams.set('token', token!);
+function connect(validatedUrl: URL, token: string) {
+  const url = new URL(validatedUrl.toString());
+  url.searchParams.set('token', token);
   const ws = new WebSocket(url);
+
+  // Heartbeat: ping every 30s, expect pong within PONG_TIMEOUT. Silent NAT
+  // drops, dropped wifi without RST, and idle proxies all leave a websocket
+  // looking "open" forever — the close handler never fires. The ping/pong
+  // round-trip detects that case so we can force a reconnect.
+  let lastPongAt = Date.now();
+  let pingTimer: ReturnType<typeof setInterval> | null = null;
+  let healthTimer: ReturnType<typeof setInterval> | null = null;
+
+  function clearTimers() {
+    if (pingTimer) { clearInterval(pingTimer); pingTimer = null; }
+    if (healthTimer) { clearInterval(healthTimer); healthTimer = null; }
+  }
 
   ws.on('open', () => {
     reconnectAttempts = 0;
-    console.log(`[${tag}] connected to ${url.origin}${url.pathname}`);
+    lastPongAt = Date.now();
+    console.log(`[${tag}] connected to ${validatedUrl.origin}${validatedUrl.pathname} (v${pkgVersion})`);
+
+    pingTimer = setInterval(() => {
+      if (Date.now() - lastPongAt > PONG_TIMEOUT_MS) {
+        console.warn(`[${tag}] no pong in ${PONG_TIMEOUT_MS}ms — terminating dead connection`);
+        try { ws.terminate(); } catch { /* already gone */ }
+        return;
+      }
+      try { ws.ping(); } catch { /* socket already in error state */ }
+    }, PING_INTERVAL_MS);
+
+    // Health: periodic structured snapshot the broker can surface in Settings.
+    // The broker silently ignores unknown message types today, so this is
+    // forward-compat scaffolding the web UI can start consuming whenever.
+    sendHealth(ws);
+    healthTimer = setInterval(() => sendHealth(ws), HEALTH_INTERVAL_MS);
+  });
+
+  ws.on('pong', () => {
+    lastPongAt = Date.now();
   });
 
   ws.on('message', async (raw) => {
@@ -91,26 +210,31 @@ function connect() {
 
     try {
       switch (type) {
-        case 'terminal-attach':
+        case 'terminal-attach': {
           await handleAttach(ws, msg);
           respond(ws, requestId, { ok: true });
           break;
-        case 'terminal-input':
-          writeInput(ws, msg);
+        }
+        case 'terminal-input': {
+          writeInput(msg);
           if (requestId) respond(ws, requestId, { ok: true });
           break;
-        case 'terminal-resize':
-          resize(msg);
+        }
+        case 'terminal-resize': {
+          resizeStream(msg);
           if (requestId) respond(ws, requestId, { ok: true });
           break;
-        case 'terminal-close':
+        }
+        case 'terminal-close': {
           closeStream(String(msg.streamId || ''));
           if (requestId) respond(ws, requestId, { ok: true });
           break;
-        case 'tmux-kill':
+        }
+        case 'tmux-kill': {
           if (!isFake) await killTmux(String(msg.tmuxName || ''));
           if (requestId) respond(ws, requestId, { ok: true });
           break;
+        }
         case 'hello':
           break;
         default:
@@ -122,11 +246,17 @@ function connect() {
   });
 
   ws.on('close', () => {
+    clearTimers();
     const delay = nextReconnectDelay();
     reconnectAttempts += 1;
     console.log(`[${tag}] disconnected; reconnecting in ${delay}ms`);
-    for (const streamId of [...streams.keys()]) closeStream(streamId);
-    setTimeout(connect, delay);
+    // Tear down our local stream readers — the tmux sessions themselves stay
+    // alive on disk so the next agent connection can re-attach to them.
+    for (const stream of [...streams.values()]) {
+      stream.close();
+    }
+    streams.clear();
+    setTimeout(() => connect(validatedUrl, token), delay);
   });
 
   ws.on('error', (err) => {
@@ -134,141 +264,73 @@ function connect() {
   });
 }
 
-async function handleAttach(ws: WebSocket, msg: Json) {
-  return isFake ? handleAttachFake(ws, msg) : handleAttachReal(ws, msg);
+function sendHealth(ws: WebSocket) {
+  if (ws.readyState !== WebSocket.OPEN) return;
+  const memMb = Math.round(process.memoryUsage().rss / (1024 * 1024));
+  ws.send(JSON.stringify({
+    type: 'health',
+    streamCount: streams.size,
+    uptimeSec: Math.floor(process.uptime()),
+    memMb,
+    version: pkgVersion,
+    fake: isFake
+  }));
 }
 
-async function handleAttachReal(ws: WebSocket, msg: Json) {
+async function handleAttach(ws: WebSocket, msg: Json) {
   const streamId = String(msg.streamId || '');
+  if (!streamId) throw new Error('streamId is required');
+
+  // Replace any existing stream for this streamId — the broker re-issues
+  // attach on reconnect.
+  const existing = streams.get(streamId);
+  if (existing) {
+    existing.close();
+    streams.delete(streamId);
+  }
+
+  if (isFake) {
+    const stream = attachFake({
+      ws,
+      streamId,
+      tmuxName: String(msg.tmuxName || 'termag-preview'),
+      kind: String(msg.kind || 'agent'),
+      cwd: (msg.cwd as { rootKey?: string; relativePath?: string } | undefined) || {}
+    });
+    streams.set(streamId, stream);
+    return;
+  }
+
   const tmuxName = String(msg.tmuxName || '');
   const spawnCommand = String(msg.spawnCommand || '$SHELL');
   const cols = Number(msg.cols || 80);
   const rows = Number(msg.rows || 24);
   const cwd = resolveCwd(msg.cwd as Json | undefined);
+  if (!tmuxName) throw new Error('tmuxName is required');
 
-  if (!streamId || !tmuxName) throw new Error('streamId and tmuxName are required');
-
-  await mkdir(cwd, { recursive: true });
-  await ensureTmuxSession(tmuxName, cwd, spawnCommand);
-
-  closeStream(streamId);
-
-  const term = getPty().spawn('tmux', ['attach-session', '-t', tmuxName], {
-    name: 'xterm-256color',
-    cols,
-    rows,
-    cwd,
-    env: {
-      ...process.env,
-      TERM: 'xterm-256color',
-      HOME: os.homedir(),
-      USER: os.userInfo().username,
-      SHELL: process.env.SHELL || '/bin/zsh'
-    }
-  });
-
-  streams.set(streamId, { kind: 'real', pty: term, tmuxName });
-
-  term.onData((data) => {
-    send(ws, { type: 'terminal-data', streamId, data });
-  });
-
-  term.onExit(() => {
-    streams.delete(streamId);
-    send(ws, { type: 'terminal-exit', streamId });
-  });
+  const stream = await attachReal({ ws, streamId, tmuxName, cwd, spawnCommand, cols, rows });
+  streams.set(streamId, stream);
 }
 
-function handleAttachFake(ws: WebSocket, msg: Json) {
-  const streamId = String(msg.streamId || '');
-  const kind = String(msg.kind || 'agent');
-  const tmuxName = String(msg.tmuxName || 'termag-preview');
-  const cwd = msg.cwd as { rootKey?: string; relativePath?: string } | undefined;
-  if (!streamId) return;
-
-  closeStream(streamId);
-
-  send(ws, {
-    type: 'terminal-data',
-    streamId,
-    data: `\r\n[fake-agent] attached ${kind} ${tmuxName}\r\n[fake-agent] cwd ${cwd?.rootKey || 'WIP'}/${cwd?.relativePath || ''}\r\n$ `
-  });
-
-  let tick = 0;
-  const lines = [
-    'reading project context',
-    'checking git status',
-    'streaming terminal output',
-    'waiting for browser input',
-    'writing preview scrollback'
-  ];
-  const timer = setInterval(() => {
-    tick += 1;
-    send(ws, {
-      type: 'terminal-data',
-      streamId,
-      data: `\r\n[fake-agent] ${new Date().toLocaleTimeString()} ${lines[tick % lines.length]}\r\n$ `
-    });
-  }, 3500);
-  streams.set(streamId, { kind: 'fake', timer, tmuxName });
-}
-
-async function ensureTmuxSession(tmuxName: string, cwd: string, command: string) {
-  try {
-    await execAsync(`tmux has-session -t ${sh(tmuxName)} 2>/dev/null`);
-    return;
-  } catch {
-    const shellCommand = command === '$SHELL' ? (process.env.SHELL || '/bin/zsh') : command;
-    await execAsync(`tmux new-session -d -s ${sh(tmuxName)} -c ${sh(cwd)} -x 120 -y 32 ${sh(shellCommand)}`);
-    await execAsync(`tmux set-option -t ${sh(tmuxName)} -w window-size largest`);
-    await execAsync(`tmux set-option -t ${sh(tmuxName)} history-limit 10000`);
-  }
-}
-
-async function killTmux(tmuxName: string) {
-  if (!tmuxName) return;
-  try {
-    await execAsync(`tmux kill-session -t ${sh(tmuxName)}`);
-  } catch {
-    // already gone
-  }
-}
-
-function writeInput(ws: WebSocket, msg: Json) {
-  const streamId = String(msg.streamId || '');
-  const stream = streams.get(streamId);
-  const data = typeof msg.data === 'string' ? msg.data : '';
-  if (!stream || !data) return;
-  if (stream.kind === 'real') {
-    stream.pty.write(data);
-    return;
-  }
-  // Fake mode: echo input back so the browser sees something happen.
-  const printable = data.replace(/\r/g, '\\r').replace(/\n/g, '\\n').replace(//g, 'Esc');
-  send(ws, { type: 'terminal-data', streamId, data: `${data}\r\n[fake-agent] received input: ${printable}\r\n$ ` });
-}
-
-function resize(msg: Json) {
+function writeInput(msg: Json) {
   const stream = streams.get(String(msg.streamId || ''));
-  if (!stream || stream.kind !== 'real') return;
+  const data = typeof msg.data === 'string' ? msg.data : '';
+  if (stream && data) stream.write(data);
+}
+
+function resizeStream(msg: Json) {
+  const stream = streams.get(String(msg.streamId || ''));
+  if (!stream) return;
   const cols = Number(msg.cols || 0);
   const rows = Number(msg.rows || 0);
-  if (cols > 0 && rows > 0) stream.pty.resize(cols, rows);
+  stream.resize(cols, rows);
 }
 
 function closeStream(streamId: string) {
   const stream = streams.get(streamId);
   if (!stream) return;
   streams.delete(streamId);
-  if (stream.kind === 'real') {
-    try {
-      stream.pty.kill();
-    } catch {
-      // already gone
-    }
-  } else {
-    clearInterval(stream.timer);
-  }
+  stream.close();
 }
 
 function resolveCwd(cwd?: Json) {
@@ -307,16 +369,16 @@ function expandRoot(root: string) {
 }
 
 function respond(ws: WebSocket, requestId: string | undefined, data: unknown, error?: string) {
-  if (!requestId) return;
-  send(ws, error ? { requestId, error } : { requestId, data });
+  if (!requestId || ws.readyState !== WebSocket.OPEN) return;
+  ws.send(JSON.stringify(error ? { requestId, error } : { requestId, data }));
 }
 
-function send(ws: WebSocket, msg: Json) {
-  if (ws.readyState === WebSocket.OPEN) {
-    ws.send(JSON.stringify(msg));
-  }
+// Clean shutdown: kill our local readers but leave the tmux sessions alive
+// so the next agent process can pick them up.
+function shutdown() {
+  for (const stream of [...streams.values()]) stream.close();
+  streams.clear();
+  process.exit(0);
 }
-
-function sh(value: string) {
-  return `'${value.replace(/'/g, "'\\''")}'`;
-}
+process.on('SIGINT', shutdown);
+process.on('SIGTERM', shutdown);

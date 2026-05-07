@@ -1,9 +1,18 @@
 {
   "name": "@termag/agent",
   "version": "0.1.0",
-  "private": false,
+  "description": "Outbound termag laptop agent — bridges tmux to the termag broker over WebSocket. No native deps.",
+  "license": "MIT",
   "bin": {
     "termag-agent": "dist/index.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=18"
   },
   "scripts": {
     "dev": "tsx src/index.ts",
@@ -11,10 +20,10 @@
     "build": "tsc -p tsconfig.json",
     "start": "node dist/index.js",
     "lint": "tsc -p tsconfig.json --noEmit",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "prepublishOnly": "npm run build"
   },
   "dependencies": {
-    "node-pty": "^1.0.0",
     "ws": "^8.18.0"
   },
   "devDependencies": {
