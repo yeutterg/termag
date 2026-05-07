@@ -2,7 +2,16 @@
   "name": "@yeutterg/agent",
   "version": "0.1.1",
   "description": "Outbound termag laptop agent — bridges tmux to the termag broker over WebSocket. No native deps.",
+  "author": "Greg Yeutter <yeutterg@gmail.com>",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/yeutterg/termag-next.git",
+    "directory": "apps/agent"
+  },
+  "homepage": "https://github.com/yeutterg/termag-next#readme",
+  "bugs": "https://github.com/yeutterg/termag-next/issues",
+  "keywords": ["tmux", "websocket", "agent", "remote-development", "termag"],
   "bin": {
     "termag-agent": "dist/index.js"
   },
