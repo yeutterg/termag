@@ -1,5 +1,5 @@
 {
-  "name": "@termag/agent",
+  "name": "@yeutterg/agent",
   "version": "0.1.0",
   "description": "Outbound termag laptop agent — bridges tmux to the termag broker over WebSocket. No native deps.",
   "license": "MIT",

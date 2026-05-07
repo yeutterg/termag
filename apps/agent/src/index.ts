@@ -69,8 +69,8 @@ async function runUpdate() {
     console.log('[agent] detected brew install — running: brew upgrade termag-agent');
     spawn('brew', ['upgrade', 'termag-agent'], { stdio: 'inherit' }).on('exit', (code) => process.exit(code ?? 1));
   } else {
-    console.log('[agent] running: npm install -g @termag/agent');
-    spawn('npm', ['install', '-g', '@termag/agent'], { stdio: 'inherit' }).on('exit', (code) => process.exit(code ?? 1));
+    console.log('[agent] running: npm install -g @yeutterg/agent');
+    spawn('npm', ['install', '-g', '@yeutterg/agent'], { stdio: 'inherit' }).on('exit', (code) => process.exit(code ?? 1));
   }
 }
 

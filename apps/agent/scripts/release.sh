@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Cut a new release of @termag/agent.
+# Cut a new release of @yeutterg/agent.
 #
 # Usage:
 #   apps/agent/scripts/release.sh patch    # 0.1.0 -> 0.1.1
@@ -42,7 +42,7 @@ fi
 
 # `npm version` runs in this package and rewrites package.json + creates a tag
 # named v<new-version> by default. We want the tag scoped per-package so it
-# doesn't collide with future @termag/* packages.
+# doesn't collide with future @yeutterg/* packages.
 old_version="$(node -p "require('./package.json').version")"
 
 # `npm version` makes a commit named "<new-version>"; override to a more
@@ -51,7 +51,7 @@ new_version="$(npm version "$bump" --no-git-tag-version)"
 # strip leading "v" — `npm version` returns "v0.1.1"
 new_version="${new_version#v}"
 
-echo "Bumping @termag/agent: $old_version -> $new_version"
+echo "Bumping @yeutterg/agent: $old_version -> $new_version"
 
 git -C "$repo_root" add "$agent_dir/package.json"
 git -C "$repo_root" -c commit.gpgsign=false commit -m "agent: release v$new_version"
@@ -67,7 +67,7 @@ else
 fi
 
 # Compute the brew formula's url + sha256 for the just-published tarball.
-tarball_url="https://registry.npmjs.org/@termag/agent/-/agent-${new_version}.tgz"
+tarball_url="https://registry.npmjs.org/@yeutterg/agent/-/agent-${new_version}.tgz"
 echo "Fetching tarball to compute sha256..."
 sha="$(curl -sL "$tarball_url" | shasum -a 256 | awk '{print $1}')"
 

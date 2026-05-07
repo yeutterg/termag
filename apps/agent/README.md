@@ -1,4 +1,4 @@
-# @termag/agent
+# @yeutterg/agent
 
 Outbound laptop agent for [termag-next](https://github.com/yeutterg/termag-next) — bridges tmux sessions on your machine to the termag broker over a single WebSocket. No native deps, no inbound port, no public tmux surface.
 
@@ -17,7 +17,7 @@ brew services start termag-agent
 
 ```bash
 sudo apt install tmux            # or dnf/pacman/...
-npm install -g @termag/agent
+npm install -g @yeutterg/agent
 termag-agent                     # foreground; wrap in systemd for production
 ```
 
