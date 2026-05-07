@@ -6,23 +6,35 @@ It is a Next.js fork and rebuild of the original [termag](https://github.com/yeu
 
 That browser can be on your laptop, a tablet, or a phone on a cellular connection. Your real work still happens inside tmux on the remote device, but the UI follows you.
 
-Security note: the default trusted-network mode is effectively unauthenticated. Only use it when access is already restricted by something like Tailscale, WireGuard, an SSH tunnel, or a private LAN. Do not expose an unauthenticated termag-next instance on the public internet.
-
-![termag-next browser UI with projects, tabs, and split tmux panes](docs/images/termag-ui.png)
+![termag-next dark-mode browser UI with projects, tabs, and code visible in split tmux panes](docs/images/termag-ui.png)
 
 ## How It Works
 
 ```mermaid
 flowchart LR
-  Browser["Browser<br/>laptop, tablet, phone"] -->|"HTTPS + WebSocket"| Web["termag-next web app<br/>Next.js, broker, SQLite"]
+  subgraph Client["Where you are"]
+    Browser["Browser UI<br/>laptop, tablet, or phone"]
+  end
 
-  AgentA["termag-agent<br/>MacBook"] -->|"outbound WSS"| Web
-  AgentB["termag-agent<br/>homelab"] -->|"outbound WSS"| Web
-  AgentC["termag-agent<br/>VPS"] -->|"outbound WSS"| Web
+  subgraph Web["termag-next web app"]
+    Next["Next.js UI + API"]
+    Broker["WebSocket broker"]
+    DB[("SQLite")]
+    Next <--> Broker
+    Next <--> DB
+  end
 
-  AgentA --> TmuxA["tmux<br/>project tabs + ctrl shell"]
-  AgentB --> TmuxB["tmux<br/>project tabs + ctrl shell"]
-  AgentC --> TmuxC["tmux<br/>project tabs + ctrl shell"]
+  subgraph Machines["Remote machines"]
+    direction TB
+    AgentA["termag-agent<br/>MacBook"] --> TmuxA["tmux<br/>project tabs + ctrl shell"]
+    AgentB["termag-agent<br/>homelab"] --> TmuxB["tmux<br/>project tabs + ctrl shell"]
+    AgentC["termag-agent<br/>VPS"] --> TmuxC["tmux<br/>project tabs + ctrl shell"]
+  end
+
+  Browser <-->|HTTPS + WebSocket| Next
+  Broker <-->|outbound WSS| AgentA
+  Broker <-->|outbound WSS| AgentB
+  Broker <-->|outbound WSS| AgentC
 ```
 
 The agent always dials out to the web app. You do not need to expose tmux, SSH, or a laptop port to the internet.
@@ -45,6 +57,8 @@ The user-facing shape is:
 ### 1. Run The Web App
 
 Docker Compose is the preferred route for the web app.
+
+Security note: the default trusted-network mode is effectively unauthenticated. Only use it when access is already restricted by something like Tailscale, WireGuard, an SSH tunnel, or a private LAN. Do not expose an unauthenticated termag-next instance on the public internet.
 
 ```bash
 git clone https://github.com/yeutterg/termag-next.git
