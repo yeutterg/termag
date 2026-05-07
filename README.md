@@ -120,7 +120,7 @@ cd infra
 docker compose up -d --build
 ```
 
-Open the URL you set in `NEXTAUTH_URL` — you're in.
+Open the URL you set in `NEXTAUTH_URL` — you're in. With the local Docker stack, Caddy publishes the app on host ports `80` and `443`; the Next.js container's port `3000` stays internal to Docker. `http://localhost` redirects to `https://localhost`, and Safari may show a "not private" warning for that local Caddy certificate.
 
 **Optional shared-password gate** as a thin "oops I leaked the URL" safety net (useful for a homelab but NOT a substitute for OAuth on the open internet):
 
@@ -209,8 +209,8 @@ TERMAG_URL=wss://termag.tailnet/api/ws/agent
 # Local development against `npm run dev` (default port 3000):
 TERMAG_URL=ws://localhost:3000/api/ws/agent
 
-# Local Docker stack with Caddy on port 80:
-TERMAG_URL=ws://localhost/api/ws/agent
+# Local Docker stack with Caddy on port 443:
+TERMAG_URL=wss://localhost/api/ws/agent
 ```
 
 `ws://` (no TLS) is only accepted when the hostname is `localhost`, `127.0.0.1`, or `::1`. Anything else must be `wss://` or the agent refuses to connect.
