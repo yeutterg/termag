@@ -20,7 +20,7 @@ export const PATCH = withAuth(async (user, request: Request, { params }: Params)
   if (!parsed.success) return NextResponse.json({ error: 'Invalid project payload' }, { status: 400 });
   const body = parsed.data;
   if (body.rootKey && !parseRoots()[body.rootKey]) {
-    return NextResponse.json({ error: 'Unknown rootKey' }, { status: 400 });
+    return NextResponse.json({ error: 'Unknown device root' }, { status: 400 });
   }
   const existing = await prisma.project.findFirst({ where: { id: projectId, userId: user.id } });
   if (!existing) return NextResponse.json({ error: 'Not found' }, { status: 404 });

@@ -19,9 +19,9 @@ const GROUPS: Group[] = [
     ]
   },
   {
-    heading: 'Sessions',
+    heading: 'Agents',
     items: [
-      { keys: ['mod', 'enter'], label: 'New session in current project' }
+      { keys: ['mod', 'enter'], label: 'New agent in current project' }
     ]
   },
   {

@@ -441,7 +441,9 @@ function createBroker({ prisma, wss }) {
             tmuxName: session.tmuxName,
             kind: session.kind,
             cwd: { rootKey: session.project.rootKey, relativePath: session.project.relativePath },
-            spawnCommand: session.kind === 'ctrl' ? session.project.ctrlSpawnCommand : session.project.agentSpawnCommand,
+            spawnCommand: session.kind === 'ctrl'
+              ? session.project.ctrlSpawnCommand
+              : (session.spawnCommand || session.project.agentSpawnCommand),
             cols: stream.cols,
             rows: stream.rows
           });

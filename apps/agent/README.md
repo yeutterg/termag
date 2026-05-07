@@ -29,8 +29,8 @@ Use WSL. tmux doesn't run on native Windows; the agent assumes a Unix tmux.
 
 ```bash
 export TERMAG_URL=wss://termag.example.com/api/ws/agent
-export TERMAG_AGENT_TOKEN=tmag_...        # generate in the web Settings dialog
-export TERMAG_AGENT_ROOTS='{"WIP":"~/WIP","homelab":"~/homelab"}'
+export TERMAG_AGENT_TOKEN=tmag_...        # generate in the web New Device dialog
+export TERMAG_AGENT_ROOTS='{"MacBook Pro":"~/Code","homelab":"~/homelab"}'
 ```
 
 `TERMAG_URL` must be `wss://` for any non-localhost host. The agent rejects `ws://` to anything else than 127.0.0.1 / ::1. A misconfigured URL or DNS poisoning would otherwise leak the agent token to whoever's at the other end.
@@ -38,8 +38,8 @@ export TERMAG_AGENT_ROOTS='{"WIP":"~/WIP","homelab":"~/homelab"}'
 | Variable | Purpose | Default |
 | --- | --- | --- |
 | `TERMAG_URL` | Broker WebSocket URL | (required) |
-| `TERMAG_AGENT_TOKEN` | Bearer token from the web Settings dialog | (required) |
-| `TERMAG_AGENT_ROOTS` | JSON map of named roots to absolute paths | `{"WIP":"~/WIP"}` |
+| `TERMAG_AGENT_TOKEN` | Bearer token from the web New Device dialog | (required) |
+| `TERMAG_AGENT_ROOTS` | JSON map of device labels to root paths | `{"Local device":"~/Code"}` |
 | `TERMAG_RECONNECT_MS` | Initial reconnect delay (ms) | `1000` |
 | `TERMAG_RECONNECT_MAX_MS` | Max reconnect delay (ms) | `30000` |
 | `TERMAG_AGENT_FAKE` | Run a no-tmux fake stream for UI preview | `false` |

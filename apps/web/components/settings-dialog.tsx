@@ -1,6 +1,6 @@
 'use client';
 
-import { type FormEvent, useEffect, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Trash2 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
@@ -15,29 +15,10 @@ interface SettingsDialogProps {
 
 export function SettingsDialog({ open, onOpenChange, user, agentConnected }: SettingsDialogProps) {
   const [tokens, setTokens] = useState<Token[]>([]);
-  const [createdToken, setCreatedToken] = useState('');
 
   useEffect(() => {
     if (open) fetch('/api/agent-tokens').then((res) => res.json()).then(setTokens).catch(() => setTokens([]));
   }, [open]);
-
-  async function createToken(formData: FormData) {
-    const res = await fetch('/api/agent-tokens', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ name: formData.get('name') || 'laptop' })
-    });
-    if (!res.ok) return;
-    const body = await res.json();
-    setCreatedToken(body.token);
-    setTokens((items) => [body, ...items]);
-  }
-
-  async function createTokenFromForm(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    await createToken(new FormData(event.currentTarget));
-    event.currentTarget.reset();
-  }
 
   if (!open) return null;
   return (
@@ -52,17 +33,16 @@ export function SettingsDialog({ open, onOpenChange, user, agentConnected }: Set
             {agentConnected ? 'Agent connected' : 'Agent sleeping'}
           </span>
         </div>
-        <form onSubmit={createTokenFromForm} className="mb-4 flex gap-2">
-          <input name="name" placeholder="Token name" className="h-9 min-w-0 flex-1 rounded-md border border-line bg-bg px-3 text-sm outline-none focus:border-accent" />
-          <button className="h-9 rounded-md bg-accent px-3 text-sm font-medium text-bg">Create token</button>
-        </form>
-        {createdToken && (
-          <div className="mb-4 border border-warn bg-warn/10 p-3">
-            <div className="mb-1 text-xs font-medium text-warn">Token shown once</div>
-            <code className="break-all font-mono text-xs">{createdToken}</code>
-          </div>
-        )}
+        <div className="mb-3">
+          <h3 className="text-sm font-medium">Devices</h3>
+          <p className="text-xs text-muted">Create one token per device from the + menu. Revoke a token to disconnect that device.</p>
+        </div>
         <div className="space-y-2">
+          {tokens.length === 0 && (
+            <div className="rounded-md border border-line bg-bg px-3 py-6 text-center text-sm text-muted">
+              No devices yet. Use + → New Device to create the first device token.
+            </div>
+          )}
           {tokens.map((token) => (
             <div key={token.id} className="flex items-center justify-between rounded-md border border-line bg-bg px-3 py-2 text-sm">
               <div>

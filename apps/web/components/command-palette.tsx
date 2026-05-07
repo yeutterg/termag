@@ -61,7 +61,7 @@ export function CommandPalette({
           <Command.Input
             autoFocus
             className="h-12 min-w-0 flex-1 bg-transparent text-sm outline-none placeholder:text-muted"
-            placeholder="Jump to a session…"
+            placeholder="Jump to an agent…"
           />
           <span className="font-mono text-[10px] text-muted">esc</span>
         </div>
@@ -69,7 +69,7 @@ export function CommandPalette({
         <Command.List className="min-h-0 flex-1 overflow-auto p-2">
           <Command.Empty className="px-3 py-6 text-sm text-muted">No matches.</Command.Empty>
           {rows.length > 0 && (
-            <Command.Group heading="Recent sessions">
+            <Command.Group heading="Agents">
               {rows.map(({ project, tab, projectIndex, isProjectHead }) => (
                 <Command.Item
                   key={`${project.id}:${tab.id}`}
@@ -94,7 +94,7 @@ export function CommandPalette({
             </Command.Group>
           )}
           <Command.Group heading="Commands">
-            <CommandRow icon={<Plus className="h-3.5 w-3.5" />} label="New session in current project" shortcut={['mod', 'enter']} onSelect={() => { onNewTab(); onOpenChange(false); }} />
+            <CommandRow icon={<Plus className="h-3.5 w-3.5" />} label="New agent in current project" shortcut={['mod', 'enter']} onSelect={() => { onNewTab(); onOpenChange(false); }} />
             <CommandRow icon={<SearchIcon className="h-3.5 w-3.5" />} label="Search scrollback" shortcut={['mod', 'shift', 'F']} onSelect={() => { onSearch(); onOpenChange(false); }} />
             <CommandRow icon={<Trash2 className="h-3.5 w-3.5" />} label="Kill current session" onSelect={() => { onKill(); onOpenChange(false); }} />
             <CommandRow icon={<Moon className="h-3.5 w-3.5" />} label="Toggle theme" shortcut={['mod', '.']} onSelect={() => { onTheme(); onOpenChange(false); }} />
@@ -110,7 +110,7 @@ export function CommandPalette({
         <div className="flex items-center gap-4 border-t border-line/60 px-4 py-2 font-mono text-[10px] text-muted">
           <span className="flex items-center gap-1.5"><CommandIcon className="h-3 w-3" /> navigate</span>
           <span className="flex items-center gap-1.5"><CornerDownLeft className="h-3 w-3" /> open</span>
-          <span className="ml-auto">{rows.length} {rows.length === 1 ? 'session' : 'sessions'}</span>
+          <span className="ml-auto">{rows.length} {rows.length === 1 ? 'agent' : 'agents'}</span>
         </div>
       </Command>
     </div>

@@ -47,9 +47,9 @@ The agent always dials out to the web app. You do not need to expose tmux, SSH, 
 
 The user-facing shape is:
 
-- Device: a machine running `termag-agent`, represented by a named root like `WIP` or `homelab`.
-- Project: a folder under one of those named roots.
-- Tab: one tmux-backed coding-agent session inside a project.
+- Device: a machine running `termag-agent`. Create one device token per machine.
+- Project: a folder on that device.
+- Agent: one tmux-backed terminal window inside a project, running Claude Code, Codex, a YOLO variant, or another CLI command.
 - Ctrl shell: a regular project shell for git, tests, and quick commands.
 
 ## Security Model
@@ -107,7 +107,7 @@ NEXTAUTH_URL=http://localhost
 # NEXTAUTH_URL=https://termag.tailnet
 
 NEXTAUTH_SECRET=<paste output of openssl above>
-TERMAG_ROOTS={"WIP":"~/WIP"}
+TERMAG_ROOTS={"MacBook Pro":"~/Code"}
 # leave TERMAG_TRUSTED_NETWORK=true (the default)
 ```
 
@@ -150,7 +150,7 @@ Edit `infra/.env`:
 TERMAG_HOST=termag.example.com
 NEXTAUTH_URL=https://termag.example.com
 NEXTAUTH_SECRET=<paste output of openssl above>
-TERMAG_ROOTS={"WIP":"~/WIP"}
+TERMAG_ROOTS={"MacBook Pro":"~/Code"}
 
 TERMAG_TRUSTED_NETWORK=false
 GOOGLE_CLIENT_ID=...
@@ -169,9 +169,9 @@ Caddy auto-issues a Let's Encrypt cert for `TERMAG_HOST`. Open `https://termag.e
 
 Put these variables in `infra/.env` for Docker Compose, or in `apps/web/.env.local` for local development.
 
-### 2. Create An Agent Token
+### 2. Create One Token Per Device
 
-Open Settings in the web UI and create an agent token. The raw token is only shown once.
+In the web UI, click `+` → **New Device**. Name the physical device, for example `MacBook Pro`, `Mac Mini`, `Hetzner VPS`, or `homelab`, then create the token. The raw token is shown once and includes a copy button.
 
 ### 3. Install An Agent On Each Device
 
@@ -192,7 +192,7 @@ Run the agent:
 ```bash
 export TERMAG_URL=wss://termag.example.com/api/ws/agent   # your broker URL — see below for localhost
 export TERMAG_AGENT_TOKEN=tmag_...
-export TERMAG_AGENT_ROOTS='{"WIP":"~/WIP"}'
+export TERMAG_AGENT_ROOTS='{"MacBook Pro":"~/Code"}'
 
 termag-agent
 ```
@@ -215,7 +215,11 @@ TERMAG_URL=wss://localhost/api/ws/agent
 
 `ws://` (no TLS) is only accepted when the hostname is `localhost`, `127.0.0.1`, or `::1`. Anything else must be `wss://` or the agent refuses to connect.
 
-Add more devices by installing the agent on each one and giving each device named roots that make sense there.
+Add more devices by creating one token per device, installing the agent on that device, and giving it a named root. The root key is the device label in the sidebar.
+
+### 4. Create Projects And Agents
+
+Click `+` → **New Project**. Select the device, enter the project directory, for example `~/Code/termag-next`, then choose agents. The built-in checkboxes include **Claude Code**, **Claude Code YOLO**, **Codex**, and **Codex YOLO**. Add any other agent command in the text box, one command per line. Termag-next creates one terminal window per selected or typed agent.
 
 ## Local Development
 
@@ -234,7 +238,7 @@ Run a local agent in another shell:
 ```bash
 TERMAG_URL=ws://localhost:3000/api/ws/agent \
 TERMAG_AGENT_TOKEN=tmag_... \
-TERMAG_AGENT_ROOTS='{"WIP":"~/WIP"}' \
+TERMAG_AGENT_ROOTS='{"Local device":"~/Code"}' \
 npm run agent
 ```
 

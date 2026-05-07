@@ -55,8 +55,8 @@ Usage:
 
 Environment:
   TERMAG_URL                wss://… or ws://localhost… of /api/ws/agent
-  TERMAG_AGENT_TOKEN        bearer token created in the web Settings dialog
-  TERMAG_AGENT_ROOTS        JSON map of named roots, e.g. {"WIP":"~/WIP"}
+  TERMAG_AGENT_TOKEN        bearer token created in the web New Device dialog
+  TERMAG_AGENT_ROOTS        JSON map of device labels to roots, e.g. {"Mac Mini":"~/Code"}
   TERMAG_RECONNECT_MS       initial reconnect delay (default 1000)
   TERMAG_RECONNECT_MAX_MS   max reconnect delay (default 30000)
 `);
@@ -334,7 +334,7 @@ function closeStream(streamId: string) {
 }
 
 function resolveCwd(cwd?: Json) {
-  const rootKey = String(cwd?.rootKey || Object.keys(roots)[0] || 'WIP');
+  const rootKey = String(cwd?.rootKey || Object.keys(roots)[0] || 'Local device');
   const relativePath = String(cwd?.relativePath || '').replace(/^\/+/, '');
   const root = roots[rootKey];
   if (!root) throw new Error(`Unknown root ${rootKey}`);
@@ -347,7 +347,7 @@ function resolveCwd(cwd?: Json) {
 }
 
 function parseRoots(raw?: string): Record<string, string> {
-  const fallback = { WIP: path.join(os.homedir(), 'WIP') };
+  const fallback = { 'Local device': path.join(os.homedir(), 'Code') };
   if (!raw) return fallback;
   try {
     const parsed = JSON.parse(raw) as Record<string, string>;

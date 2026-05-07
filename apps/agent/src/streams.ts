@@ -352,7 +352,7 @@ export function attachFake(opts: FakeAttachOpts): Stream {
     opts.ws,
     opts.streamId,
     `\r\n[fake-agent] attached ${opts.kind} ${opts.tmuxName}\r\n` +
-      `[fake-agent] cwd ${opts.cwd?.rootKey || 'WIP'}/${opts.cwd?.relativePath || ''}\r\n$ `
+      `[fake-agent] cwd ${opts.cwd?.rootKey || 'Local device'}/${opts.cwd?.relativePath || ''}\r\n$ `
   );
 
   let tick = 0;

@@ -88,6 +88,8 @@ model Session {
   id          String   @id @default(cuid())
   kind        String
   tmuxName    String   @unique
+  agentType   String?
+  spawnCommand String?
   status      String   @default("sleeping")
   lastSeenAt  DateTime?
   createdAt   DateTime @default(now())

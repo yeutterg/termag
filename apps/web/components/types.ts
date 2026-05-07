@@ -2,6 +2,8 @@ export type Session = {
   id: string;
   kind: string;
   tmuxName: string;
+  agentType?: string | null;
+  spawnCommand?: string | null;
   status: string;
 };
 

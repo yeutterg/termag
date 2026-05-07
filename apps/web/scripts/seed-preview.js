@@ -70,7 +70,7 @@ async function ensureProject(user, spec, openedAt) {
   const project = await prisma.project.upsert({
     where: { userId_name: { userId: user.id, name: spec.name } },
     update: {
-      rootKey: 'WIP',
+      rootKey: 'MacBook Pro',
       relativePath: spec.relativePath,
       agentType: spec.agentType,
       agentSpawnCommand: spec.agentSpawnCommand,
@@ -80,7 +80,7 @@ async function ensureProject(user, spec, openedAt) {
     create: {
       userId: user.id,
       name: spec.name,
-      rootKey: 'WIP',
+      rootKey: 'MacBook Pro',
       relativePath: spec.relativePath,
       agentType: spec.agentType,
       agentSpawnCommand: spec.agentSpawnCommand,
