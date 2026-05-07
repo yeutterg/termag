@@ -82,6 +82,38 @@ docker compose --env-file infra/.env -f infra/docker-compose.yml up -d --build
 
 Open `http://localhost`. For a VPS, set `TERMAG_HOST` and `NEXTAUTH_URL` to your real hostname, for example `termag.example.com` and `https://termag.example.com`. If that hostname is public, configure OAuth before relying on it.
 
+### Web App Security
+
+termag-next has three browser access modes. Agent connections are separate and always require a bearer token created in the web UI.
+
+The default is trusted-network mode. There is no login screen; anyone who can reach the web app can use it. This is only appropriate behind a private access layer:
+
+```bash
+TERMAG_HOST=localhost
+NEXTAUTH_URL=http://localhost
+```
+
+For a thin shared-password gate on top of trusted-network mode, add:
+
+```bash
+TERMAG_PASSWORD=pick-a-long-random-string
+```
+
+This is useful for private deployments where you want a second check, but it is still a shared password. It is not full public-internet auth.
+
+For a public hostname, turn trusted-network mode off and use Google OAuth with a single allowed email:
+
+```bash
+TERMAG_TRUSTED_NETWORK=false
+NEXTAUTH_URL=https://termag.example.com
+NEXTAUTH_SECRET=replace-with-output-of-openssl-rand-hex-32
+GOOGLE_CLIENT_ID=...
+GOOGLE_CLIENT_SECRET=...
+TERMAG_ALLOWED_EMAIL=you@example.com
+```
+
+Put these variables in `infra/.env` for Docker Compose, or in `apps/web/.env.local` for local development.
+
 ### 2. Create An Agent Token
 
 Open Settings in the web UI and create an agent token. The raw token is only shown once.
@@ -154,29 +186,6 @@ TERMAG_AGENT_TOKEN='tmag_preview_local_agent_token' \
 npm run fake -w apps/agent
 ```
 
-## Authentication
-
-termag-next is trusted-network first. By default, anyone who can reach the web app can use it. That is risky by design and is only meant for localhost or private access layers such as Tailscale, WireGuard, an SSH tunnel, or a private LAN.
-
-For a public hostname, turn off trusted mode and use Google OAuth with a single allowed email:
-
-```bash
-TERMAG_TRUSTED_NETWORK=false
-NEXTAUTH_URL=https://termag.example.com
-NEXTAUTH_SECRET=...
-GOOGLE_CLIENT_ID=...
-GOOGLE_CLIENT_SECRET=...
-TERMAG_ALLOWED_EMAIL=you@example.com
-```
-
-You can also add a lightweight shared password in trusted mode:
-
-```bash
-TERMAG_PASSWORD=pick-a-long-random-string
-```
-
-Agent connections always require a bearer token created in the web UI.
-
 ## Useful Commands
 
 ```bash
@@ -185,18 +194,3 @@ npm run build
 npm run dev
 npm run agent
 ```
-
-## Status
-
-This rebuild intentionally starts with the smaller core:
-
-- one browser UI
-- one web broker
-- SQLite
-- tmux sessions
-- outbound agents
-- named roots
-- project tabs
-- a shared ctrl shell
-
-Features from the original termag, such as Slack, Discord, Chrome relay, project sharing, Postgres, and multi-user Unix-account mapping, can be added back later.
