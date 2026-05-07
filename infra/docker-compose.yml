@@ -12,9 +12,11 @@ services:
       NEXTAUTH_SECRET: ${NEXTAUTH_SECRET}
       TERMAG_TRUSTED_NETWORK: ${TERMAG_TRUSTED_NETWORK:-true}
       TERMAG_PASSWORD: ${TERMAG_PASSWORD:-}
-      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID}
-      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET}
-      TERMAG_ALLOWED_EMAIL: ${TERMAG_ALLOWED_EMAIL}
+      # OAuth vars are only used when TERMAG_TRUSTED_NETWORK=false (Path B).
+      # `:-` default to empty so trusted-network deployments don't trip warnings.
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
+      TERMAG_ALLOWED_EMAIL: ${TERMAG_ALLOWED_EMAIL:-}
       TERMAG_ROOTS: '${TERMAG_ROOTS:-{"WIP":"~/WIP"}}'
     volumes:
       - termag-data:/data

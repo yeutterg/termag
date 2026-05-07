@@ -8,8 +8,9 @@ RUN npm install
 FROM node:22-bookworm-slim AS builder
 WORKDIR /app
 ENV NEXT_TELEMETRY_DISABLED=1
+# npm workspaces hoist everything to the root node_modules — apps/web/node_modules
+# usually doesn't exist in the deps stage, so don't try to copy it.
 COPY --from=deps /app/node_modules ./node_modules
-COPY --from=deps /app/apps/web/node_modules ./apps/web/node_modules
 COPY . .
 RUN npm run build -w apps/web
 
