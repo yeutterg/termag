@@ -52,6 +52,25 @@ The user-facing shape is:
 - Tab: one tmux-backed coding-agent session inside a project.
 - Ctrl shell: a regular project shell for git, tests, and quick commands.
 
+## Security Model
+
+There is no shared termag-next service. Each user runs their own broker, and agents only ever talk to it.
+
+```mermaid
+graph LR
+    Agent[termag-agent<br/>your laptop] -- wss + token --> Broker[your broker<br/>apps/web]
+    Browser[browser<br/>your login] -- wss --> Broker
+    Broker -. token check .-> DB[(SQLite<br/>AgentToken)]
+```
+
+Three things tie your agents to your broker:
+
+1. **`TERMAG_URL` is on your laptop.** The agent only ever talks to the URL you set. Random brokers don't know your laptop exists.
+2. **The agent token is minted by your broker.** It's stored hashed in your broker's SQLite. The agent presents the raw value on connect; if the hash isn't in the table, the connection is rejected.
+3. **The agent rejects bare `ws://` for non-localhost.** Even if DNS got poisoned to point your `TERMAG_URL` somewhere hostile, the token can't leak in plaintext. The agent fails closed unless the URL is `wss://` or localhost.
+
+Trust boundary: the device holding `TERMAG_AGENT_TOKEN` can connect; the broker that minted the token is what it connects to; the browser logged in to that broker sees the sessions. Three things, all yours.
+
 ## Quick Setup
 
 ### 1. Run The Web App
