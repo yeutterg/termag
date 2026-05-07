@@ -75,67 +75,89 @@ Trust boundary: the device holding `TERMAG_AGENT_TOKEN` can connect; the broker 
 
 ### 1. Run The Web App
 
-Docker Compose is the preferred route for the web app.
+Pick the path that matches how the broker will be reached. Both use Docker Compose; only the env vars differ. Agent connections are unaffected by either choice — they always require a bearer token minted in the web UI.
 
-Security note: the default trusted-network mode is effectively unauthenticated. Only use it when access is already restricted by something like Tailscale, WireGuard, an SSH tunnel, or a private LAN. Do not expose an unauthenticated termag-next instance on the public internet.
+#### Path A — Private network (Tailscale, WireGuard, ssh tunnel, LAN)
+
+The default. Auth-less: no login screen, no OAuth setup. Anyone who can reach the URL gets a session, which is exactly what you want when the URL is already gated by your VPN.
+
+Clone, then prep your env file:
 
 ```bash
 git clone https://github.com/yeutterg/termag-next.git
 cd termag-next
+cp infra/.env.example infra/.env
 ```
 
-Create `infra/.env`:
-
-```bash
-TERMAG_HOST=localhost
-NEXTAUTH_URL=http://localhost
-NEXTAUTH_SECRET=replace-with-output-of-openssl-rand-hex-32
-TERMAG_ROOTS={"WIP":"~/WIP"}
-```
-
-Start the stack:
-
-```bash
-docker compose --env-file infra/.env -f infra/docker-compose.yml up -d --build
-```
-
-Open `http://localhost`. For a VPS, set `TERMAG_HOST` and `NEXTAUTH_URL` to your real hostname, for example `termag.example.com` and `https://termag.example.com`. If that hostname is public, configure OAuth before relying on it.
-
-### Web App Security
-
-termag-next has three browser access modes. Agent connections are separate and always require a bearer token created in the web UI.
-
-The default is trusted-network mode. There is no login screen; anyone who can reach the web app can use it. This is only appropriate behind a private access layer:
-
-```bash
-TERMAG_HOST=localhost
-NEXTAUTH_URL=http://localhost
-```
-
-For a thin shared-password gate on top of trusted-network mode, add:
-
-```bash
-TERMAG_PASSWORD=pick-a-long-random-string
-```
-
-This is useful for private deployments where you want a second check, but it is still a shared password. It is not full public-internet auth.
-
-For a public hostname, turn trusted-network mode off and use Google OAuth with a single allowed email. First generate a NextAuth secret:
+Generate the NextAuth secret (NextAuth needs one even when there's no login screen):
 
 ```bash
 openssl rand -hex 32
 ```
 
-Then paste the output into `NEXTAUTH_SECRET` below:
+Edit `infra/.env`:
 
 ```bash
-TERMAG_TRUSTED_NETWORK=false
+TERMAG_HOST=termag.tailnet               # private hostname or IP
+NEXTAUTH_URL=https://termag.tailnet      # exactly what the browser types
+NEXTAUTH_SECRET=<paste output of openssl above>
+TERMAG_ROOTS={"WIP":"~/WIP"}
+# leave TERMAG_TRUSTED_NETWORK=true (the default)
+```
+
+Start the stack:
+
+```bash
+cd infra
+docker compose up -d --build
+```
+
+Open `https://termag.tailnet` — you're in.
+
+**Optional shared-password gate** as a thin "oops I leaked the URL" safety net (useful for a homelab but NOT a substitute for OAuth on the open internet):
+
+```bash
+# add to infra/.env
+TERMAG_PASSWORD=pick-a-long-random-string
+```
+
+#### Path B — Public hostname (Google OAuth)
+
+Use this when the broker is reachable over the open internet. Adds a Google login with a single-email allowlist.
+
+First create OAuth credentials at https://console.cloud.google.com/apis/credentials → **Create OAuth Client ID** → **Web application**, with authorized redirect URI `https://termag.example.com/api/auth/callback/google`.
+
+Clone and prep:
+
+```bash
+git clone https://github.com/yeutterg/termag-next.git
+cd termag-next
+cp infra/.env.example infra/.env
+openssl rand -hex 32
+```
+
+Edit `infra/.env`:
+
+```bash
+TERMAG_HOST=termag.example.com
 NEXTAUTH_URL=https://termag.example.com
-NEXTAUTH_SECRET=paste-the-openssl-output-here
+NEXTAUTH_SECRET=<paste output of openssl above>
+TERMAG_ROOTS={"WIP":"~/WIP"}
+
+TERMAG_TRUSTED_NETWORK=false
 GOOGLE_CLIENT_ID=...
 GOOGLE_CLIENT_SECRET=...
-TERMAG_ALLOWED_EMAIL=you@example.com
+TERMAG_ALLOWED_EMAIL=you@example.com    # only this address gets past signIn
 ```
+
+Start the stack:
+
+```bash
+cd infra
+docker compose up -d --build
+```
+
+Caddy auto-issues a Let's Encrypt cert for `TERMAG_HOST`. Open `https://termag.example.com` and sign in with Google.
 
 Put these variables in `infra/.env` for Docker Compose, or in `apps/web/.env.local` for local development.
 
