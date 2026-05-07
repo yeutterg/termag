@@ -45,15 +45,16 @@ fi
 # doesn't collide with future @yeutterg/* packages.
 old_version="$(node -p "require('./package.json').version")"
 
-# `npm version` makes a commit named "<new-version>"; override to a more
-# searchable message.
-new_version="$(npm version "$bump" --no-git-tag-version)"
-# strip leading "v" — `npm version` returns "v0.1.1"
-new_version="${new_version#v}"
+# In workspace contexts npm version prints the package name on stdout
+# alongside the version, plus any `npm install` chatter that the version
+# bump triggers. Don't try to parse that — re-read package.json after
+# the bump for a single source of truth.
+npm version "$bump" --no-git-tag-version >/dev/null
+new_version="$(node -p "require('./package.json').version")"
 
 echo "Bumping @yeutterg/agent: $old_version -> $new_version"
 
-git -C "$repo_root" add "$agent_dir/package.json"
+git -C "$repo_root" add "$agent_dir/package.json" package-lock.json
 git -C "$repo_root" -c commit.gpgsign=false commit -m "agent: release v$new_version"
 git -C "$repo_root" tag "agent-v$new_version"
 
