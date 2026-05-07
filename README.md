@@ -129,7 +129,7 @@ brew install yeutterg/tap/termag-agent
 npm works anywhere Node.js and tmux are available:
 
 ```bash
-npm install -g @yeutterg/agent
+npm install -g termag-agent
 ```
 
 Run the agent:
