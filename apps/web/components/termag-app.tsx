@@ -13,8 +13,7 @@ import {
   Plus,
   Search,
   Settings,
-  Sun,
-  TerminalSquare
+  Sun
 } from 'lucide-react';
 import { TerminalPane } from './terminal/terminal-pane';
 import { PlatformProvider, Shortcut, shortcutSuffix } from './shortcut';
@@ -23,7 +22,7 @@ import { useTabHistory } from './use-tab-history';
 import type { Project, Tab } from './types';
 import type { Platform } from '@/lib/platform';
 import { AGENT_DEFAULTS } from '@/lib/defaults';
-import { cn, statusDot, statusLabel } from '@/lib/utils';
+import { cn, statusDot } from '@/lib/utils';
 
 // Heavy dialogs are split into their own chunks and loaded only when opened.
 const CommandPalette = lazy(() => import('./command-palette').then((m) => ({ default: m.CommandPalette })));
@@ -35,16 +34,6 @@ function isTypingTarget(target: EventTarget | null): boolean {
   if (!(target instanceof HTMLElement)) return false;
   const tag = target.tagName;
   return tag === 'INPUT' || tag === 'TEXTAREA' || target.isContentEditable;
-}
-
-function flattenSessions(projects: Project[]): Array<{ projectId: string; tabId: string }> {
-  const out: Array<{ projectId: string; tabId: string }> = [];
-  for (const project of projects) {
-    for (const tab of project.tabs) {
-      out.push({ projectId: project.id, tabId: tab.id });
-    }
-  }
-  return out;
 }
 
 type AuthMode = 'oauth' | 'password' | 'trusted';
@@ -80,6 +69,9 @@ export function TermagApp({ user, initialProjects, roots, platform, authMode }: 
   // On desktop the ctrl pane is always visible side-by-side, so this state
   // doesn't change what gets rendered there.
   const [mobileViewCtrl, setMobileViewCtrl] = useState(false);
+  // Drag-and-drop reorder state for the sidebar project list.
+  const [dragProjectId, setDragProjectId] = useState<string | null>(null);
+  const [dropTarget, setDropTarget] = useState<{ id: string; before: boolean } | null>(null);
 
   const handleSessionTitle = useCallback((sessionId: string, title: string) => {
     setLiveTitles((current) => (current[sessionId] === title ? current : { ...current, [sessionId]: title }));
@@ -134,7 +126,6 @@ export function TermagApp({ user, initialProjects, roots, platform, authMode }: 
     createTab: (projectId: string) => void;
     closeTab: (projectId: string, tabId: string) => void;
     cycleTheme: () => void;
-    switchRecentTab: (reverse: boolean) => void;
     selectTab: (projectId: string, tabId: string) => void;
   } | null>(null);
 
@@ -161,26 +152,22 @@ export function TermagApp({ user, initialProjects, roots, platform, authMode }: 
         return;
       }
 
-      // Every other shortcut must yield to inline inputs — otherwise hitting
-      // ⌘↵ to commit a rename also creates a new session, ⌘B toggles the
-      // sidebar while typing, etc.
-      if (typing) return;
+      // Modifier-prefixed shortcuts fire even inside inputs/textareas — the
+      // modifier signals app intent, not typing intent. xterm.js focuses a
+      // hidden textarea while the terminal is active, so a blanket `typing`
+      // guard here would silently kill ⌘1-9 (and every other mod shortcut)
+      // whenever the terminal has focus. Only ⌘↵ and `?` yield to inputs.
 
-      // ? (Shift+/) opens the cheat sheet.
-      if (event.key === '?') {
+      // ⌃ + 1-9 jumps to the Nth project (matching the sidebar order). We
+      // use Ctrl (not Cmd/mod) because Safari intercepts ⌘1-9 at the menu
+      // level and ignores preventDefault. ⌃number isn't bound by macOS or
+      // any major browser, and matches the iTerm2 tab-switch convention.
+      if (event.ctrlKey && !event.metaKey && /^[1-9]$/.test(event.key)) {
         event.preventDefault();
-        setHelpOpen(true);
-        return;
-      }
-
-      // ⌘/Ctrl + 1-9 jumps to the Nth session in the flat (project × tab) list.
-      // Browsers also bind ⌘1-9 to switch tabs; preventDefault intercepts it.
-      if (mod && /^[1-9]$/.test(event.key)) {
-        const flat = flattenSessions(handlers.projects);
-        const target = flat[parseInt(event.key, 10) - 1];
-        if (target) {
-          event.preventDefault();
-          handlers.selectTab(target.projectId, target.tabId);
+        const project = handlers.projects[parseInt(event.key, 10) - 1];
+        if (project) {
+          const tabId = project.tabs[0]?.id;
+          if (tabId) handlers.selectTab(project.id, tabId);
         }
         return;
       }
@@ -191,11 +178,10 @@ export function TermagApp({ user, initialProjects, roots, platform, authMode }: 
         return;
       }
 
-      if (event.ctrlKey && event.key === 'Tab') {
-        event.preventDefault();
-        handlers.switchRecentTab(event.shiftKey);
-        return;
-      }
+      // Note: ⌃Tab / ⌃⇧Tab and ⌘W are intentionally NOT bound — every
+      // major browser hard-binds them to next/prev/close tab and ignores
+      // preventDefault. The × button on each tab handles close; ⌘1-9
+      // and the palette handle navigation.
 
       if (mod && event.key.toLowerCase() === 'b') {
         event.preventDefault();
@@ -203,9 +189,9 @@ export function TermagApp({ user, initialProjects, roots, platform, authMode }: 
         return;
       }
 
-      // ⌘↵ creates a new session in the active project (replaces the old
-      // ⌥⌘T which collided with browser bookmark-bar toggle).
+      // ⌘↵ creates a new session — but yields to inputs (rename commit etc.)
       if (mod && event.key === 'Enter') {
+        if (typing) return;
         event.preventDefault();
         if (handlers.activeProject) handlers.createTab(handlers.activeProject.id);
         return;
@@ -226,15 +212,17 @@ export function TermagApp({ user, initialProjects, roots, platform, authMode }: 
         return;
       }
 
-      if (mod && event.key.toLowerCase() === 'w') {
-        event.preventDefault();
-        if (handlers.activeProject && handlers.activeTab) handlers.closeTab(handlers.activeProject.id, handlers.activeTab.id);
-        return;
-      }
-
       if (mod && event.key === '.') {
         event.preventDefault();
         handlers.cycleTheme();
+        return;
+      }
+
+      // ? (Shift+/) opens the cheat sheet — only when not typing, so users
+      // can still type a literal "?" into inputs and the terminal.
+      if (event.key === '?' && !typing) {
+        event.preventDefault();
+        setHelpOpen(true);
         return;
       }
     };
@@ -299,6 +287,33 @@ export function TermagApp({ user, initialProjects, roots, platform, authMode }: 
     setActiveTabId(tab?.id || '');
     if (project?.id && tab?.id && nextTabId) tabHistory.remember(project.id, tab.id);
   }, [tabHistory]);
+
+  const reorderProjects = useCallback(async (sourceId: string, targetId: string, before: boolean) => {
+    if (sourceId === targetId) return;
+    let nextOrder: string[] = [];
+    setProjects((current) => {
+      const fromIdx = current.findIndex((p) => p.id === sourceId);
+      if (fromIdx < 0) return current;
+      const reordered = [...current];
+      const [source] = reordered.splice(fromIdx, 1);
+      let toIdx = reordered.findIndex((p) => p.id === targetId);
+      if (toIdx < 0) toIdx = reordered.length;
+      else if (!before) toIdx += 1;
+      reordered.splice(toIdx, 0, source);
+      nextOrder = reordered.map((p) => p.id);
+      return reordered;
+    });
+    if (nextOrder.length === 0) return;
+    const res = await fetch('/api/projects/order', {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ projectIds: nextOrder })
+    });
+    if (!res.ok) {
+      console.error('[termag] reorderProjects failed', res.status, await res.text().catch(() => ''));
+      await reloadProjects();
+    }
+  }, [reloadProjects]);
 
   const createProject = useCallback(async (formData: FormData) => {
     const rootKey = String(formData.get('rootKey') || Object.keys(roots)[0]);
@@ -412,13 +427,6 @@ export function TermagApp({ user, initialProjects, roots, platform, authMode }: 
     closeDrawerOnMobile();
   }, [tabHistory, closeDrawerOnMobile]);
 
-  const switchRecentTab = useCallback((reverse: boolean) => {
-    if (!activeProject) return;
-    const currentTabId = activeTab?.id ?? activeTabIdRef.current;
-    const nextTabId = tabHistory.cycle(activeProject, currentTabId, reverse);
-    if (nextTabId) selectTab(activeProject.id, nextTabId);
-  }, [activeProject, activeTab, selectTab, tabHistory]);
-
   const cycleTheme = useCallback(async () => {
     const next = theme === 'system' ? 'dark' : theme === 'dark' ? 'light' : 'system';
     setTheme(next);
@@ -431,7 +439,7 @@ export function TermagApp({ user, initialProjects, roots, platform, authMode }: 
   }, [theme]);
 
   // Keep the keyboard ref pointed at the latest values without re-binding.
-  handlersRef.current = { activeProject, activeTab, projects, createTab, closeTab, cycleTheme, switchRecentTab, selectTab };
+  handlersRef.current = { activeProject, activeTab, projects, createTab, closeTab, cycleTheme, selectTab };
 
   const groups = useMemo(() => {
     const result = new Map<string, Project[]>();
@@ -529,8 +537,51 @@ export function TermagApp({ user, initialProjects, roots, platform, authMode }: 
                 <div className="space-y-1">
                   {groupProjects.map((project) => {
                     const isActiveProject = project.id === activeProject?.id;
+                    const isDragging = dragProjectId === project.id;
+                    const dropBefore = dropTarget?.id === project.id && dropTarget.before;
+                    const dropAfter = dropTarget?.id === project.id && !dropTarget.before;
                     return (
-                      <div key={project.id}>
+                      <div
+                        key={project.id}
+                        draggable
+                        onDragStart={(event) => {
+                          setDragProjectId(project.id);
+                          event.dataTransfer.effectAllowed = 'move';
+                          event.dataTransfer.setData('text/plain', project.id);
+                        }}
+                        onDragOver={(event) => {
+                          if (!dragProjectId || dragProjectId === project.id) return;
+                          event.preventDefault();
+                          event.dataTransfer.dropEffect = 'move';
+                          const rect = (event.currentTarget as HTMLDivElement).getBoundingClientRect();
+                          const before = event.clientY < rect.top + rect.height / 2;
+                          if (dropTarget?.id !== project.id || dropTarget.before !== before) {
+                            setDropTarget({ id: project.id, before });
+                          }
+                        }}
+                        onDragLeave={() => {
+                          if (dropTarget?.id === project.id) setDropTarget(null);
+                        }}
+                        onDrop={(event) => {
+                          if (!dragProjectId) return;
+                          event.preventDefault();
+                          const rect = (event.currentTarget as HTMLDivElement).getBoundingClientRect();
+                          const before = event.clientY < rect.top + rect.height / 2;
+                          reorderProjects(dragProjectId, project.id, before);
+                          setDragProjectId(null);
+                          setDropTarget(null);
+                        }}
+                        onDragEnd={() => {
+                          setDragProjectId(null);
+                          setDropTarget(null);
+                        }}
+                        className={cn(
+                          'relative',
+                          isDragging && 'opacity-40',
+                          dropBefore && 'before:absolute before:inset-x-2 before:-top-px before:h-px before:bg-text',
+                          dropAfter && 'after:absolute after:inset-x-2 after:-bottom-px after:h-px after:bg-text'
+                        )}
+                      >
                         <div className={cn('group/project flex h-9 w-full items-center rounded-md hover:bg-panel2', isActiveProject && 'bg-panel2 shadow-sm')}>
                           <div
                             role="button"

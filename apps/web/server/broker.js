@@ -127,7 +127,7 @@ async function userIdFromRequest(req, prisma) {
  *  - the primary stream per session for scrollback ownership (`sessionPrimary`)
  *
  * Returns the registration entry points called from the WebSocket upgrade
- * handler, plus a small surface (`isAgentOnline`, `killTmux`) the Next.js
+ * handler, plus a `killTmux` helper the Next.js
  * route handlers reach through globalThis.
  */
 function createBroker({ prisma, wss }) {
@@ -513,9 +513,6 @@ function createBroker({ prisma, wss }) {
   return {
     registerAgent,
     registerBrowser,
-    isAgentOnline(userId) {
-      return Boolean(agentForUser(userId));
-    },
     killTmux(userId, tmuxName, timeoutMs = 5000) {
       if (!tmuxName || !agentForUser(userId)) return Promise.resolve(false);
       return sendToAgent(userId, 'tmux-kill', { tmuxName }, timeoutMs)

@@ -21,6 +21,7 @@ export type Project = {
   agentType: string;
   agentSpawnCommand: string;
   status: string;
+  position?: number | null;
   openedAt: string | Date;
   tabs: Tab[];
   sessions: Session[];

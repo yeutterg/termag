@@ -25,7 +25,7 @@ async function signOutPassword() {
   window.location.href = '/login';
 }
 
-type Row = { project: Project; tab: Tab; index: number };
+type Row = { project: Project; tab: Tab; projectIndex: number; isProjectHead: boolean };
 
 export function CommandPalette({
   open,
@@ -40,15 +40,15 @@ export function CommandPalette({
   authMode
 }: CommandPaletteProps) {
   if (!open) return null;
-  // Flatten to (project × tab) — projects already come back sorted by
-  // openedAt desc from /api/projects, so the first ~9 rows are essentially
-  // the user's recent-session list, ⌘1-9 to jump.
+  // Flatten to (project × tab). ⌃1-9 jumps to the Nth project, so we tag
+  // the first row of each project as a "head" — that's where the shortcut
+  // hint renders.
   const rows: Row[] = [];
-  for (const project of projects) {
-    for (const tab of project.tabs) {
-      rows.push({ project, tab, index: rows.length + 1 });
-    }
-  }
+  projects.forEach((project, projectIndex) => {
+    project.tabs.forEach((tab, tabIndex) => {
+      rows.push({ project, tab, projectIndex: projectIndex + 1, isProjectHead: tabIndex === 0 });
+    });
+  });
   return (
     <div className="fixed inset-0 z-50 bg-black/40 p-4 sm:p-6" onClick={() => onOpenChange(false)}>
       <Command
@@ -70,7 +70,7 @@ export function CommandPalette({
           <Command.Empty className="px-3 py-6 text-sm text-muted">No matches.</Command.Empty>
           {rows.length > 0 && (
             <Command.Group heading="Recent sessions">
-              {rows.map(({ project, tab, index }) => (
+              {rows.map(({ project, tab, projectIndex, isProjectHead }) => (
                 <Command.Item
                   key={`${project.id}:${tab.id}`}
                   value={`${project.name} ${project.rootKey} ${tab.name}`}
@@ -88,7 +88,7 @@ export function CommandPalette({
                     </div>
                     <span className="truncate text-xs text-muted">{tab.name}</span>
                   </div>
-                  {index <= 9 && <Shortcut keys={['mod', String(index)]} />}
+                  {isProjectHead && projectIndex <= 9 && <Shortcut keys={['ctrl', String(projectIndex)]} />}
                 </Command.Item>
               ))}
             </Command.Group>

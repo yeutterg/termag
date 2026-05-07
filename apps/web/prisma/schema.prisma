@@ -44,6 +44,9 @@ model Project {
   agentSpawnCommand String
   ctrlSpawnCommand  String   @default("$SHELL")
   status            String   @default("sleeping")
+  // User-defined drag-and-drop ordering. Null means "no manual position
+  // set" — project falls back to alphabetical sorting in listProjects.
+  position          Float?
   openedAt          DateTime @default(now())
   createdAt         DateTime @default(now())
   updatedAt         DateTime @updatedAt
@@ -55,6 +58,7 @@ model Project {
   sessions Session[]
 
   @@unique([userId, name])
+  @@index([userId, position])
   @@index([userId, openedAt])
 }
 

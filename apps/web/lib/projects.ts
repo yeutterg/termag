@@ -6,14 +6,42 @@ function isUniqueConstraintError(error: unknown): boolean {
 }
 
 export async function listProjects(userId: string) {
+  // Manual order (position) wins; alphabetical (name asc) is the default
+  // fallback for any project the user hasn't dragged yet.
   return prisma.project.findMany({
     where: { userId },
     include: {
       tabs: { orderBy: { ordinal: 'asc' }, include: { session: true } },
       sessions: true
     },
-    orderBy: { openedAt: 'desc' }
+    orderBy: [
+      { position: { sort: 'asc', nulls: 'last' } },
+      { name: 'asc' }
+    ]
   });
+}
+
+/**
+ * Persist a user's drag-reordered list. Assigns evenly spaced positions so
+ * later inserts can land between two without renumbering everything.
+ */
+export async function reorderProjects(userId: string, projectIds: string[]) {
+  const ownProjects = await prisma.project.findMany({
+    where: { userId },
+    select: { id: true }
+  });
+  const ownIds = new Set(ownProjects.map((p) => p.id));
+  if (projectIds.length !== ownIds.size || !projectIds.every((id) => ownIds.has(id))) {
+    throw new Error('reorderProjects: id list must cover exactly the user’s own projects');
+  }
+  await prisma.$transaction(
+    projectIds.map((id, idx) =>
+      prisma.project.update({
+        where: { id },
+        data: { position: (idx + 1) * 1000 }
+      })
+    )
+  );
 }
 
 export async function createProject(input: {
@@ -93,11 +121,4 @@ export async function createTab(projectId: string, name?: string) {
     }
   }
   throw new Error('Unable to create tab');
-}
-
-export async function touchProject(projectId: string) {
-  return prisma.project.update({
-    where: { id: projectId },
-    data: { openedAt: new Date() }
-  });
 }

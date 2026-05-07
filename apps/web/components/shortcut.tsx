@@ -22,10 +22,6 @@ export function PlatformProvider({ platform, children }: { platform: Platform; c
   return <PlatformContext.Provider value={platform}>{children}</PlatformContext.Provider>;
 }
 
-export function usePlatform() {
-  return useContext(PlatformContext);
-}
-
 const MAC_GLYPHS: Record<string, string> = {
   mod: '⌘',
   alt: '⌥',
@@ -50,7 +46,7 @@ const WIN_LABELS: Record<string, string> = {
   delete: 'Delete'
 };
 
-export function formatShortcut(keys: ChordKey[], isMac: boolean): string {
+function formatShortcut(keys: ChordKey[], isMac: boolean): string {
   if (isMac) return keys.map((key) => MAC_GLYPHS[key] ?? key).join('');
   return keys.map((key) => WIN_LABELS[key] ?? key).join('+');
 }

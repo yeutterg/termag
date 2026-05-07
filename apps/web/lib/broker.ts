@@ -1,5 +1,4 @@
 type Broker = {
-  isAgentOnline: (userId: string) => boolean;
   killTmux: (userId: string, tmuxName: string, timeoutMs?: number) => Promise<boolean>;
 };
 
