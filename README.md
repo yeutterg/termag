@@ -120,12 +120,18 @@ TERMAG_PASSWORD=pick-a-long-random-string
 
 This is useful for private deployments where you want a second check, but it is still a shared password. It is not full public-internet auth.
 
-For a public hostname, turn trusted-network mode off and use Google OAuth with a single allowed email:
+For a public hostname, turn trusted-network mode off and use Google OAuth with a single allowed email. First generate a NextAuth secret:
+
+```bash
+openssl rand -hex 32
+```
+
+Then paste the output into `NEXTAUTH_SECRET` below:
 
 ```bash
 TERMAG_TRUSTED_NETWORK=false
 NEXTAUTH_URL=https://termag.example.com
-NEXTAUTH_SECRET=replace-with-output-of-openssl-rand-hex-32
+NEXTAUTH_SECRET=paste-the-openssl-output-here
 GOOGLE_CLIENT_ID=...
 GOOGLE_CLIENT_SECRET=...
 TERMAG_ALLOWED_EMAIL=you@example.com
@@ -154,18 +160,30 @@ npm install -g termag-agent
 Run the agent:
 
 ```bash
-export TERMAG_URL=wss://termag.example.com/api/ws/agent
+export TERMAG_URL=wss://termag.example.com/api/ws/agent   # your broker URL — see below for localhost
 export TERMAG_AGENT_TOKEN=tmag_...
 export TERMAG_AGENT_ROOTS='{"WIP":"~/WIP"}'
 
 termag-agent
 ```
 
-For local Docker testing, use:
+`TERMAG_URL` always includes the port unless you're using a default-port reverse proxy. Common shapes:
 
 ```bash
-export TERMAG_URL=ws://localhost/api/ws/agent
+# Public hostname behind Caddy/nginx on TLS (no explicit port — 443 implied):
+TERMAG_URL=wss://termag.example.com/api/ws/agent
+
+# Tailscale or LAN with TLS terminator on port 443:
+TERMAG_URL=wss://termag.tailnet/api/ws/agent
+
+# Local development against `npm run dev` (default port 3000):
+TERMAG_URL=ws://localhost:3000/api/ws/agent
+
+# Local Docker stack with Caddy on port 80:
+TERMAG_URL=ws://localhost/api/ws/agent
 ```
+
+`ws://` (no TLS) is only accepted when the hostname is `localhost`, `127.0.0.1`, or `::1`. Anything else must be `wss://` or the agent refuses to connect.
 
 Add more devices by installing the agent on each one and giving each device named roots that make sense there.
 
