@@ -1,5 +1,10 @@
 generator client {
-  provider = "prisma-client-js"
+  provider      = "prisma-client-js"
+  // node:22-bookworm-slim ships OpenSSL 3 only; Prisma's auto-detect picks
+  // the openssl-1.1.x binary by default and then fails at runtime with
+  // libssl.so.1.1 not found. Listing both arm64 + amd64 OpenSSL 3 targets
+  // forces Prisma to ship the right engine for either Docker host arch.
+  binaryTargets = ["native", "linux-arm64-openssl-3.0.x", "debian-openssl-3.0.x"]
 }
 
 datasource db {

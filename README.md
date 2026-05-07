@@ -95,15 +95,23 @@ Generate the NextAuth secret (NextAuth needs one even when there's no login scre
 openssl rand -hex 32
 ```
 
-Edit `infra/.env`:
+Edit `infra/.env`. Pick the shape that matches where the broker will actually live:
 
 ```bash
-TERMAG_HOST=termag.tailnet               # private hostname or IP
-NEXTAUTH_URL=https://termag.tailnet      # exactly what the browser types
+# Local testing on your own machine:
+TERMAG_HOST=localhost
+NEXTAUTH_URL=http://localhost
+
+# Or — Tailscale / WireGuard / LAN:
+# TERMAG_HOST=termag.tailnet
+# NEXTAUTH_URL=https://termag.tailnet
+
 NEXTAUTH_SECRET=<paste output of openssl above>
 TERMAG_ROOTS={"WIP":"~/WIP"}
 # leave TERMAG_TRUSTED_NETWORK=true (the default)
 ```
+
+`NEXTAUTH_URL` must be exactly what the browser types — same scheme, host, and port. A mismatch breaks OAuth callbacks and session cookies.
 
 Start the stack:
 
@@ -112,7 +120,7 @@ cd infra
 docker compose up -d --build
 ```
 
-Open `https://termag.tailnet` — you're in.
+Open the URL you set in `NEXTAUTH_URL` — you're in.
 
 **Optional shared-password gate** as a thin "oops I leaked the URL" safety net (useful for a homelab but NOT a substitute for OAuth on the open internet):
 

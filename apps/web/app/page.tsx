@@ -6,6 +6,10 @@ import { parseRoots } from '@/lib/defaults';
 import { detectPlatformFromUserAgent } from '@/lib/platform';
 import { TermagApp } from '@/components/termag-app';
 
+// Per-request render — depends on session, headers, and DB. Prerendering
+// at build would call Prisma against an unconfigured container.
+export const dynamic = 'force-dynamic';
+
 export default async function HomePage() {
   const user = await currentUser();
   if (!user) redirect('/login');

@@ -4,6 +4,11 @@ import { authOptions, passwordCookieValid, passwordGateEnabled, trustedNetworkEn
 import { LoginButton } from '@/components/login-button';
 import { PasswordForm } from '@/components/password-form';
 
+// Auth state and trusted-user upserts depend on env + DB at request time.
+// Prerendering this page at build runs Prisma against an unconfigured
+// container, which fails. Force per-request rendering instead.
+export const dynamic = 'force-dynamic';
+
 export default async function LoginPage() {
   // Trusted-network with no password gate has nothing to log in to.
   if (trustedNetworkEnabled() && !passwordGateEnabled()) redirect('/');

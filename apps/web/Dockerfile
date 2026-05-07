@@ -1,5 +1,11 @@
 FROM node:22-bookworm-slim AS deps
 WORKDIR /app
+# Prisma's native engine links libssl + libcrypto. bookworm-slim ships those
+# but ca-certificates + openssl tooling are needed for engine init at build
+# time and for HTTPS during npm install on first build.
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends openssl ca-certificates \
+  && rm -rf /var/lib/apt/lists/*
 COPY package.json package-lock.json* ./
 COPY apps/web/package.json apps/web/package.json
 COPY apps/agent/package.json apps/agent/package.json
@@ -18,6 +24,11 @@ FROM node:22-bookworm-slim AS runner
 WORKDIR /app
 ENV NODE_ENV=production
 ENV NEXT_TELEMETRY_DISABLED=1
+# Same packages as the deps stage — Prisma's runtime engine needs libssl3,
+# and prisma migrate deploy + HTTPS callouts need openssl + CA bundle.
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends openssl ca-certificates \
+  && rm -rf /var/lib/apt/lists/*
 COPY --from=builder /app/package.json ./package.json
 COPY --from=builder /app/node_modules ./node_modules
 COPY --from=builder /app/apps/web/package.json ./apps/web/package.json
