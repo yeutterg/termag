@@ -1,7 +1,7 @@
 {
-  "name": "@yeutterg/agent",
+  "name": "termag-agent",
   "version": "0.1.1",
-  "description": "Outbound termag laptop agent — bridges tmux to the termag broker over WebSocket. No native deps.",
+  "description": "Outbound termag laptop agent. Bridges tmux to the termag broker over WebSocket. No native deps.",
   "author": "Greg Yeutter <yeutterg@gmail.com>",
   "license": "MIT",
   "repository": {
