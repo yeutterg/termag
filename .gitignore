@@ -25,3 +25,6 @@ apps/web/prisma/dev.db*
 
 # OS
 .DS_Store
+
+# npm credentials — only ever live in ~/.npmrc, never inside the repo
+.npmrc
