@@ -1,10 +1,12 @@
 # termag-next
 
-termag-next is a browser-based tmux viewer for vibe coding from anywhere.
+termag-next is a browser-based tmux workspace for coding agents on remote machines.
 
 It is a Next.js fork and rebuild of the original [termag](https://github.com/yeutterg/termag) project. The idea is simple: run one web app somewhere reachable, run a small outbound agent on each machine that has projects, then use one browser to open the tmux sessions from all of those machines.
 
 That browser can be on your laptop, a tablet, or a phone on a cellular connection. Your real work still happens inside tmux on the remote device, but the UI follows you.
+
+Security note: the default trusted-network mode is effectively unauthenticated. Only use it when access is already restricted by something like Tailscale, WireGuard, an SSH tunnel, or a private LAN. Do not expose an unauthenticated termag-next instance on the public internet.
 
 ![termag-next browser UI with projects, tabs, and split tmux panes](docs/images/termag-ui.png)
 
@@ -64,7 +66,7 @@ Start the stack:
 docker compose --env-file infra/.env -f infra/docker-compose.yml up -d --build
 ```
 
-Open `http://localhost`. For a VPS, set `TERMAG_HOST` and `NEXTAUTH_URL` to your real hostname, for example `termag.example.com` and `https://termag.example.com`.
+Open `http://localhost`. For a VPS, set `TERMAG_HOST` and `NEXTAUTH_URL` to your real hostname, for example `termag.example.com` and `https://termag.example.com`. If that hostname is public, configure OAuth before relying on it.
 
 ### 2. Create An Agent Token
 
@@ -140,7 +142,7 @@ npm run fake -w apps/agent
 
 ## Authentication
 
-termag-next is trusted-network first. By default, anyone who can reach the web app can use it. That is convenient for localhost, Tailscale, WireGuard, an SSH tunnel, or a private LAN.
+termag-next is trusted-network first. By default, anyone who can reach the web app can use it. That is risky by design and is only meant for localhost or private access layers such as Tailscale, WireGuard, an SSH tunnel, or a private LAN.
 
 For a public hostname, turn off trusted mode and use Google OAuth with a single allowed email:
 
