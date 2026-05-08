@@ -29,9 +29,11 @@ Use WSL. tmux doesn't run on native Windows; the agent assumes a Unix tmux.
 
 ```bash
 export TERMAG_URL=wss://termag.example.com/api/ws/agent
-export TERMAG_AGENT_TOKEN=tmag_...        # generate in the web New Device dialog
+export TERMAG_AGENT_TOKEN=tmag_...
 export TERMAG_AGENT_ROOTS='{"MacBook Pro":"~/Code","homelab":"~/homelab"}'
 ```
+
+Generate `TERMAG_AGENT_TOKEN` in the web app from `+` → **New Device**.
 
 `TERMAG_URL` must be `wss://` for any non-localhost host. The agent rejects `ws://` to anything else than 127.0.0.1 / ::1. A misconfigured URL or DNS poisoning would otherwise leak the agent token to whoever's at the other end.
 

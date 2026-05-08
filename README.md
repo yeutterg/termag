@@ -190,10 +190,12 @@ npm install -g termag-agent
 Configure the agent:
 
 ```bash
-export TERMAG_URL=wss://termag.example.com/api/ws/agent   # your broker URL — see below for localhost
+export TERMAG_URL=wss://termag.example.com/api/ws/agent
 export TERMAG_AGENT_TOKEN=tmag_...
 export TERMAG_AGENT_ROOTS='{"MacBook Pro":"~/Code"}'
 ```
+
+Use your broker URL for `TERMAG_URL`; examples are below.
 
 Run it:
 
