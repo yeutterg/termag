@@ -187,13 +187,17 @@ npm works anywhere Node.js and tmux are available:
 npm install -g termag-agent
 ```
 
-Run the agent:
+Configure the agent:
 
 ```bash
 export TERMAG_URL=wss://termag.example.com/api/ws/agent   # your broker URL — see below for localhost
 export TERMAG_AGENT_TOKEN=tmag_...
 export TERMAG_AGENT_ROOTS='{"MacBook Pro":"~/Code"}'
+```
 
+Run it:
+
+```bash
 termag-agent
 ```
 
@@ -233,12 +237,17 @@ npm run db:migrate
 npm run dev
 ```
 
-Run a local agent in another shell:
+Configure a local agent in another shell:
 
 ```bash
-TERMAG_URL=ws://localhost:3000/api/ws/agent \
-TERMAG_AGENT_TOKEN=tmag_... \
-TERMAG_AGENT_ROOTS='{"Local device":"~/Code"}' \
+export TERMAG_URL=ws://localhost:3000/api/ws/agent
+export TERMAG_AGENT_TOKEN=tmag_...
+export TERMAG_AGENT_ROOTS='{"Local device":"~/Code"}'
+```
+
+Run it:
+
+```bash
 npm run agent
 ```
 
@@ -249,11 +258,16 @@ DATABASE_URL='file:./dev.db' npm run preview:seed -w apps/web
 npm run dev
 ```
 
-Then in another shell:
+Then configure the fake agent in another shell:
 
 ```bash
-TERMAG_URL='ws://localhost:3000/api/ws/agent' \
-TERMAG_AGENT_TOKEN='tmag_preview_local_agent_token' \
+export TERMAG_URL='ws://localhost:3000/api/ws/agent'
+export TERMAG_AGENT_TOKEN='tmag_preview_local_agent_token'
+```
+
+Run it:
+
+```bash
 npm run fake -w apps/agent
 ```
 
