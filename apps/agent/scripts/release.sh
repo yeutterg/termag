@@ -72,26 +72,41 @@ tarball_url="https://registry.npmjs.org/termag-agent/-/termag-agent-${new_versio
 echo "Fetching tarball to compute sha256..."
 sha="$(curl -sL "$tarball_url" | shasum -a 256 | awk '{print $1}')"
 
-cat <<EOF
+# If the tap is checked out at ~/repos/homebrew-tap, patch + push it
+# automatically so we don't risk a stale formula. Use `sed -E` (BSD-compatible
+# extended regex) — plain `\+` is interpreted literally by macOS sed.
+tap_dir="${HOME}/repos/homebrew-tap"
+formula="$tap_dir/Formula/termag-agent.rb"
+if [ "${TERMAG_AGENT_DRY_RUN:-}" != "1" ] && [ -f "$formula" ]; then
+  echo "Updating brew formula at $formula..."
+  (
+    cd "$tap_dir"
+    git pull --quiet
+    sed -i.bak -E \
+      -e "s|/termag-agent-[0-9]+\.[0-9]+\.[0-9]+\.tgz|/termag-agent-${new_version}.tgz|" \
+      -e "s|sha256 \"[a-f0-9]{64}\"|sha256 \"${sha}\"|" \
+      "$formula"
+    rm -f "${formula}.bak"
+    if [ -n "$(git status --porcelain "$formula")" ]; then
+      git add "$formula"
+      git -c commit.gpgsign=false commit -m "termag-agent ${new_version}" --quiet
+      git push --quiet
+      echo "Tap pushed: $(git rev-parse --short HEAD)"
+    else
+      echo "Formula already at ${new_version}; nothing to push."
+    fi
+  )
+else
+  cat <<EOF
 
 ==============================================================
-Brew formula update
+Brew formula update (no local tap found at $tap_dir)
 ==============================================================
-File: yeutterg/homebrew-tap/Formula/termag-agent.rb
-
-Replace the url and sha256 lines with:
 
   url "$tarball_url"
   sha256 "$sha"
 
-Then in your tap repo:
-
-  cd ~/repos/homebrew-tap
-  git pull
-  # edit Formula/termag-agent.rb with the lines above
-  git add Formula/termag-agent.rb
-  git commit -m "termag-agent $new_version"
-  git push
-
+Paste those into your tap's Formula/termag-agent.rb, then commit+push.
 ==============================================================
 EOF
+fi
