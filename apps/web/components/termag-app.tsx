@@ -1149,6 +1149,7 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
             onTokenDeleted={(name) => {
               setTokenDevices((current) => current.filter((device) => device !== name));
             }}
+            onAddDevice={() => setNewDeviceOpen(true)}
           />
         </Suspense>
       )}

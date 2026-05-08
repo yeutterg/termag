@@ -61,7 +61,7 @@ export function CommandPalette({
           <Command.Input
             autoFocus
             className="h-12 min-w-0 flex-1 bg-transparent text-sm outline-none placeholder:text-muted"
-            placeholder="Jump to an agent…"
+            placeholder="Jump to a project, agent, or command…"
           />
           <span className="font-mono text-[10px] text-muted">esc</span>
         </div>

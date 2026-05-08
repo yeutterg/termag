@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
-import { Check, Copy, ExternalLink, Trash2 } from 'lucide-react';
+import { Check, Copy, ExternalLink, Plus, Trash2 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import type { AgentDeviceStatus } from './types';
 
@@ -15,9 +15,10 @@ interface DevicesDialogProps {
   knownDeviceNames?: string[];
   focusedDevice?: string | null;
   onTokenDeleted?: (tokenName: string) => void;
+  onAddDevice?: () => void;
 }
 
-export function DevicesDialog({ open, onOpenChange, user, devices, knownDeviceNames = [], focusedDevice, onTokenDeleted }: DevicesDialogProps) {
+export function DevicesDialog({ open, onOpenChange, user, devices, knownDeviceNames = [], focusedDevice, onTokenDeleted, onAddDevice }: DevicesDialogProps) {
   const [tokens, setTokens] = useState<Token[]>([]);
   const [copied, setCopied] = useState('');
   const deviceRefs = useRef(new Map<string, HTMLDivElement>());
@@ -77,19 +78,41 @@ export function DevicesDialog({ open, onOpenChange, user, devices, knownDeviceNa
             <h2 className="text-base font-semibold">Devices</h2>
             <p className="text-sm text-muted">{user.email}</p>
           </div>
-          <span className={cn('rounded-full px-2 py-1 text-xs', anyConnected ? 'bg-good/15 text-good' : 'bg-panel2 text-muted')}>
-            {anyConnected ? `${devices.filter((device) => device.connected).length} connected` : 'No agents connected'}
-          </span>
+          <div className="flex items-center gap-2">
+            <span className={cn('rounded-full px-2 py-1 text-xs', anyConnected ? 'bg-good/15 text-good' : 'bg-panel2 text-muted')}>
+              {anyConnected ? `${devices.filter((device) => device.connected).length} connected` : 'No agents connected'}
+            </span>
+            {onAddDevice && (
+              <button
+                type="button"
+                onClick={() => { onOpenChange(false); onAddDevice(); }}
+                className="inline-flex h-7 items-center gap-1.5 rounded-md border border-line bg-bg px-2 text-xs text-text hover:bg-panel2"
+                title="Create a new device token"
+              >
+                <Plus className="h-3.5 w-3.5" />
+                Add device
+              </button>
+            )}
+          </div>
         </div>
         <div className="min-h-0 flex-1 overflow-y-auto">
           <div className="mb-3">
             <h3 className="text-sm font-medium">Device tokens</h3>
-            <p className="text-xs text-muted">Create one token per device from the + menu. Revoke a token to disconnect that device.</p>
+            <p className="text-xs text-muted">One token per device. Revoke to disconnect that device.</p>
           </div>
           <div className="space-y-2">
           {allNames.length === 0 && (
             <div className="rounded-md border border-line bg-bg px-3 py-6 text-center text-sm text-muted">
-              No devices yet. Use the + menu to create the first device token.
+              No devices yet.
+              {onAddDevice && (
+                <button
+                  type="button"
+                  onClick={() => { onOpenChange(false); onAddDevice(); }}
+                  className="ml-1 text-accent hover:underline"
+                >
+                  Add your first one.
+                </button>
+              )}
             </div>
           )}
           {allNames.map((name) => {
