@@ -242,85 +242,105 @@ export async function publishTmuxProject(input: {
   const sessionName = input.sessionName.trim();
   if (!projectName || !sessionName) throw new Error('Project and tmux session are required');
 
-  return prisma.$transaction(async (tx) => {
-    const project = await tx.project.findFirst({
-      where: {
-        userId: input.userId,
-        OR: [
-          { name: projectName },
-          { rootKey: input.rootKey, tmuxSessionName: sessionName }
-        ]
-      },
-      include: { tabs: { orderBy: { ordinal: 'desc' }, take: 1 } }
-    });
-
-    if (project && project.tmuxSessionName && project.tmuxSessionName !== sessionName) {
-      throw new Error(`Project "${project.name}" is already bound to tmux session "${project.tmuxSessionName}"`);
-    }
-
-    const relativePath = normalizeRelativePath(input.path || sessionName) || normalizeRelativePath(sessionName) || 'tmux-session';
-    const targetProject = project ?? await tx.project.create({
-      data: {
-        userId: input.userId,
-        name: projectName,
-        rootKey: input.rootKey.trim(),
-        relativePath,
-        tmuxSessionName: sessionName,
-        tmuxManaged: false,
-        agentType: 'tmux',
-        agentSpawnCommand: '$SHELL'
-      },
-      include: { tabs: { orderBy: { ordinal: 'desc' }, take: 1 } }
-    });
-
-    let nextOrdinal = (targetProject.tabs[0]?.ordinal ?? 0) + 1;
-    for (const window of windows) {
-      const tmuxName = window.target.trim();
-      const existing = await tx.session.findFirst({
+  try {
+    return await prisma.$transaction(async (tx) => {
+      const project = await tx.project.findFirst({
         where: {
-          projectId: targetProject.id,
+          userId: input.userId,
           OR: [
-            { tmuxName },
-            { tmuxWindowName: tmuxName }
+            { name: projectName },
+            { rootKey: input.rootKey, tmuxSessionName: sessionName }
           ]
         },
-        include: { tab: true }
+        include: { tabs: { orderBy: { ordinal: 'desc' }, take: 1 } }
       });
-      if (existing) {
-        const nextName = window.name.trim();
-        if (nextName && existing.tab && existing.tab.name !== nextName) {
-          await tx.tab.update({ where: { id: existing.tab.id }, data: { name: nextName } });
-        }
-        continue;
+
+      if (project && project.tmuxSessionName && project.tmuxSessionName !== sessionName) {
+        throw new Error(`Project "${project.name}" is already bound to tmux session "${project.tmuxSessionName}"`);
       }
 
-      const ordinal = nextOrdinal;
-      nextOrdinal += 1;
-      const tab = await tx.tab.create({
+      const relativePath = normalizeRelativePath(input.path || sessionName) || normalizeRelativePath(sessionName) || 'tmux-session';
+      const targetProject = project ?? await tx.project.create({
         data: {
-          projectId: targetProject.id,
-          name: window.name.trim() || `Window ${window.ordinal ?? ordinal}`,
-          ordinal
-        }
-      });
-      await tx.session.create({
-        data: {
-          projectId: targetProject.id,
-          tabId: tab.id,
-          kind: 'agent',
-          tmuxName,
-          tmuxWindowName: window.windowName?.trim() || window.name.trim() || String(window.ordinal ?? ordinal),
+          userId: input.userId,
+          name: projectName,
+          rootKey: input.rootKey.trim(),
+          relativePath,
+          tmuxSessionName: sessionName,
           tmuxManaged: false,
-          agentType: 'tmux'
-        }
+          agentType: 'tmux',
+          agentSpawnCommand: '$SHELL'
+        },
+        include: { tabs: { orderBy: { ordinal: 'desc' }, take: 1 } }
       });
-    }
 
-    return tx.project.findUnique({
-      where: { id: targetProject.id },
-      include: { tabs: { orderBy: { ordinal: 'asc' }, include: { session: true } }, sessions: true }
+      let nextOrdinal = (targetProject.tabs[0]?.ordinal ?? 0) + 1;
+      let addedWindowCount = 0;
+      for (const window of windows) {
+        const tmuxName = window.target.trim();
+        const existing = await tx.session.findFirst({
+          where: {
+            projectId: targetProject.id,
+            OR: [
+              { tmuxName },
+              { tmuxWindowName: tmuxName }
+            ]
+          },
+          include: { tab: true }
+        });
+        if (existing) {
+          const nextName = window.name.trim();
+          if (nextName && existing.tab && existing.tab.name !== nextName) {
+            await tx.tab.update({ where: { id: existing.tab.id }, data: { name: nextName } });
+          }
+          continue;
+        }
+
+        const ordinal = nextOrdinal;
+        nextOrdinal += 1;
+        const tab = await tx.tab.create({
+          data: {
+            projectId: targetProject.id,
+            name: window.name.trim() || `Window ${window.ordinal ?? ordinal}`,
+            ordinal
+          }
+        });
+        await tx.session.create({
+          data: {
+            projectId: targetProject.id,
+            tabId: tab.id,
+            kind: 'agent',
+            tmuxName,
+            tmuxWindowName: window.windowName?.trim() || window.name.trim() || String(window.ordinal ?? ordinal),
+            tmuxManaged: false,
+            // Adopted-tmux sessions don't actually run a fresh spawn command
+            // (the tmux pane already has a process), but downstream code reads
+            // spawnCommand and expects a non-null value. $SHELL is the safe
+            // sentinel — matches how new tmux-managed sessions are seeded.
+            spawnCommand: '$SHELL',
+            agentType: 'tmux'
+          }
+        });
+        addedWindowCount += 1;
+      }
+
+      const refreshed = await tx.project.findUnique({
+        where: { id: targetProject.id },
+        include: { tabs: { orderBy: { ordinal: 'asc' }, include: { session: true } }, sessions: true }
+      });
+      // Out-of-band signal so the API caller (and downstream agent CLI) can
+      // tell "N tabs created" from "all windows already published".
+      return refreshed ? { ...refreshed, addedWindowCount } : { addedWindowCount };
     });
-  });
+  } catch (error: unknown) {
+    // P2002 = unique-constraint violation. The window between findFirst and
+    // create can race with a concurrent publish for the same project name;
+    // re-throw with a clean message instead of leaking Prisma internals.
+    if (typeof error === 'object' && error !== null && 'code' in error && (error as { code?: string }).code === 'P2002') {
+      throw new Error('Project name conflicts with another publish in flight; retry the connect.');
+    }
+    throw error;
+  }
 }
 
 async function uniqueProjectName(userId: string, preferred: string) {

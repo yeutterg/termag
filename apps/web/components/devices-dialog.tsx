@@ -179,9 +179,9 @@ export function DevicesDialog({ open, onOpenChange, user, devices, knownDeviceNa
                 </div>
               )}
               <div className="mt-3 flex flex-wrap gap-2">
-                <CopyButton label="Env template" copied={copied === `env:${name}`} onClick={() => copyText(`env:${name}`, envTemplate)} />
-                <CopyButton label="Current window" copied={copied === `connect:${name}`} onClick={() => copyText(`connect:${name}`, connectCommand)} />
-                <CopyButton label="Whole session" copied={copied === `session:${name}`} onClick={() => copyText(`session:${name}`, sessionCommand)} />
+                <CopyButton label="Env template" copied={copied === `env:${name}`} onClick={() => copyText(`env:${name}`, envTemplate)} title="Copy TERMAG_URL / TOKEN / ROOTS exports" />
+                <CopyButton label="Adopt this tab" copied={copied === `connect:${name}`} onClick={() => copyText(`connect:${name}`, connectCommand)} title="termag-agent connect — adopts the current tmux window as one tab" />
+                <CopyButton label="Adopt all tabs" copied={copied === `session:${name}`} onClick={() => copyText(`session:${name}`, sessionCommand)} title="termag-agent connect --session — adopts every window in this tmux session" />
               </div>
             </div>
             );
@@ -206,10 +206,11 @@ export function DevicesDialog({ open, onOpenChange, user, devices, knownDeviceNa
   );
 }
 
-function CopyButton({ label, copied, onClick }: { label: string; copied: boolean; onClick: () => void }) {
+function CopyButton({ label, copied, onClick, title }: { label: string; copied: boolean; onClick: () => void; title?: string }) {
   return (
     <button
       type="button"
+      title={title}
       className="inline-flex h-7 items-center gap-1.5 rounded-md border border-line bg-panel px-2 text-xs text-muted hover:bg-panel2 hover:text-text"
       onClick={onClick}
     >

@@ -637,8 +637,8 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
               className="grid h-7 w-7 place-items-center rounded-md text-muted hover:bg-panel2 hover:text-text"
               onPointerDown={(event) => event.stopPropagation()}
               onClick={() => setCreateMenuOpen((value) => !value)}
-              title="Create"
-              aria-label="Create"
+              title="New device, project, or attach a tmux session"
+              aria-label="New device, project, or attach a tmux session"
             >
               <Plus className="h-4 w-4" />
             </button>

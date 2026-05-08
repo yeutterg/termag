@@ -164,8 +164,17 @@ async function runConnect(args: string[]) {
       },
       insecureLocalTls && publishUrl.protocol === 'https:' && isLocalHost(publishUrl.hostname)
     );
-    const tabCount = Array.isArray(result?.tabs) ? result.tabs.length : windows.length;
-    console.log(`[${tag}] published ${parsedArgs.mode === 'session' ? 'session' : 'window'} "${tmux.sessionName}" to project "${parsedArgs.projectName}" (${tabCount} tab${tabCount === 1 ? '' : 's'}).`);
+    const totalTabs = Array.isArray(result?.tabs) ? result.tabs.length : windows.length;
+    const added = typeof result?.addedWindowCount === 'number' ? result.addedWindowCount : windows.length;
+    const skipped = Math.max(0, windows.length - added);
+    const what = parsedArgs.mode === 'session' ? 'session' : 'window';
+    if (added === 0) {
+      console.log(`[${tag}] ${what} "${tmux.sessionName}" already published to project "${parsedArgs.projectName}" (${totalTabs} tab${totalTabs === 1 ? '' : 's'}, no changes).`);
+    } else if (skipped > 0) {
+      console.log(`[${tag}] published ${added} new tab${added === 1 ? '' : 's'} to project "${parsedArgs.projectName}" (${skipped} already existed; ${totalTabs} total).`);
+    } else {
+      console.log(`[${tag}] published ${what} "${tmux.sessionName}" to project "${parsedArgs.projectName}" (${added} tab${added === 1 ? '' : 's'}).`);
+    }
   } catch (err) {
     console.error(`[${tag}] ${err instanceof Error ? err.message : String(err)}`);
     process.exit(1);
@@ -231,12 +240,20 @@ function printConnectHelp() {
   console.log(`termag-agent connect
 
 Usage:
-  termag-agent connect --project <name> [--tab <name>]
-  termag-agent connect --project <name> --session
-  termag-agent connect <name> [tab-name]
+  termag-agent connect --project <project>            # current tmux window only
+  termag-agent connect --project <project> --tab <label>
+  termag-agent connect --project <project> --session  # every window in this tmux session
+  termag-agent connect <project> [tab-label]          # positional shorthand
+
+  --project, -p   Project name to publish to (created on first connect).
+  --tab, -t       Override the tab label shown in the web UI. Free-form
+                  text — NOT a tmux window index. Defaults to the current
+                  tmux window's name.
+  --session       Publish every window in the current tmux session as
+                  separate tabs.
 
 Publishes the current tmux window, or every window in the current tmux
-session with --session, to the Termag web UI. Run this from inside tmux.
+session with --session, to the termag web UI. Run this from inside tmux.
 `);
 }
 
