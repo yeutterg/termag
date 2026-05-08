@@ -12,7 +12,7 @@ const AGENT_OPTIONS = [
 interface NewProjectDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  onCreate: (formData: FormData) => Promise<boolean>;
+  onCreate: (formData: FormData) => Promise<{ ok: boolean; error?: string }>;
   devices: string[];
   selectedDevice?: string | null;
 }
@@ -36,9 +36,9 @@ export function NewProjectDialog({ open, onOpenChange, onCreate, devices, select
       return;
     }
     setError('');
-    const created = await onCreate(formData);
-    if (!created) {
-      setError('Could not create that project. Check the directory and try again.');
+    const result = await onCreate(formData);
+    if (!result.ok) {
+      setError(result.error || 'Could not create that project. Check the directory and try again.');
       return;
     }
     event.currentTarget.reset();

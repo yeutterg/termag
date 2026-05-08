@@ -39,22 +39,20 @@ export const POST = withAuth(async (user, request: Request) => {
   }
   const body = parsed.data;
   const roots = parseRoots();
-  if (body.rootKey && !roots[body.rootKey]) {
-    return NextResponse.json({ error: 'Unknown device root' }, { status: 400 });
-  }
-  const selectedRoots = body.rootKey ? { [body.rootKey]: roots[body.rootKey] } : roots;
+  const selectedRoots = body.rootKey && roots[body.rootKey] ? { [body.rootKey]: roots[body.rootKey] } : roots;
 
-  const resolved = body.directory
-    ? resolveProjectDirectory(body.directory, selectedRoots)
-    : body.rootKey && body.relativePath
+  const resolvedFromDirectory = body.directory ? resolveProjectDirectory(body.directory, selectedRoots) : null;
+  const resolved = resolvedFromDirectory
+    ? {
+      rootKey: body.rootKey && !roots[body.rootKey] ? body.rootKey : resolvedFromDirectory.rootKey,
+      relativePath: resolvedFromDirectory.relativePath
+    }
+    : body.rootKey && body.relativePath && roots[body.rootKey]
       ? { rootKey: body.rootKey, relativePath: normalizeRelativePath(body.relativePath) }
       : null;
 
   if (!resolved?.relativePath) {
-    return NextResponse.json({ error: 'Project path is required' }, { status: 400 });
-  }
-  if (!roots[resolved.rootKey]) {
-    return NextResponse.json({ error: 'Unknown device root' }, { status: 400 });
+    return NextResponse.json({ error: 'Directory must be inside a configured root' }, { status: 400 });
   }
 
   const agents: AgentInput[] = body.agents?.length

@@ -366,10 +366,13 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
         agents: [...customAgents, ...builtinAgents]
       })
     });
-    if (!res.ok) return false;
+    if (!res.ok) {
+      const body = await res.json().catch(() => null) as { error?: string } | null;
+      return { ok: false, error: body?.error };
+    }
     const project = await res.json();
     await reloadProjects(project.id, project.tabs?.[0]?.id);
-    return true;
+    return { ok: true };
   }, [reloadProjects]);
 
   const createTab = useCallback(async (projectId: string) => {
@@ -977,9 +980,9 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
             open={newProjectOpen}
             onOpenChange={setNewProjectOpen}
             onCreate={async (formData) => {
-              const created = await createProject(formData);
-              if (created && !platform.showShortcuts) setSidebarOpen(false);
-              return created;
+              const result = await createProject(formData);
+              if (result.ok && !platform.showShortcuts) setSidebarOpen(false);
+              return result;
             }}
             devices={devices}
             selectedDevice={newProjectDevice}
