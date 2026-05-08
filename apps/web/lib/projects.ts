@@ -1,11 +1,18 @@
 import { prisma } from './prisma';
-import { agentLabel, agentSpawnCommand, normalizeRelativePath, tmuxName } from './defaults';
+import { agentLabel, agentSpawnCommand, normalizeRelativePath, tmuxSessionName, tmuxWindowName } from './defaults';
 
 type ProjectAgent = {
   agentType?: string;
   label?: string;
   agentSpawnCommand?: string;
   spawnCommand?: string;
+};
+
+export type AttachedTmuxWindow = {
+  name: string;
+  target: string;
+  windowName?: string;
+  ordinal?: number;
 };
 
 function isUniqueConstraintError(error: unknown): boolean {
@@ -73,9 +80,15 @@ export async function createProject(input: {
       name: input.name.trim(),
       rootKey: input.rootKey.trim(),
       relativePath,
+      tmuxManaged: true,
       agentType: primaryAgent.agentType,
       agentSpawnCommand: primaryAgent.spawnCommand
     }
+  });
+  const projectTmuxSessionName = tmuxSessionName(project.id);
+  await prisma.project.update({
+    where: { id: project.id },
+    data: { tmuxSessionName: projectTmuxSessionName }
   });
 
   // Default tab name = the coding agent's display name (Claude Code, Codex, custom command).
@@ -99,11 +112,18 @@ export async function createProject(input: {
 export async function ensureCtrlSession(projectId: string) {
   const existing = await prisma.session.findFirst({ where: { projectId, kind: 'ctrl' } });
   if (existing) return existing;
+  const project = await prisma.project.findUnique({
+    where: { id: projectId },
+    select: { tmuxSessionName: true, tmuxManaged: true }
+  });
+  const windowName = tmuxWindowName('ctrl');
   return prisma.session.create({
     data: {
       projectId,
       kind: 'ctrl',
-      tmuxName: tmuxName(projectId, 'ctrl')
+      tmuxName: `${project?.tmuxSessionName || tmuxSessionName(projectId)}:${windowName}`,
+      tmuxWindowName: windowName,
+      tmuxManaged: project?.tmuxManaged ?? true
     }
   });
 }
@@ -114,7 +134,10 @@ export async function createTab(projectId: string, options: { name?: string; age
     try {
       return await prisma.$transaction(async (tx) => {
         const last = await tx.tab.findFirst({ where: { projectId }, orderBy: { ordinal: 'desc' } });
-        const project = await tx.project.findUnique({ where: { id: projectId }, select: { agentType: true, agentSpawnCommand: true } });
+        const project = await tx.project.findUnique({
+          where: { id: projectId },
+          select: { agentType: true, agentSpawnCommand: true, tmuxSessionName: true, tmuxManaged: true }
+        });
         const ordinal = (last?.ordinal ?? 0) + 1;
         const selectedAgentType = tabOptions.agentType ?? project?.agentType ?? 'codex';
         const selectedSpawnCommand = tabOptions.spawnCommand ?? project?.agentSpawnCommand ?? agentSpawnCommand(selectedAgentType);
@@ -127,12 +150,15 @@ export async function createTab(projectId: string, options: { name?: string; age
             ordinal
           }
         });
+        const windowName = tmuxWindowName(tab.id);
         await tx.session.create({
           data: {
             projectId,
             tabId: tab.id,
             kind: 'agent',
-            tmuxName: tmuxName(projectId, tab.id),
+            tmuxName: `${project?.tmuxSessionName || tmuxSessionName(projectId)}:${windowName}`,
+            tmuxWindowName: windowName,
+            tmuxManaged: true,
             agentType: selectedAgentType,
             spawnCommand: selectedSpawnCommand
           }
@@ -145,6 +171,165 @@ export async function createTab(projectId: string, options: { name?: string; age
     }
   }
   throw new Error('Unable to create tab');
+}
+
+export async function createAttachedTmuxProject(input: {
+  userId: string;
+  rootKey: string;
+  sessionName: string;
+  path?: string;
+  windows: AttachedTmuxWindow[];
+}) {
+  const windows = input.windows.filter((window) => window.target.trim());
+  if (windows.length === 0) throw new Error('No tmux windows to attach');
+  const name = await uniqueProjectName(input.userId, input.sessionName.trim() || 'tmux session');
+  const relativePath = normalizeRelativePath(input.path || input.sessionName) || normalizeRelativePath(input.sessionName) || 'tmux-session';
+
+  return prisma.$transaction(async (tx) => {
+    const project = await tx.project.create({
+      data: {
+        userId: input.userId,
+        name,
+        rootKey: input.rootKey.trim(),
+        relativePath,
+        tmuxSessionName: input.sessionName.trim(),
+        tmuxManaged: false,
+        agentType: 'tmux',
+        agentSpawnCommand: '$SHELL'
+      }
+    });
+
+    for (const [index, window] of windows.entries()) {
+      const ordinal = window.ordinal && window.ordinal > 0 ? window.ordinal : index + 1;
+      const tab = await tx.tab.create({
+        data: {
+          projectId: project.id,
+          name: window.name.trim() || `Window ${ordinal}`,
+          ordinal
+        }
+      });
+      await tx.session.create({
+        data: {
+          projectId: project.id,
+          tabId: tab.id,
+          kind: 'agent',
+          tmuxName: window.target.trim(),
+          tmuxWindowName: window.windowName?.trim() || window.name.trim() || String(ordinal),
+          tmuxManaged: false,
+          agentType: 'tmux'
+        }
+      });
+    }
+
+    return tx.project.findUnique({
+      where: { id: project.id },
+      include: { tabs: { orderBy: { ordinal: 'asc' }, include: { session: true } }, sessions: true }
+    });
+  });
+}
+
+export async function publishTmuxProject(input: {
+  userId: string;
+  rootKey: string;
+  projectName: string;
+  sessionName: string;
+  path?: string;
+  windows: AttachedTmuxWindow[];
+}) {
+  const windows = input.windows.filter((window) => window.target.trim());
+  if (windows.length === 0) throw new Error('No tmux windows to publish');
+  const projectName = input.projectName.trim();
+  const sessionName = input.sessionName.trim();
+  if (!projectName || !sessionName) throw new Error('Project and tmux session are required');
+
+  return prisma.$transaction(async (tx) => {
+    const project = await tx.project.findFirst({
+      where: {
+        userId: input.userId,
+        OR: [
+          { name: projectName },
+          { rootKey: input.rootKey, tmuxSessionName: sessionName }
+        ]
+      },
+      include: { tabs: { orderBy: { ordinal: 'desc' }, take: 1 } }
+    });
+
+    if (project && project.tmuxSessionName && project.tmuxSessionName !== sessionName) {
+      throw new Error(`Project "${project.name}" is already bound to tmux session "${project.tmuxSessionName}"`);
+    }
+
+    const relativePath = normalizeRelativePath(input.path || sessionName) || normalizeRelativePath(sessionName) || 'tmux-session';
+    const targetProject = project ?? await tx.project.create({
+      data: {
+        userId: input.userId,
+        name: projectName,
+        rootKey: input.rootKey.trim(),
+        relativePath,
+        tmuxSessionName: sessionName,
+        tmuxManaged: false,
+        agentType: 'tmux',
+        agentSpawnCommand: '$SHELL'
+      },
+      include: { tabs: { orderBy: { ordinal: 'desc' }, take: 1 } }
+    });
+
+    let nextOrdinal = (targetProject.tabs[0]?.ordinal ?? 0) + 1;
+    for (const window of windows) {
+      const tmuxName = window.target.trim();
+      const existing = await tx.session.findFirst({
+        where: { projectId: targetProject.id, tmuxName },
+        include: { tab: true }
+      });
+      if (existing) {
+        const nextName = window.name.trim();
+        if (nextName && existing.tab && existing.tab.name !== nextName) {
+          await tx.tab.update({ where: { id: existing.tab.id }, data: { name: nextName } });
+        }
+        continue;
+      }
+
+      const ordinal = nextOrdinal;
+      nextOrdinal += 1;
+      const tab = await tx.tab.create({
+        data: {
+          projectId: targetProject.id,
+          name: window.name.trim() || `Window ${window.ordinal ?? ordinal}`,
+          ordinal
+        }
+      });
+      await tx.session.create({
+        data: {
+          projectId: targetProject.id,
+          tabId: tab.id,
+          kind: 'agent',
+          tmuxName,
+          tmuxWindowName: window.windowName?.trim() || window.name.trim() || String(window.ordinal ?? ordinal),
+          tmuxManaged: false,
+          agentType: 'tmux'
+        }
+      });
+    }
+
+    return tx.project.findUnique({
+      where: { id: targetProject.id },
+      include: { tabs: { orderBy: { ordinal: 'asc' }, include: { session: true } }, sessions: true }
+    });
+  });
+}
+
+async function uniqueProjectName(userId: string, preferred: string) {
+  const base = preferred.trim() || 'tmux session';
+  const existing = await prisma.project.findMany({
+    where: { userId, OR: [{ name: base }, { name: { startsWith: `${base} ` } }] },
+    select: { name: true }
+  });
+  const names = new Set(existing.map((project) => project.name));
+  if (!names.has(base)) return base;
+  for (let suffix = 2; suffix < 1000; suffix += 1) {
+    const candidate = `${base} ${suffix}`;
+    if (!names.has(candidate)) return candidate;
+  }
+  return `${base} ${Date.now()}`;
 }
 
 function normalizeAgent(agent: ProjectAgent) {

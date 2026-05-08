@@ -118,6 +118,14 @@ export function resolveProjectDirectory(
   return null;
 }
 
+export function tmuxSessionName(projectId: string): string {
+  return `termag-${projectId}`;
+}
+
+export function tmuxWindowName(tabId: string | 'ctrl'): string {
+  return tabId === 'ctrl' ? 'ctrl' : `tab-${tabId}`;
+}
+
 export function tmuxName(projectId: string, tabId: string | 'ctrl'): string {
-  return `termag-${projectId}-${tabId}`;
+  return `${tmuxSessionName(projectId)}:${tmuxWindowName(tabId)}`;
 }

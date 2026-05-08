@@ -26,9 +26,9 @@ flowchart LR
 
   subgraph Machines["Remote machines"]
     direction TB
-    AgentA["termag-agent<br/>MacBook"] --> TmuxA["tmux<br/>project tabs + ctrl shell"]
-    AgentB["termag-agent<br/>homelab"] --> TmuxB["tmux<br/>project tabs + ctrl shell"]
-    AgentC["termag-agent<br/>VPS"] --> TmuxC["tmux<br/>project tabs + ctrl shell"]
+    AgentA["termag-agent<br/>MacBook"] --> TmuxA["tmux<br/>sessions = projects<br/>windows = terminal tabs"]
+    AgentB["termag-agent<br/>homelab"] --> TmuxB["tmux<br/>sessions = projects<br/>windows = terminal tabs"]
+    AgentC["termag-agent<br/>VPS"] --> TmuxC["tmux<br/>sessions = projects<br/>windows = terminal tabs"]
   end
 
   Browser <-->|HTTPS + WebSocket| Next
@@ -48,9 +48,9 @@ The agent always dials out to the web app. You do not need to expose tmux, SSH, 
 The user-facing shape is:
 
 - Device: a machine running `termag-agent`. Create one device token per machine.
-- Project: a folder on that device.
-- Agent: one tmux-backed terminal window inside a project, running Claude Code, Codex, a YOLO variant, or another CLI command.
-- Ctrl shell: a regular project shell for git, tests, and quick commands.
+- Project: a tmux session on that device. A new project creates a Termag-managed tmux session; attaching an existing tmux session imports it as a project.
+- Terminal tab: one tmux window inside that project/session, running Claude Code, Codex, a YOLO variant, another CLI command, or an existing tmux window.
+- Ctrl shell: a regular tmux window for git, tests, and quick commands in Termag-managed projects.
 
 ## Security Model
 
@@ -250,9 +250,27 @@ export TERMAG_TLS_INSECURE_SKIP_VERIFY=true
 
 Add more devices by creating one token per device, installing the agent on that device, and giving it a named root. The root key is the device label in the sidebar.
 
-### 4. Create Projects And Agents
+### 4. Create Or Attach Projects
 
 Click `+` → **New Project**. Select the device, enter the project directory, for example `~/Code/termag-next`, then choose agents. The built-in checkboxes include **Claude Code**, **Claude Code YOLO**, **Codex**, and **Codex YOLO**. Add any other agent command in the text box, one command per line. Termag-next creates one terminal window per selected or typed agent.
+
+New projects map to tmux sessions. Each terminal tab in that project maps to a tmux window in the same session, so the same workspace can still be inspected or recovered with native tmux.
+
+To bind Termag to work you already have running, click `+` → **Attach tmux session**. The dialog lists unattached tmux sessions from every connected device. Pick a session and Termag creates a project for it, with one terminal tab for each tmux window. Existing attached windows are treated as external: deleting the Termag project detaches from them instead of killing the tmux session. New tabs you add later inside that attached project are Termag-created tmux windows in the same session.
+
+You can also publish from the device itself. From inside an existing tmux window:
+
+```bash
+termag-agent connect --project Restful-ESP32 --tab codex
+```
+
+That creates or updates the project in the browser and adds the current tmux window as a terminal tab. To publish every window in the current tmux session:
+
+```bash
+termag-agent connect --project Restful-ESP32 --session
+```
+
+The connect command uses the same `TERMAG_URL` and `TERMAG_AGENT_TOKEN` exports as the long-running agent. It must run inside tmux; a normal Terminal or iTerm shell cannot be adopted after it has already started outside tmux.
 
 ## Local Development
 

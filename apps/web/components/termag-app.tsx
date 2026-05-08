@@ -15,7 +15,8 @@ import {
   Plus,
   Search,
   Settings,
-  Sun
+  Sun,
+  Terminal
 } from 'lucide-react';
 import { TerminalPane } from './terminal/terminal-pane';
 import { PlatformProvider, Shortcut, shortcutSuffix } from './shortcut';
@@ -32,6 +33,7 @@ const SettingsDialog = lazy(() => import('./settings-dialog').then((m) => ({ def
 const ShortcutsHelp = lazy(() => import('./shortcuts-help').then((m) => ({ default: m.ShortcutsHelp })));
 const NewDeviceDialog = lazy(() => import('./new-device-dialog').then((m) => ({ default: m.NewDeviceDialog })));
 const NewProjectDialog = lazy(() => import('./new-project-dialog').then((m) => ({ default: m.NewProjectDialog })));
+const AttachTmuxDialog = lazy(() => import('./attach-tmux-dialog').then((m) => ({ default: m.AttachTmuxDialog })));
 
 function isTypingTarget(target: EventTarget | null): boolean {
   if (!(target instanceof HTMLElement)) return false;
@@ -65,6 +67,7 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
   const [createMenuOpen, setCreateMenuOpen] = useState(false);
   const [newDeviceOpen, setNewDeviceOpen] = useState(false);
   const [newProjectOpen, setNewProjectOpen] = useState(false);
+  const [attachTmuxOpen, setAttachTmuxOpen] = useState(false);
   const [newProjectDevice, setNewProjectDevice] = useState<string | null>(null);
   const [helpOpen, setHelpOpen] = useState(false);
   const [agentConnected, setAgentConnected] = useState(false);
@@ -171,6 +174,7 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
         setSettingsOpen(false);
         setNewDeviceOpen(false);
         setNewProjectOpen(false);
+        setAttachTmuxOpen(false);
         setCreateMenuOpen(false);
         setHelpOpen(false);
         return;
@@ -375,6 +379,21 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
     return { ok: true };
   }, [reloadProjects]);
 
+  const attachTmuxSession = useCallback(async (input: { rootKey: string; sessionName: string }) => {
+    const res = await fetch('/api/tmux/attach', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(input)
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => null) as { error?: string } | null;
+      return { ok: false, error: body?.error };
+    }
+    const project = await res.json();
+    await reloadProjects(project.id, project.tabs?.[0]?.id);
+    return { ok: true };
+  }, [reloadProjects]);
+
   const createTab = useCallback(async (projectId: string) => {
     const res = await fetch(`/api/projects/${projectId}/tabs`, { method: 'POST' });
     if (!res.ok) {
@@ -567,6 +586,17 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
                   <FolderPlus className="h-3.5 w-3.5" />
                   <span className="flex-1 whitespace-nowrap">New Project</span>
                   <Shortcut keys={['mod', 'shift', 'P']} />
+                </button>
+                <button
+                  type="button"
+                  className="flex h-8 w-full items-center gap-2 rounded px-2 text-left text-sm text-muted hover:bg-panel2 hover:text-text"
+                  onClick={() => {
+                    setCreateMenuOpen(false);
+                    setAttachTmuxOpen(true);
+                  }}
+                >
+                  <Terminal className="h-3.5 w-3.5" />
+                  <span className="whitespace-nowrap">Attach tmux session</span>
                 </button>
               </div>
             )}
@@ -986,6 +1016,19 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
             }}
             devices={devices}
             selectedDevice={newProjectDevice}
+          />
+        </Suspense>
+      )}
+      {attachTmuxOpen && (
+        <Suspense fallback={null}>
+          <AttachTmuxDialog
+            open={attachTmuxOpen}
+            onOpenChange={setAttachTmuxOpen}
+            onAttach={async (input) => {
+              const result = await attachTmuxSession(input);
+              if (result.ok && !platform.showShortcuts) setSidebarOpen(false);
+              return result;
+            }}
           />
         </Suspense>
       )}

@@ -1,8 +1,10 @@
 # termag-agent
 
-Outbound laptop agent for [termag-next](https://github.com/yeutterg/termag-next). Bridges tmux sessions on your machine to the termag broker over a single WebSocket. No native deps, no inbound port, no public tmux surface.
+Outbound laptop agent for [termag-next](https://github.com/yeutterg/termag-next). Bridges tmux sessions and windows on your machine to the termag broker over a single WebSocket. No native deps, no inbound port, no public tmux surface.
 
-The agent is intentionally tiny: it owns tmux on the local box, streams pane output through `tmux pipe-pane`, and forwards your keystrokes through `tmux send-keys`. It reconnects on its own, supervises a heartbeat, and never touches anything outside the named roots you configure.
+The agent is intentionally tiny: it owns Termag-created tmux sessions on the local box, streams pane output through `tmux pipe-pane`, and forwards your keystrokes through `tmux send-keys`. It reconnects on its own, supervises a heartbeat, reports existing tmux sessions for attach workflows, and never creates new project windows outside the named roots you configure.
+
+In the web app, a project maps to a tmux session and each terminal tab maps to a tmux window. When you attach an existing tmux session, the broker treats the imported windows as external so closing Termag detaches from them instead of killing your existing tmux work.
 
 ## Install
 
@@ -57,10 +59,14 @@ export TERMAG_TLS_INSECURE_SKIP_VERIFY=true
 
 ```bash
 termag-agent              # connect to the broker (default)
+termag-agent connect --project Restful-ESP32 --tab codex
+termag-agent connect --project Restful-ESP32 --session
 termag-agent update       # auto-detects brew vs npm and upgrades in place
 termag-agent --version
 termag-agent --help
 ```
+
+`connect` is a one-shot publish command. Run it from inside tmux to make the current window appear as a Termag terminal tab, or add `--session` to publish every window in the current tmux session. It uses the same `TERMAG_URL` and `TERMAG_AGENT_TOKEN` as the foreground agent.
 
 ## Requirements
 

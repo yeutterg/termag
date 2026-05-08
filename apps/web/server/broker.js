@@ -141,14 +141,42 @@ function createBroker({ prisma, wss }) {
     return `req_${seq}_${Date.now()}`;
   }
 
-  function agentForUser(userId) {
-    const agent = agents.get(userId);
-    if (!agent || agent.ws.readyState !== WebSocket.OPEN) return null;
-    return agent;
+  function agentsForUser(userId) {
+    return agents.get(userId) || new Map();
   }
 
-  function sendToAgent(userId, type, payload = {}, timeoutMs = 15000) {
-    const agent = agentForUser(userId);
+  function connectedAgents(userId) {
+    return [...agentsForUser(userId).values()].filter((agent) => agent.ws.readyState === WebSocket.OPEN);
+  }
+
+  function agentForUser(userId, deviceName) {
+    const userAgents = agentsForUser(userId);
+    const exact = deviceName ? userAgents.get(deviceName) : null;
+    if (exact?.ws.readyState === WebSocket.OPEN) return exact;
+    if (deviceName) return null;
+    const live = [...userAgents.values()].filter((agent) => agent.ws.readyState === WebSocket.OPEN);
+    return live.length > 0 ? live[0] : null;
+  }
+
+  function setAgent(userId, deviceName, agent) {
+    let userAgents = agents.get(userId);
+    if (!userAgents) {
+      userAgents = new Map();
+      agents.set(userId, userAgents);
+    }
+    userAgents.set(deviceName, agent);
+  }
+
+  function removeAgent(userId, deviceName, ws) {
+    const userAgents = agents.get(userId);
+    if (!userAgents || userAgents.get(deviceName)?.ws !== ws) return false;
+    userAgents.delete(deviceName);
+    if (userAgents.size === 0) agents.delete(userId);
+    return true;
+  }
+
+  function sendToAgent(userId, deviceName, type, payload = {}, timeoutMs = 15000) {
+    const agent = agentForUser(userId, deviceName);
     if (!agent) return Promise.reject(new Error('Agent offline'));
     const requestId = nextRequestId();
     return new Promise((resolve, reject) => {
@@ -188,9 +216,10 @@ function createBroker({ prisma, wss }) {
   }
 
   function broadcastStatus(userId, refresh = false) {
+    const devices = connectedAgents(userId).map((agent) => agent.deviceName);
     for (const client of wss.clients) {
       if (client._termagStatusUserId === userId && client.readyState === WebSocket.OPEN) {
-        sendJson(client, { type: 'agent', connected: Boolean(agentForUser(userId)) });
+        sendJson(client, { type: 'agent', connected: devices.length > 0, devices });
         if (refresh) sendJson(client, { type: 'refresh' });
       }
     }
@@ -211,31 +240,32 @@ function createBroker({ prisma, wss }) {
       data: { lastUsedAt: new Date() }
     });
 
-    const existing = agents.get(record.userId);
+    const deviceName = record.name || 'Local device';
+    const existing = agentsForUser(record.userId).get(deviceName);
     if (existing?.ws.readyState === WebSocket.OPEN) {
       existing.ws.close(1000, 'replaced');
     }
 
-    const agent = { ws, userId: record.userId, pending: new Map() };
-    agents.set(record.userId, agent);
+    const agent = { ws, userId: record.userId, deviceName, tokenId: record.id, pending: new Map() };
+    setAgent(record.userId, deviceName, agent);
 
     await prisma.project.updateMany({
-      where: { userId: record.userId },
+      where: { userId: record.userId, rootKey: deviceName },
       data: { status: 'idle' }
     });
     await prisma.session.updateMany({
-      where: { project: { userId: record.userId } },
+      where: { project: { userId: record.userId, rootKey: deviceName } },
       data: { status: 'idle', lastSeenAt: new Date() }
     });
     await prisma.tab.updateMany({
-      where: { project: { userId: record.userId } },
+      where: { project: { userId: record.userId, rootKey: deviceName } },
       data: { status: 'idle' }
     });
     broadcastStatus(record.userId, true);
 
     // Re-attach any browser streams that were left orphaned by a prior agent disconnect.
     for (const stream of browserStreams.values()) {
-      if (stream.userId === record.userId && !stream.attached && typeof stream.reattach === 'function') {
+      if (stream.userId === record.userId && stream.deviceName === deviceName && !stream.attached && typeof stream.reattach === 'function') {
         stream.reattach().catch(() => {});
       }
     }
@@ -306,34 +336,33 @@ function createBroker({ prisma, wss }) {
     });
 
     ws.on('close', async () => {
-      if (agents.get(record.userId)?.ws !== ws) return;
-      agents.delete(record.userId);
+      if (!removeAgent(record.userId, deviceName, ws)) return;
       for (const pending of agent.pending.values()) {
         clearTimeout(pending.timer);
         pending.reject(new Error('Agent disconnected'));
       }
       for (const stream of browserStreams.values()) {
-        if (stream.userId === record.userId && stream.attached) {
+        if (stream.userId === record.userId && stream.deviceName === deviceName && stream.attached) {
           stream.attached = false;
           sendJson(stream.ws, { type: 'sleeping', message: 'Agent disconnected; reconnect termag-agent on your laptop.' });
         }
       }
       await prisma.project.updateMany({
-        where: { userId: record.userId },
+        where: { userId: record.userId, rootKey: deviceName },
         data: { status: 'sleeping' }
       });
       await prisma.session.updateMany({
-        where: { project: { userId: record.userId } },
+        where: { project: { userId: record.userId, rootKey: deviceName } },
         data: { status: 'sleeping' }
       });
       await prisma.tab.updateMany({
-        where: { project: { userId: record.userId } },
+        where: { project: { userId: record.userId, rootKey: deviceName } },
         data: { status: 'sleeping' }
       });
       broadcastStatus(record.userId, true);
     });
 
-    sendJson(ws, { type: 'hello', userId: record.userId });
+    sendJson(ws, { type: 'hello', userId: record.userId, deviceName });
   }
 
   async function registerBrowser(ws, req, url) {
@@ -345,7 +374,8 @@ function createBroker({ prisma, wss }) {
 
     if (url.pathname === '/api/ws/status') {
       ws._termagStatusUserId = userId;
-      sendJson(ws, { type: 'agent', connected: Boolean(agentForUser(userId)) });
+      const devices = connectedAgents(userId).map((agent) => agent.deviceName);
+      sendJson(ws, { type: 'agent', connected: devices.length > 0, devices });
       return;
     }
 
@@ -408,6 +438,7 @@ function createBroker({ prisma, wss }) {
     const stream = {
       ws,
       userId,
+      deviceName: session.project.rootKey,
       sessionId,
       attached: false,
       attachPromise: null,
@@ -435,10 +466,15 @@ function createBroker({ prisma, wss }) {
       if (stream.attachPromise) return stream.attachPromise;
       stream.attachPromise = (async () => {
         try {
-          await sendToAgent(userId, 'terminal-attach', {
+          await sendToAgent(userId, session.project.rootKey, 'terminal-attach', {
             streamId,
             sessionId,
             tmuxName: session.tmuxName,
+            tmuxSessionName: session.project.tmuxSessionName,
+            tmuxWindowName: session.tmuxWindowName,
+            createMode: session.tmuxManaged === false
+              ? 'none'
+              : (session.project.tmuxSessionName && session.tmuxWindowName ? 'window' : 'session'),
             kind: session.kind,
             cwd: { rootKey: session.project.rootKey, relativePath: session.project.relativePath },
             spawnCommand: session.kind === 'ctrl'
@@ -474,7 +510,7 @@ function createBroker({ prisma, wss }) {
       }
       if (msg.type === 'input') {
         if (!(await attachToAgent())) return;
-        sendToAgent(userId, 'terminal-input', { streamId, data: msg.data }, 1000).catch(() => {});
+        sendToAgent(userId, session.project.rootKey, 'terminal-input', { streamId, data: msg.data }, 1000).catch(() => {});
       }
       if (msg.type === 'resize') {
         if (typeof msg.cols === 'number' && typeof msg.rows === 'number') {
@@ -482,11 +518,11 @@ function createBroker({ prisma, wss }) {
           stream.rows = msg.rows;
         }
         if (stream.attached) {
-          sendToAgent(userId, 'terminal-resize', { streamId, cols: msg.cols, rows: msg.rows }, 1000).catch(() => {});
+          sendToAgent(userId, session.project.rootKey, 'terminal-resize', { streamId, cols: msg.cols, rows: msg.rows }, 1000).catch(() => {});
         }
       }
-      if (msg.type === 'kill' && agentForUser(userId)) {
-        sendToAgent(userId, 'tmux-kill', { tmuxName: session.tmuxName }, 5000).catch(() => {});
+      if (msg.type === 'kill' && session.tmuxManaged !== false && agentForUser(userId, session.project.rootKey)) {
+        sendToAgent(userId, session.project.rootKey, 'tmux-kill-window', { tmuxName: session.tmuxName }, 5000).catch(() => {});
       }
       if (msg.type === 'pause') {
         // Browser tab/app is hidden — stop forwarding output. Buffer is
@@ -508,16 +544,44 @@ function createBroker({ prisma, wss }) {
       if (stream.flushTimer) clearTimeout(stream.flushTimer);
       browserStreams.delete(streamId);
       releasePrimary(sessionId, streamId);
-      if (wasAttached) sendToAgent(userId, 'terminal-close', { streamId }, 1000).catch(() => {});
+      if (wasAttached) sendToAgent(userId, session.project.rootKey, 'terminal-close', { streamId }, 1000).catch(() => {});
     });
   }
 
   return {
     registerAgent,
     registerBrowser,
+    refreshUser(userId) {
+      broadcastStatus(userId, true);
+    },
+    async listTmuxSessions(userId) {
+      const liveAgents = connectedAgents(userId);
+      const results = await Promise.all(liveAgents.map(async (agent) => {
+        try {
+          const data = await sendToAgent(userId, agent.deviceName, 'tmux-list', {}, 5000);
+          const sessions = Array.isArray(data?.sessions) ? data.sessions : [];
+          return sessions.map((session) => ({ ...session, rootKey: agent.deviceName }));
+        } catch {
+          return [];
+        }
+      }));
+      return results.flat();
+    },
+    killTmuxSession(userId, deviceName, tmuxSessionName, timeoutMs = 5000) {
+      if (!tmuxSessionName || !agentForUser(userId, deviceName)) return Promise.resolve(false);
+      return sendToAgent(userId, deviceName, 'tmux-kill-session', { tmuxSessionName }, timeoutMs)
+        .then(() => true)
+        .catch(() => false);
+    },
+    killTmuxWindow(userId, deviceName, tmuxName, timeoutMs = 5000) {
+      if (!tmuxName || !agentForUser(userId, deviceName)) return Promise.resolve(false);
+      return sendToAgent(userId, deviceName, 'tmux-kill-window', { tmuxName }, timeoutMs)
+        .then(() => true)
+        .catch(() => false);
+    },
     killTmux(userId, tmuxName, timeoutMs = 5000) {
       if (!tmuxName || !agentForUser(userId)) return Promise.resolve(false);
-      return sendToAgent(userId, 'tmux-kill', { tmuxName }, timeoutMs)
+      return sendToAgent(userId, undefined, 'tmux-kill', { tmuxName }, timeoutMs)
         .then(() => true)
         .catch(() => false);
     }

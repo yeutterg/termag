@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { withAuth } from '@/lib/auth';
 import { prisma } from '@/lib/prisma';
 import { normalizeRelativePath, parseRoots } from '@/lib/defaults';
-import { killTmuxSessions } from '@/lib/broker';
+import { killTmuxProjectSessions, killTmuxWindows } from '@/lib/broker';
 
 const updateSchema = z.object({
   name: z.string().trim().min(1).max(80).optional(),
@@ -50,10 +50,25 @@ export const DELETE = withAuth(async (user, _request: Request, { params }: Param
   const { projectId } = await params;
   const existing = await prisma.project.findFirst({
     where: { id: projectId, userId: user.id },
-    include: { sessions: { select: { tmuxName: true } } }
+    select: {
+      id: true,
+      rootKey: true,
+      tmuxSessionName: true,
+      tmuxManaged: true,
+      sessions: { select: { tmuxName: true, tmuxManaged: true } }
+    }
   });
   if (!existing) return NextResponse.json({ error: 'Not found' }, { status: 404 });
   await prisma.project.delete({ where: { id: projectId } });
-  await killTmuxSessions(user.id, existing.sessions.map((s) => s.tmuxName));
+  if (existing.tmuxManaged !== false) {
+    await killTmuxProjectSessions(user.id, [{ rootKey: existing.rootKey, tmuxSessionName: existing.tmuxSessionName }]);
+  } else {
+    await killTmuxWindows(
+      user.id,
+      existing.sessions
+        .filter((session) => session.tmuxManaged !== false)
+        .map((session) => ({ rootKey: existing.rootKey, tmuxName: session.tmuxName }))
+    );
+  }
   return NextResponse.json({ ok: true });
 });

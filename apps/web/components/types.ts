@@ -2,6 +2,8 @@ export type Session = {
   id: string;
   kind: string;
   tmuxName: string;
+  tmuxWindowName?: string | null;
+  tmuxManaged: boolean;
   agentType?: string | null;
   spawnCommand?: string | null;
   status: string;
@@ -20,6 +22,8 @@ export type Project = {
   name: string;
   rootKey: string;
   relativePath: string;
+  tmuxSessionName?: string | null;
+  tmuxManaged: boolean;
   agentType: string;
   agentSpawnCommand: string;
   status: string;

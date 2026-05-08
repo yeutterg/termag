@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server';
 import { z } from 'zod';
 import { withAuth } from '@/lib/auth';
 import { prisma } from '@/lib/prisma';
-import { killTmuxSessions } from '@/lib/broker';
+import { killTmuxWindows } from '@/lib/broker';
 
 type Params = { params: Promise<{ projectId: string; tabId: string }> };
 
@@ -29,8 +29,8 @@ export const DELETE = withAuth(async (user, _request: Request, { params }: Param
   const tab = await prisma.tab.findFirst({
     where: { id: tabId, project: { id: projectId, userId: user.id } },
     include: {
-      session: { select: { tmuxName: true } },
-      project: { select: { _count: { select: { tabs: true } } } }
+      session: { select: { tmuxName: true, tmuxManaged: true } },
+      project: { select: { rootKey: true, _count: { select: { tabs: true } } } }
     }
   });
   if (!tab) return NextResponse.json({ error: 'Not found' }, { status: 404 });
@@ -38,6 +38,8 @@ export const DELETE = withAuth(async (user, _request: Request, { params }: Param
     return NextResponse.json({ error: 'Cannot delete the last tab in a project' }, { status: 409 });
   }
   await prisma.tab.delete({ where: { id: tab.id } });
-  await killTmuxSessions(user.id, [tab.session?.tmuxName]);
+  if (tab.session?.tmuxManaged !== false) {
+    await killTmuxWindows(user.id, [{ rootKey: tab.project.rootKey, tmuxName: tab.session?.tmuxName }]);
+  }
   return NextResponse.json({ ok: true });
 });

@@ -45,6 +45,8 @@ model Project {
   name              String
   rootKey           String
   relativePath      String
+  tmuxSessionName   String?
+  tmuxManaged       Boolean  @default(true)
   agentType         String
   agentSpawnCommand String
   ctrlSpawnCommand  String   @default("$SHELL")
@@ -63,6 +65,7 @@ model Project {
   sessions Session[]
 
   @@unique([userId, name])
+  @@unique([userId, rootKey, tmuxSessionName])
   @@index([userId, position])
   @@index([userId, openedAt])
 }
@@ -85,15 +88,17 @@ model Tab {
 }
 
 model Session {
-  id          String   @id @default(cuid())
-  kind        String
-  tmuxName    String   @unique
-  agentType   String?
-  spawnCommand String?
-  status      String   @default("sleeping")
-  lastSeenAt  DateTime?
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  id             String    @id @default(cuid())
+  kind           String
+  tmuxName       String
+  tmuxWindowName String?
+  tmuxManaged    Boolean   @default(true)
+  agentType      String?
+  spawnCommand   String?
+  status         String    @default("sleeping")
+  lastSeenAt     DateTime?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
 
   projectId String
   project   Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
@@ -104,6 +109,7 @@ model Session {
   scrollback ScrollbackChunk[]
 
   @@index([projectId, kind])
+  @@index([tmuxName])
 }
 
 model ScrollbackChunk {

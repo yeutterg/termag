@@ -20,6 +20,9 @@ export interface RealAttachOpts {
   ws: WebSocket;
   streamId: string;
   tmuxName: string;
+  tmuxSessionName?: string;
+  tmuxWindowName?: string;
+  createMode?: 'session' | 'window' | 'none';
   cwd: string;
   spawnCommand: string;
   cols: number;
@@ -107,17 +110,105 @@ async function ensureTmuxSession(tmuxName: string, cwd: string, command: string)
   }
 }
 
-export async function killTmux(tmuxName: string) {
-  if (!tmuxName) return;
-  // Tear down our local pipe-pane reader first, so the upcoming kill-session
-  // doesn't race with it sending an EOF that confuses the cleanup paths.
-  const pipeReader = pipeReaders.get(tmuxName);
-  if (pipeReader) {
+async function tmuxTargetExists(target: string): Promise<boolean> {
+  try {
+    await execFileAsync('tmux', ['display-message', '-p', '-t', target, '#{session_name}']);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function tmuxSessionExists(sessionName: string): Promise<boolean> {
+  try {
+    await execFileAsync('tmux', ['has-session', '-t', sessionName]);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function tmuxWindowExists(sessionName: string, windowName: string): Promise<boolean> {
+  try {
+    const { stdout } = await execFileAsync('tmux', ['list-windows', '-t', sessionName, '-F', '#W']);
+    return stdout.split('\n').some((line) => line.trim() === windowName);
+  } catch {
+    return false;
+  }
+}
+
+async function ensureTmuxWindow(sessionName: string, windowName: string, cwd: string, command: string): Promise<{ wasNew: boolean }> {
+  if (await tmuxWindowExists(sessionName, windowName)) return { wasNew: false };
+  const shellCommand = command === '$SHELL' ? (process.env.SHELL || '/bin/zsh') : command;
+
+  if (!(await tmuxSessionExists(sessionName))) {
+    try {
+      await execFileAsync('tmux', [
+        'new-session', '-d', '-s', sessionName, '-n', windowName, '-c', cwd,
+        '-x', '120', '-y', '32', shellCommand
+      ]);
+      await execFileAsync('tmux', ['set-option', '-t', sessionName, '-w', 'window-size', 'largest']);
+      await execFileAsync('tmux', ['set-option', '-t', sessionName, 'history-limit', '10000']);
+      return { wasNew: true };
+    } catch (err) {
+      if (await tmuxWindowExists(sessionName, windowName)) return { wasNew: false };
+      if (await tmuxSessionExists(sessionName)) {
+        await execFileAsync('tmux', ['new-window', '-d', '-t', sessionName, '-n', windowName, '-c', cwd, shellCommand]);
+        await execFileAsync('tmux', ['set-option', '-t', sessionName, '-w', 'window-size', 'largest']);
+        await execFileAsync('tmux', ['set-option', '-t', sessionName, 'history-limit', '10000']);
+        return { wasNew: true };
+      }
+      throw err;
+    }
+  }
+
+  try {
+    await execFileAsync('tmux', ['new-window', '-d', '-t', sessionName, '-n', windowName, '-c', cwd, shellCommand]);
+    await execFileAsync('tmux', ['set-option', '-t', sessionName, '-w', 'window-size', 'largest']);
+    await execFileAsync('tmux', ['set-option', '-t', sessionName, 'history-limit', '10000']);
+    return { wasNew: true };
+  } catch (err) {
+    if (await tmuxWindowExists(sessionName, windowName)) return { wasNew: false };
+    throw err;
+  }
+}
+
+async function ensureTmuxTarget(opts: RealAttachOpts): Promise<{ wasNew: boolean }> {
+  if (opts.createMode === 'none') {
+    if (!(await tmuxTargetExists(opts.tmuxName))) {
+      throw new Error(`tmux target not found: ${opts.tmuxName}`);
+    }
+    return { wasNew: false };
+  }
+  if (opts.createMode === 'window' && opts.tmuxSessionName && opts.tmuxWindowName) {
+    return ensureTmuxWindow(opts.tmuxSessionName, opts.tmuxWindowName, opts.cwd, opts.spawnCommand);
+  }
+  return ensureTmuxSession(opts.tmuxName, opts.cwd, opts.spawnCommand);
+}
+
+async function teardownMatchingPipeReaders(predicate: (tmuxName: string) => boolean) {
+  for (const [tmuxName, pipeReader] of [...pipeReaders.entries()]) {
+    if (!predicate(tmuxName)) continue;
     pipeReaders.delete(tmuxName);
     await teardownPipeReader(pipeReader, /* sendExit */ true);
   }
+}
+
+export async function killTmuxSession(tmuxSessionName: string) {
+  if (!tmuxSessionName) return;
+  await teardownMatchingPipeReaders((tmuxName) => tmuxName === tmuxSessionName || tmuxName.startsWith(`${tmuxSessionName}:`));
   try {
-    await execFileAsync('tmux', ['kill-session', '-t', tmuxName]);
+    await execFileAsync('tmux', ['kill-session', '-t', tmuxSessionName]);
+  } catch {
+    // already gone
+  }
+}
+
+export async function killTmuxWindow(tmuxName: string) {
+  if (!tmuxName) return;
+  await teardownMatchingPipeReaders((name) => name === tmuxName);
+  try {
+    await execFileAsync('tmux', ['kill-window', '-t', tmuxName]);
   } catch {
     // already gone
   }
@@ -134,17 +225,20 @@ function sendData(ws: WebSocket, streamId: string, data: string) {
   sendJson(ws, { type: 'terminal-data', streamId, data });
 }
 
-// `streamId` and `tmuxName` are server-assigned and limited to [a-zA-Z0-9_-],
-// so the fifo path is safe to drop into tmux's pipe-pane shell command.
-// We still single-quote it as defense-in-depth — tmux invokes the command
-// via /bin/sh -c.
+// tmux targets can contain punctuation such as ":" or "@", so fifo filenames
+// use a sanitized display form. The pipe-pane command still gets shell-quoted
+// because tmux invokes it via /bin/sh -c.
 function shellQuoteForPipePane(value: string) {
   return `'${value.replace(/'/g, "'\\''")}'`;
 }
 
+function safeFifoName(value: string) {
+  return value.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 120) || 'tmux';
+}
+
 async function startPipeReader(tmuxName: string): Promise<PipeReader> {
   pipeSeq += 1;
-  const fifoPath = join(FIFO_DIR, `${tmuxName}-${process.pid}-${pipeSeq}.fifo`);
+  const fifoPath = join(FIFO_DIR, `${safeFifoName(tmuxName)}-${process.pid}-${pipeSeq}.fifo`);
   await unlink(fifoPath).catch(() => {});
   await execFileAsync('mkfifo', ['-m', '600', fifoPath]);
 
@@ -257,9 +351,11 @@ async function teardownPipeReader(pipeReader: PipeReader, sendExit: boolean) {
 
 export async function attachReal(opts: RealAttachOpts): Promise<Stream> {
   await ensureFifoDir();
-  await mkdir(opts.cwd, { recursive: true });
+  if (opts.createMode !== 'none') {
+    await mkdir(opts.cwd, { recursive: true });
+  }
 
-  const { wasNew } = await ensureTmuxSession(opts.tmuxName, opts.cwd, opts.spawnCommand);
+  const { wasNew } = await ensureTmuxTarget(opts);
 
   // Set the window size up front so the spawned process and any redraws
   // target the browser's actual viewport.

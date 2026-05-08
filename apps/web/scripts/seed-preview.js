@@ -63,7 +63,15 @@ function hashToken(token) {
 }
 
 function tmuxName(projectId, tabId) {
-  return `termag-${projectId}-${tabId}`;
+  return `${tmuxSessionName(projectId)}:${tmuxWindowName(tabId)}`;
+}
+
+function tmuxSessionName(projectId) {
+  return `termag-${projectId}`;
+}
+
+function tmuxWindowName(tabId) {
+  return tabId === 'ctrl' ? 'ctrl' : `tab-${tabId}`;
 }
 
 async function ensureProject(user, spec, openedAt) {
@@ -88,6 +96,11 @@ async function ensureProject(user, spec, openedAt) {
       openedAt
     }
   });
+  const projectTmuxSessionName = tmuxSessionName(project.id);
+  await prisma.project.update({
+    where: { id: project.id },
+    data: { tmuxSessionName: projectTmuxSessionName, tmuxManaged: true }
+  });
 
   const existingTabs = await prisma.tab.findMany({ where: { projectId: project.id } });
   if (existingTabs.length > 0) return project;
@@ -103,6 +116,8 @@ async function ensureProject(user, spec, openedAt) {
         tabId: tab.id,
         kind: 'agent',
         tmuxName: tmuxName(project.id, tab.id),
+        tmuxWindowName: tmuxWindowName(tab.id),
+        tmuxManaged: true,
         status: tabSpec.status,
         lastSeenAt: new Date()
       }
@@ -117,6 +132,8 @@ async function ensureProject(user, spec, openedAt) {
       projectId: project.id,
       kind: 'ctrl',
       tmuxName: tmuxName(project.id, 'ctrl'),
+      tmuxWindowName: tmuxWindowName('ctrl'),
+      tmuxManaged: true,
       status: 'idle',
       lastSeenAt: new Date()
     }
