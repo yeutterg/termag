@@ -14,6 +14,7 @@ type Json = Record<string, unknown>;
 
 const isFake = process.env.TERMAG_AGENT_FAKE === 'true';
 const tag = isFake ? 'fake-agent' : 'agent';
+const insecureLocalTls = process.env.TERMAG_TLS_INSECURE_SKIP_VERIFY === 'true';
 
 const PING_INTERVAL_MS = 30_000;
 const PONG_TIMEOUT_MS = 60_000;
@@ -57,6 +58,8 @@ Environment:
   TERMAG_URL                wss://… or ws://localhost… of /api/ws/agent
   TERMAG_AGENT_TOKEN        bearer token created in the web New Device dialog
   TERMAG_AGENT_ROOTS        JSON map of device labels to roots, e.g. {"Mac Mini":"~/Code"}
+  TERMAG_TLS_INSECURE_SKIP_VERIFY
+                            allow self-signed localhost TLS only (default false)
   TERMAG_RECONNECT_MS       initial reconnect delay (default 1000)
   TERMAG_RECONNECT_MAX_MS   max reconnect delay (default 30000)
 `);
@@ -108,12 +111,18 @@ function validateUrl(raw: string): URL {
   }
   if (url.protocol === 'ws:') {
     const host = url.hostname;
-    const local = host === 'localhost' || host === '127.0.0.1' || host === '::1' || host === '[::1]';
-    if (!local) {
+    if (!isLocalHost(host)) {
       throw new Error(`TERMAG_URL must use wss:// for non-localhost hosts (got ${host}). Use a TLS reverse proxy or an SSH tunnel for the broker.`);
     }
   }
+  if (insecureLocalTls && (url.protocol !== 'wss:' || !isLocalHost(url.hostname))) {
+    throw new Error('TERMAG_TLS_INSECURE_SKIP_VERIFY=true is only allowed with wss://localhost, wss://127.0.0.1, or wss://[::1].');
+  }
   return url;
+}
+
+function isLocalHost(host: string) {
+  return host === 'localhost' || host === '127.0.0.1' || host === '::1' || host === '[::1]';
 }
 
 async function preflightTmux() {
@@ -157,7 +166,12 @@ function nextReconnectDelay() {
 function connect(validatedUrl: URL, token: string) {
   const url = new URL(validatedUrl.toString());
   url.searchParams.set('token', token);
-  const ws = new WebSocket(url);
+  const ws = new WebSocket(
+    url,
+    insecureLocalTls && validatedUrl.protocol === 'wss:' && isLocalHost(validatedUrl.hostname)
+      ? { rejectUnauthorized: false }
+      : undefined
+  );
 
   // Heartbeat: ping every 30s, expect pong within PONG_TIMEOUT. Silent NAT
   // drops, dropped wifi without RST, and idle proxies all leave a websocket

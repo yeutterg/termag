@@ -37,11 +37,18 @@ Generate `TERMAG_AGENT_TOKEN` in the web app from `+` → **New Device**.
 
 `TERMAG_URL` must be `wss://` for any non-localhost host. The agent rejects `ws://` to anything else than 127.0.0.1 / ::1. A misconfigured URL or DNS poisoning would otherwise leak the agent token to whoever's at the other end.
 
+For local Docker previews at `wss://localhost`, Caddy serves a local certificate that Node may not trust. You can opt out of certificate verification for localhost only:
+
+```bash
+export TERMAG_TLS_INSECURE_SKIP_VERIFY=true
+```
+
 | Variable | Purpose | Default |
 | --- | --- | --- |
 | `TERMAG_URL` | Broker WebSocket URL | (required) |
 | `TERMAG_AGENT_TOKEN` | Bearer token from the web New Device dialog | (required) |
 | `TERMAG_AGENT_ROOTS` | JSON map of device labels to root paths | `{"Local device":"~/Code"}` |
+| `TERMAG_TLS_INSECURE_SKIP_VERIFY` | Allow self-signed `wss://localhost` certs only | `false` |
 | `TERMAG_RECONNECT_MS` | Initial reconnect delay (ms) | `1000` |
 | `TERMAG_RECONNECT_MAX_MS` | Max reconnect delay (ms) | `30000` |
 | `TERMAG_AGENT_FAKE` | Run a no-tmux fake stream for UI preview | `false` |

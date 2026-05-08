@@ -221,6 +221,14 @@ TERMAG_URL=wss://localhost/api/ws/agent
 
 `ws://` (no TLS) is only accepted when the hostname is `localhost`, `127.0.0.1`, or `::1`. Anything else must be `wss://` or the agent refuses to connect.
 
+If you are using the local Docker stack at `wss://localhost`, Caddy serves a local certificate that Node may not trust. For that local-only case, add:
+
+```bash
+export TERMAG_TLS_INSECURE_SKIP_VERIFY=true
+```
+
+Do not use that setting for public or remote hosts.
+
 Add more devices by creating one token per device, installing the agent on that device, and giving it a named root. The root key is the device label in the sidebar.
 
 ### 4. Create Projects And Agents
