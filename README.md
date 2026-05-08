@@ -195,7 +195,11 @@ export TERMAG_AGENT_TOKEN=tmag_...
 export TERMAG_AGENT_ROOTS='{"MacBook Pro":"~/Code"}'
 ```
 
-Use your broker URL for `TERMAG_URL`; examples are below.
+Use your broker URL for `TERMAG_URL`; examples are below. The key in `TERMAG_AGENT_ROOTS` must match the device name you created in the web UI. If the UI device is `MacBook Pro M1`, use:
+
+```bash
+export TERMAG_AGENT_ROOTS='{"MacBook Pro M1":"~/Code"}'
+```
 
 Run it:
 
@@ -228,6 +232,15 @@ export TERMAG_TLS_INSECURE_SKIP_VERIFY=true
 ```
 
 Do not use that setting for public or remote hosts.
+
+A complete local Docker agent config looks like:
+
+```bash
+export TERMAG_URL=wss://localhost/api/ws/agent
+export TERMAG_AGENT_TOKEN=tmag_...
+export TERMAG_AGENT_ROOTS='{"MacBook Pro M1":"~/WIP"}'
+export TERMAG_TLS_INSECURE_SKIP_VERIFY=true
+```
 
 Add more devices by creating one token per device, installing the agent on that device, and giving it a named root. The root key is the device label in the sidebar.
 
