@@ -85,6 +85,8 @@ export function NewProjectDialog({ open, onOpenChange, onCreate, devices, select
             <span className="mb-1 block text-xs font-medium text-muted">Project name</span>
             <input
               name="name"
+              type="text"
+              autoComplete="off"
               placeholder="Defaults to the directory name"
               className="h-9 w-full rounded-md border border-line bg-bg px-3 text-sm outline-none focus:border-accent"
             />
