@@ -32,3 +32,15 @@ export type Project = {
   tabs: Tab[];
   sessions: Session[];
 };
+
+export type AgentDeviceStatus = {
+  name: string;
+  connected: boolean;
+  version?: string | null;
+  fake?: boolean;
+  streamCount?: number;
+  uptimeSec?: number;
+  memMb?: number;
+  lastSeenAt?: string | null;
+  roots?: Record<string, string>;
+};

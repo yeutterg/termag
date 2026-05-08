@@ -2,7 +2,7 @@
 
 import { signOut } from 'next-auth/react';
 import { Command } from 'cmdk';
-import { Command as CommandIcon, CornerDownLeft, LogOut, Moon, Plus, Search as SearchIcon, Settings, Trash2 } from 'lucide-react';
+import { Command as CommandIcon, CornerDownLeft, Laptop, LogOut, Moon, Plus, Search as SearchIcon, Trash2 } from 'lucide-react';
 import { Shortcut } from './shortcut';
 import { cn, statusDot } from '@/lib/utils';
 import type { Project, Tab } from './types';
@@ -16,7 +16,7 @@ interface CommandPaletteProps {
   onKill: () => void;
   onTheme: () => void;
   onSearch: () => void;
-  onSettings: () => void;
+  onDevices: () => void;
   authMode: 'oauth' | 'password' | 'trusted';
 }
 
@@ -36,7 +36,7 @@ export function CommandPalette({
   onKill,
   onTheme,
   onSearch,
-  onSettings,
+  onDevices,
   authMode
 }: CommandPaletteProps) {
   if (!open) return null;
@@ -96,9 +96,9 @@ export function CommandPalette({
           <Command.Group heading="Commands">
             <CommandRow icon={<Plus className="h-3.5 w-3.5" />} label="New agent in current project" shortcut={['mod', 'enter']} onSelect={() => { onNewTab(); onOpenChange(false); }} />
             <CommandRow icon={<SearchIcon className="h-3.5 w-3.5" />} label="Search scrollback" shortcut={['mod', 'shift', 'F']} onSelect={() => { onSearch(); onOpenChange(false); }} />
-            <CommandRow icon={<Trash2 className="h-3.5 w-3.5" />} label="Kill current session" onSelect={() => { onKill(); onOpenChange(false); }} />
+            <CommandRow icon={<Trash2 className="h-3.5 w-3.5" />} label="Delete current window" onSelect={() => { onKill(); onOpenChange(false); }} />
             <CommandRow icon={<Moon className="h-3.5 w-3.5" />} label="Toggle theme" shortcut={['mod', '.']} onSelect={() => { onTheme(); onOpenChange(false); }} />
-            <CommandRow icon={<Settings className="h-3.5 w-3.5" />} label="Open settings" shortcut={['mod', ';']} onSelect={() => { onSettings(); onOpenChange(false); }} />
+            <CommandRow icon={<Laptop className="h-3.5 w-3.5" />} label="Open devices" shortcut={['mod', ';']} onSelect={() => { onDevices(); onOpenChange(false); }} />
             {authMode === 'oauth' && (
               <CommandRow icon={<LogOut className="h-3.5 w-3.5" />} label="Sign out" onSelect={() => signOut({ callbackUrl: '/login' })} />
             )}

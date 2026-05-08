@@ -173,17 +173,25 @@ async function ensureTmuxWindow(sessionName: string, windowName: string, cwd: st
   }
 }
 
-async function ensureTmuxTarget(opts: RealAttachOpts): Promise<{ wasNew: boolean }> {
+async function ensureTmuxTarget(opts: RealAttachOpts): Promise<{ wasNew: boolean; target: string }> {
   if (opts.createMode === 'none') {
     if (!(await tmuxTargetExists(opts.tmuxName))) {
       throw new Error(`tmux target not found: ${opts.tmuxName}`);
     }
-    return { wasNew: false };
+    return { wasNew: false, target: opts.tmuxName };
   }
   if (opts.createMode === 'window' && opts.tmuxSessionName && opts.tmuxWindowName) {
-    return ensureTmuxWindow(opts.tmuxSessionName, opts.tmuxWindowName, opts.cwd, opts.spawnCommand);
+    if (await tmuxTargetExists(opts.tmuxName)) return { wasNew: false, target: opts.tmuxName };
+    const result = await ensureTmuxWindow(opts.tmuxSessionName, opts.tmuxWindowName, opts.cwd, opts.spawnCommand);
+    return { ...result, target: `${opts.tmuxSessionName}:${opts.tmuxWindowName}` };
   }
-  return ensureTmuxSession(opts.tmuxName, opts.cwd, opts.spawnCommand);
+  const result = await ensureTmuxSession(opts.tmuxName, opts.cwd, opts.spawnCommand);
+  return { ...result, target: opts.tmuxName };
+}
+
+async function resolveTmuxWindowId(target: string): Promise<string> {
+  const { stdout } = await execFileAsync('tmux', ['display-message', '-p', '-t', target, '#{window_id}']);
+  return stdout.trim() || target;
 }
 
 async function teardownMatchingPipeReaders(predicate: (tmuxName: string) => boolean) {
@@ -212,6 +220,16 @@ export async function killTmuxWindow(tmuxName: string) {
   } catch {
     // already gone
   }
+}
+
+export async function renameTmuxWindow(tmuxName: string, name: string): Promise<{ tmuxName: string; tmuxWindowName: string }> {
+  const trimmed = name.trim();
+  if (!tmuxName || !trimmed) throw new Error('tmux target and window name are required');
+  await execFileAsync('tmux', ['rename-window', '-t', tmuxName, trimmed]);
+  return {
+    tmuxName: await resolveTmuxWindowId(tmuxName),
+    tmuxWindowName: trimmed
+  };
 }
 
 function sendJson(ws: WebSocket, msg: Record<string, unknown>) {
@@ -355,13 +373,14 @@ export async function attachReal(opts: RealAttachOpts): Promise<Stream> {
     await mkdir(opts.cwd, { recursive: true });
   }
 
-  const { wasNew } = await ensureTmuxTarget(opts);
+  const { wasNew, target } = await ensureTmuxTarget(opts);
+  const tmuxName = await resolveTmuxWindowId(target);
 
   // Set the window size up front so the spawned process and any redraws
   // target the browser's actual viewport.
   if (opts.cols > 0 && opts.rows > 0) {
     await execFileAsync('tmux', [
-      'resize-window', '-t', opts.tmuxName,
+      'resize-window', '-t', tmuxName,
       '-x', String(opts.cols), '-y', String(opts.rows)
     ]).catch(() => {});
   }
@@ -372,7 +391,7 @@ export async function attachReal(opts: RealAttachOpts): Promise<Stream> {
     try {
       const { stdout } = await execFileAsync(
         'tmux',
-        ['capture-pane', '-t', opts.tmuxName, '-p', '-e', '-S', `-${REATTACH_HISTORY_LINES}`],
+        ['capture-pane', '-t', tmuxName, '-p', '-e', '-S', `-${REATTACH_HISTORY_LINES}`],
         { encoding: 'buffer', maxBuffer: 16 * 1024 * 1024 }
       );
       sendData(opts.ws, opts.streamId, stdout.toString('utf8'));
@@ -382,26 +401,25 @@ export async function attachReal(opts: RealAttachOpts): Promise<Stream> {
     }
   }
 
-  let pipeReader = pipeReaders.get(opts.tmuxName);
+  let pipeReader = pipeReaders.get(tmuxName);
   if (!pipeReader || pipeReader.closed) {
-    let starting = pendingPipeStarts.get(opts.tmuxName);
+    let starting = pendingPipeStarts.get(tmuxName);
     if (!starting) {
-      starting = startPipeReader(opts.tmuxName)
+      starting = startPipeReader(tmuxName)
         .then((reader) => {
-          pipeReaders.set(opts.tmuxName, reader);
+          pipeReaders.set(tmuxName, reader);
           return reader;
         })
         .finally(() => {
-          pendingPipeStarts.delete(opts.tmuxName);
+          pendingPipeStarts.delete(tmuxName);
         });
-      pendingPipeStarts.set(opts.tmuxName, starting);
+      pendingPipeStarts.set(tmuxName, starting);
     }
     pipeReader = await starting;
   }
 
   pipeReader.subscribers.set(opts.streamId, { streamId: opts.streamId, ws: opts.ws });
 
-  const tmuxName = opts.tmuxName;
   const streamId = opts.streamId;
   let detached = false;
 

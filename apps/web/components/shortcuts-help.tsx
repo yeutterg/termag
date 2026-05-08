@@ -28,7 +28,7 @@ const GROUPS: Group[] = [
     heading: 'Projects & app',
     items: [
       { keys: ['mod', 'shift', 'P'], label: 'New project', note: 'Firefox: collides with print preview' },
-      { keys: ['mod', ';'], label: 'Open settings' }
+      { keys: ['mod', ';'], label: 'Open devices' }
     ]
   },
   {

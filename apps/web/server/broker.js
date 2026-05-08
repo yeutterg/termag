@@ -145,6 +145,15 @@ function createBroker({ prisma, wss }) {
     return agents.get(userId) || new Map();
   }
 
+  function publicAgentStatus(agent) {
+    return {
+      name: agent.deviceName,
+      connected: agent.ws.readyState === WebSocket.OPEN,
+      lastSeenAt: agent.lastSeenAt?.toISOString?.() || null,
+      ...(agent.health || {})
+    };
+  }
+
   function connectedAgents(userId) {
     return [...agentsForUser(userId).values()].filter((agent) => agent.ws.readyState === WebSocket.OPEN);
   }
@@ -216,7 +225,7 @@ function createBroker({ prisma, wss }) {
   }
 
   function broadcastStatus(userId, refresh = false) {
-    const devices = connectedAgents(userId).map((agent) => agent.deviceName);
+    const devices = connectedAgents(userId).map(publicAgentStatus);
     for (const client of wss.clients) {
       if (client._termagStatusUserId === userId && client.readyState === WebSocket.OPEN) {
         sendJson(client, { type: 'agent', connected: devices.length > 0, devices });
@@ -246,7 +255,7 @@ function createBroker({ prisma, wss }) {
       existing.ws.close(1000, 'replaced');
     }
 
-    const agent = { ws, userId: record.userId, deviceName, tokenId: record.id, pending: new Map() };
+    const agent = { ws, userId: record.userId, deviceName, tokenId: record.id, pending: new Map(), lastSeenAt: new Date(), health: null };
     setAgent(record.userId, deviceName, agent);
 
     await prisma.project.updateMany({
@@ -283,6 +292,20 @@ function createBroker({ prisma, wss }) {
         clearTimeout(pending.timer);
         agent.pending.delete(msg.requestId);
         msg.error ? pending.reject(new Error(msg.error)) : pending.resolve(msg.data ?? {});
+        return;
+      }
+
+      if (msg.type === 'health') {
+        agent.lastSeenAt = new Date();
+        agent.health = {
+          version: typeof msg.version === 'string' ? msg.version : null,
+          fake: Boolean(msg.fake),
+          streamCount: Number.isFinite(Number(msg.streamCount)) ? Number(msg.streamCount) : 0,
+          uptimeSec: Number.isFinite(Number(msg.uptimeSec)) ? Number(msg.uptimeSec) : 0,
+          memMb: Number.isFinite(Number(msg.memMb)) ? Number(msg.memMb) : 0,
+          roots: msg.roots && typeof msg.roots === 'object' ? msg.roots : {}
+        };
+        broadcastStatus(record.userId);
         return;
       }
 
@@ -374,7 +397,7 @@ function createBroker({ prisma, wss }) {
 
     if (url.pathname === '/api/ws/status') {
       ws._termagStatusUserId = userId;
-      const devices = connectedAgents(userId).map((agent) => agent.deviceName);
+      const devices = connectedAgents(userId).map(publicAgentStatus);
       sendJson(ws, { type: 'agent', connected: devices.length > 0, devices });
       return;
     }
@@ -466,7 +489,7 @@ function createBroker({ prisma, wss }) {
       if (stream.attachPromise) return stream.attachPromise;
       stream.attachPromise = (async () => {
         try {
-          await sendToAgent(userId, session.project.rootKey, 'terminal-attach', {
+          const attachResult = await sendToAgent(userId, session.project.rootKey, 'terminal-attach', {
             streamId,
             sessionId,
             tmuxName: session.tmuxName,
@@ -483,6 +506,13 @@ function createBroker({ prisma, wss }) {
             cols: stream.cols,
             rows: stream.rows
           });
+          if (attachResult?.tmuxName && attachResult.tmuxName !== session.tmuxName) {
+            session.tmuxName = attachResult.tmuxName;
+            await prisma.session.update({
+              where: { id: session.id },
+              data: { tmuxName: attachResult.tmuxName }
+            }).catch(() => {});
+          }
           stream.attached = true;
           await markSessionStatus('idle');
           sendJson(ws, { type: 'ready' });
@@ -578,6 +608,18 @@ function createBroker({ prisma, wss }) {
       return sendToAgent(userId, deviceName, 'tmux-kill-window', { tmuxName }, timeoutMs)
         .then(() => true)
         .catch(() => false);
+    },
+    renameTmuxWindow(userId, deviceName, tmuxName, name, timeoutMs = 5000) {
+      if (!tmuxName || !name || !agentForUser(userId, deviceName)) return Promise.resolve(null);
+      return sendToAgent(userId, deviceName, 'tmux-rename-window', { tmuxName, name }, timeoutMs)
+        .catch(() => null);
+    },
+    disconnectAgentToken(userId, tokenId) {
+      for (const agent of agentsForUser(userId).values()) {
+        if (agent.tokenId === tokenId && agent.ws.readyState === WebSocket.OPEN) {
+          agent.ws.close(1008, 'token revoked');
+        }
+      }
     },
     killTmux(userId, tmuxName, timeoutMs = 5000) {
       if (!tmuxName || !agentForUser(userId)) return Promise.resolve(false);

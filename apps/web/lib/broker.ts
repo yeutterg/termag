@@ -3,6 +3,8 @@ type Broker = {
   refreshUser?: (userId: string) => void;
   killTmuxSession?: (userId: string, deviceName: string, tmuxSessionName: string, timeoutMs?: number) => Promise<boolean>;
   killTmuxWindow?: (userId: string, deviceName: string, tmuxName: string, timeoutMs?: number) => Promise<boolean>;
+  renameTmuxWindow?: (userId: string, deviceName: string, tmuxName: string, name: string, timeoutMs?: number) => Promise<{ tmuxName?: string; tmuxWindowName?: string } | null>;
+  disconnectAgentToken?: (userId: string, tokenId: string) => void;
   killTmux: (userId: string, tmuxName: string, timeoutMs?: number) => Promise<boolean>;
 };
 
@@ -56,6 +58,16 @@ export async function killTmuxProjectSessions(userId: string, targets: Array<{ r
       ? live.killTmuxSession(userId, target.rootKey, target.tmuxSessionName).catch(() => false)
       : live.killTmux(userId, target.tmuxSessionName).catch(() => false)
   ));
+}
+
+export async function renameTmuxWindow(userId: string, target: { rootKey: string; tmuxName: string | null | undefined; name: string }) {
+  const live = broker();
+  if (!live?.renameTmuxWindow || !target.tmuxName || !target.name.trim()) return null;
+  return live.renameTmuxWindow(userId, target.rootKey, target.tmuxName, target.name.trim()).catch(() => null);
+}
+
+export function disconnectAgentToken(userId: string, tokenId: string) {
+  broker()?.disconnectAgentToken?.(userId, tokenId);
 }
 
 export async function killTmuxSessions(userId: string, tmuxNames: Array<string | null | undefined>) {

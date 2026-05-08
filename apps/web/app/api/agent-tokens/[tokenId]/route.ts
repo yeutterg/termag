@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { withAuth } from '@/lib/auth';
 import { prisma } from '@/lib/prisma';
+import { disconnectAgentToken } from '@/lib/broker';
 
 export const DELETE = withAuth(async (user, _request: Request, { params }: { params: Promise<{ tokenId: string }> }) => {
   const { tokenId } = await params;
@@ -10,5 +11,6 @@ export const DELETE = withAuth(async (user, _request: Request, { params }: { par
     where: { id: tokenId },
     data: { revokedAt: new Date() }
   });
+  disconnectAgentToken(user.id, tokenId);
   return NextResponse.json({ ok: true });
 });

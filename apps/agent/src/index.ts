@@ -9,7 +9,7 @@ import http from 'node:http';
 import https from 'node:https';
 import type { RequestOptions as HttpsRequestOptions } from 'node:https';
 import WebSocket from 'ws';
-import { type Stream, attachReal, attachFake, killTmuxSession, killTmuxWindow } from './streams';
+import { type Stream, attachReal, attachFake, killTmuxSession, killTmuxWindow, renameTmuxWindow } from './streams';
 
 const execFileAsync = promisify(execFile);
 
@@ -479,9 +479,7 @@ function connect(validatedUrl: URL, token: string) {
       try { ws.ping(); } catch { /* socket already in error state */ }
     }, PING_INTERVAL_MS);
 
-    // Health: periodic structured snapshot the broker can surface in Settings.
-    // The broker silently ignores unknown message types today, so this is
-    // forward-compat scaffolding the web UI can start consuming whenever.
+    // Health: periodic structured snapshot the broker surfaces in Devices.
     sendHealth(ws);
     healthTimer = setInterval(() => sendHealth(ws), HEALTH_INTERVAL_MS);
   });
@@ -504,8 +502,8 @@ function connect(validatedUrl: URL, token: string) {
     try {
       switch (type) {
         case 'terminal-attach': {
-          await handleAttach(ws, msg);
-          respond(ws, requestId, { ok: true });
+          const result = await handleAttach(ws, msg);
+          respond(ws, requestId, result);
           break;
         }
         case 'terminal-input': {
@@ -536,6 +534,13 @@ function connect(validatedUrl: URL, token: string) {
         case 'tmux-kill-window': {
           if (!isFake) await killTmuxWindow(String(msg.tmuxName || ''));
           if (requestId) respond(ws, requestId, { ok: true });
+          break;
+        }
+        case 'tmux-rename-window': {
+          const result = isFake
+            ? { tmuxName: String(msg.tmuxName || ''), tmuxWindowName: String(msg.name || '') }
+            : await renameTmuxWindow(String(msg.tmuxName || ''), String(msg.name || ''));
+          respond(ws, requestId, result);
           break;
         }
         case 'tmux-list': {
@@ -581,7 +586,8 @@ function sendHealth(ws: WebSocket) {
     uptimeSec: Math.floor(process.uptime()),
     memMb,
     version: pkgVersion,
-    fake: isFake
+    fake: isFake,
+    roots
   }));
 }
 
@@ -606,7 +612,7 @@ async function handleAttach(ws: WebSocket, msg: Json) {
       cwd: (msg.cwd as { rootKey?: string; relativePath?: string } | undefined) || {}
     });
     streams.set(streamId, stream);
-    return;
+    return { tmuxName: stream.tmuxName };
   }
 
   const tmuxName = String(msg.tmuxName || '');
@@ -622,6 +628,7 @@ async function handleAttach(ws: WebSocket, msg: Json) {
 
   const stream = await attachReal({ ws, streamId, tmuxName, tmuxSessionName, tmuxWindowName, createMode, cwd, spawnCommand, cols, rows });
   streams.set(streamId, stream);
+  return { tmuxName: stream.tmuxName };
 }
 
 async function listTmuxSessions() {
@@ -690,11 +697,11 @@ function fakeTmuxSessions() {
   return [
     {
       name: 'restful-esp32',
-      path: '~/WIP/Restful-ESP32',
+      path: '~/Code/Restful-ESP32',
       windowCount: 2,
       windows: [
-        { index: 0, id: '@101', name: 'codex', target: '@101', path: '~/WIP/Restful-ESP32' },
-        { index: 1, id: '@102', name: 'gemini', target: '@102', path: '~/WIP/Restful-ESP32' }
+        { index: 0, id: '@101', name: 'codex', target: '@101', path: '~/Code/Restful-ESP32' },
+        { index: 1, id: '@102', name: 'gemini', target: '@102', path: '~/Code/Restful-ESP32' }
       ]
     },
     {

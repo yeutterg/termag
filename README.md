@@ -244,7 +244,7 @@ A complete local Docker agent config looks like:
 ```bash
 export TERMAG_URL=wss://localhost/api/ws/agent
 export TERMAG_AGENT_TOKEN=tmag_...
-export TERMAG_AGENT_ROOTS='{"MacBook Pro M1":"~/WIP"}'
+export TERMAG_AGENT_ROOTS='{"MacBook Pro M1":"~/Code"}'
 export TERMAG_TLS_INSECURE_SKIP_VERIFY=true
 ```
 

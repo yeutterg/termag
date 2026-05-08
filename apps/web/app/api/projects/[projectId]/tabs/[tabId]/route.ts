@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server';
 import { z } from 'zod';
 import { withAuth } from '@/lib/auth';
 import { prisma } from '@/lib/prisma';
-import { killTmuxWindows } from '@/lib/broker';
+import { killTmuxWindows, renameTmuxWindow } from '@/lib/broker';
 
 type Params = { params: Promise<{ projectId: string; tabId: string }> };
 
@@ -13,12 +13,34 @@ export const PATCH = withAuth(async (user, request: Request, { params }: Params)
   const parsed = updateSchema.safeParse(await request.json().catch(() => null));
   if (!parsed.success) return NextResponse.json({ error: 'Invalid tab payload' }, { status: 400 });
   const tab = await prisma.tab.findFirst({
-    where: { id: tabId, project: { id: projectId, userId: user.id } }
+    where: { id: tabId, project: { id: projectId, userId: user.id } },
+    include: {
+      session: { select: { id: true, tmuxName: true, tmuxManaged: true } },
+      project: { select: { rootKey: true } }
+    }
   });
   if (!tab) return NextResponse.json({ error: 'Not found' }, { status: 404 });
+  let tmuxUpdate: { tmuxName?: string; tmuxWindowName?: string } | null = null;
+  if (tab.session && tab.session.tmuxManaged !== false) {
+    tmuxUpdate = await renameTmuxWindow(user.id, {
+      rootKey: tab.project.rootKey,
+      tmuxName: tab.session?.tmuxName,
+      name: parsed.data.name.trim()
+    });
+  }
   const updated = await prisma.tab.update({
     where: { id: tab.id },
-    data: { name: parsed.data.name.trim() },
+    data: {
+      name: parsed.data.name.trim(),
+      session: tmuxUpdate?.tmuxName
+        ? {
+          update: {
+            tmuxName: tmuxUpdate.tmuxName,
+            tmuxWindowName: tmuxUpdate.tmuxWindowName || parsed.data.name.trim()
+          }
+        }
+        : undefined
+    },
     include: { session: true }
   });
   return NextResponse.json(updated);

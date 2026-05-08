@@ -2,11 +2,14 @@
 
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  Check,
   ChevronLeft,
   ChevronRight,
   ChevronsLeft,
   ChevronsRight,
   Command as CommandIcon,
+  Copy,
+  ExternalLink,
   FolderPlus,
   Laptop,
   Menu,
@@ -14,7 +17,6 @@ import {
   Moon,
   Plus,
   Search,
-  Settings,
   Sun,
   Terminal
 } from 'lucide-react';
@@ -22,14 +24,14 @@ import { TerminalPane } from './terminal/terminal-pane';
 import { PlatformProvider, Shortcut, shortcutSuffix } from './shortcut';
 import { TabLabel } from './tab-label';
 import { useTabHistory } from './use-tab-history';
-import type { Project, Tab } from './types';
+import type { AgentDeviceStatus, Project, Tab } from './types';
 import type { Platform } from '@/lib/platform';
 import { cn, statusDot } from '@/lib/utils';
 
 // Heavy dialogs are split into their own chunks and loaded only when opened.
 const CommandPalette = lazy(() => import('./command-palette').then((m) => ({ default: m.CommandPalette })));
 const SearchPalette = lazy(() => import('./search-palette').then((m) => ({ default: m.SearchPalette })));
-const SettingsDialog = lazy(() => import('./settings-dialog').then((m) => ({ default: m.SettingsDialog })));
+const DevicesDialog = lazy(() => import('./devices-dialog').then((m) => ({ default: m.DevicesDialog })));
 const ShortcutsHelp = lazy(() => import('./shortcuts-help').then((m) => ({ default: m.ShortcutsHelp })));
 const NewDeviceDialog = lazy(() => import('./new-device-dialog').then((m) => ({ default: m.NewDeviceDialog })));
 const NewProjectDialog = lazy(() => import('./new-project-dialog').then((m) => ({ default: m.NewProjectDialog })));
@@ -39,6 +41,30 @@ function isTypingTarget(target: EventTarget | null): boolean {
   if (!(target instanceof HTMLElement)) return false;
   const tag = target.tagName;
   return tag === 'INPUT' || tag === 'TEXTAREA' || target.isContentEditable;
+}
+
+function normalizeAgentDevice(input: unknown): AgentDeviceStatus {
+  if (typeof input === 'string') return { name: input, connected: true };
+  const raw = (input && typeof input === 'object' ? input : {}) as Record<string, unknown>;
+  return {
+    name: String(raw.name || 'Local device'),
+    connected: raw.connected !== false,
+    version: typeof raw.version === 'string' ? raw.version : null,
+    fake: Boolean(raw.fake),
+    streamCount: Number.isFinite(Number(raw.streamCount)) ? Number(raw.streamCount) : undefined,
+    uptimeSec: Number.isFinite(Number(raw.uptimeSec)) ? Number(raw.uptimeSec) : undefined,
+    memMb: Number.isFinite(Number(raw.memMb)) ? Number(raw.memMb) : undefined,
+    lastSeenAt: typeof raw.lastSeenAt === 'string' ? raw.lastSeenAt : null,
+    roots: raw.roots && typeof raw.roots === 'object' ? raw.roots as Record<string, string> : undefined
+  };
+}
+
+function shellArg(value: string) {
+  return `"${value.replace(/["\\$`]/g, '\\$&')}"`;
+}
+
+function connectCommand(projectName: string, wholeSession = false) {
+  return `termag-agent connect --project ${shellArg(projectName)}${wholeSession ? ' --session' : ''}`;
 }
 
 type AuthMode = 'oauth' | 'password' | 'trusted';
@@ -63,15 +89,18 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
   const [showCtrl, setShowCtrl] = useState(true);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
-  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [devicesOpen, setDevicesOpen] = useState(false);
+  const [focusedDevice, setFocusedDevice] = useState<string | null>(null);
   const [createMenuOpen, setCreateMenuOpen] = useState(false);
+  const [projectMenuId, setProjectMenuId] = useState<string | null>(null);
   const [newDeviceOpen, setNewDeviceOpen] = useState(false);
   const [newProjectOpen, setNewProjectOpen] = useState(false);
   const [attachTmuxOpen, setAttachTmuxOpen] = useState(false);
   const [newProjectDevice, setNewProjectDevice] = useState<string | null>(null);
   const [helpOpen, setHelpOpen] = useState(false);
-  const [agentConnected, setAgentConnected] = useState(false);
+  const [agentDevices, setAgentDevices] = useState<AgentDeviceStatus[]>([]);
   const [theme, setTheme] = useState(user.theme);
+  const [copiedCommand, setCopiedCommand] = useState('');
   // Live xterm titles keyed by sessionId. Tools inside the terminal can set
   // a title via OSC 0/2; we mirror it onto the corresponding tab label.
   const [liveTitles, setLiveTitles] = useState<Record<string, string>>({});
@@ -105,6 +134,11 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
     () => activeProject?.sessions.find((session) => session.kind === 'ctrl'),
     [activeProject]
   );
+  const connectedDeviceNames = useMemo(
+    () => new Set(agentDevices.filter((device) => device.connected).map((device) => device.name)),
+    [agentDevices]
+  );
+  const activeDeviceConnected = Boolean(activeProject && connectedDeviceNames.has(activeProject.rootKey));
 
   useEffect(() => {
     activeProjectIdRef.current = activeProjectId;
@@ -113,6 +147,13 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
   useEffect(() => {
     activeTabIdRef.current = activeTabId;
   }, [activeTabId]);
+
+  useEffect(() => {
+    if (!projectMenuId) return;
+    const close = () => setProjectMenuId(null);
+    window.addEventListener('pointerdown', close);
+    return () => window.removeEventListener('pointerdown', close);
+  }, [projectMenuId]);
 
   useEffect(() => {
     let cancelled = false;
@@ -171,11 +212,12 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
       if (event.key === 'Escape') {
         setPaletteOpen(false);
         setSearchOpen(false);
-        setSettingsOpen(false);
+        setDevicesOpen(false);
         setNewDeviceOpen(false);
         setNewProjectOpen(false);
         setAttachTmuxOpen(false);
         setCreateMenuOpen(false);
+        setProjectMenuId(null);
         setHelpOpen(false);
         return;
       }
@@ -240,10 +282,10 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
         return;
       }
 
-      // ⌘; opens the settings dialog (replaces ⌘, which is browser settings).
+      // ⌘; opens the devices dialog (replaces ⌘, which is browser settings).
       if (mod && event.key === ';') {
         event.preventDefault();
-        setSettingsOpen(true);
+        setDevicesOpen(true);
         return;
       }
 
@@ -282,7 +324,9 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
       ws.onmessage = (event) => {
         try {
           const msg = JSON.parse(event.data);
-          if (msg.type === 'agent') setAgentConnected(Boolean(msg.connected));
+          if (msg.type === 'agent') {
+            if (Array.isArray(msg.devices)) setAgentDevices(msg.devices.map(normalizeAgentDevice));
+          }
           if (msg.type === 'refresh') reloadProjects();
         } catch {
           // ignore malformed payloads
@@ -403,6 +447,25 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
     const tab = await res.json();
     await reloadProjects(projectId, tab.id);
   }, [reloadProjects]);
+
+  const copyText = useCallback(async (id: string, value: string) => {
+    try {
+      await navigator.clipboard.writeText(value);
+    } catch {
+      const textarea = document.createElement('textarea');
+      textarea.value = value;
+      textarea.style.position = 'fixed';
+      textarea.style.opacity = '0';
+      document.body.appendChild(textarea);
+      textarea.select();
+      document.execCommand('copy');
+      document.body.removeChild(textarea);
+    }
+    setCopiedCommand(id);
+    window.setTimeout(() => {
+      setCopiedCommand((current) => (current === id ? '' : current));
+    }, 1500);
+  }, []);
 
   const renameProject = useCallback(async (projectId: string, name: string) => {
     const trimmed = name.trim();
@@ -529,7 +592,10 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
     }
   }, [activeTab]);
 
-  const openSettings = useCallback(() => setSettingsOpen(true), []);
+  const openDevices = useCallback((deviceName?: string) => {
+    setFocusedDevice(deviceName ?? null);
+    setDevicesOpen(true);
+  }, []);
 
   return (
     <PlatformProvider platform={platform}>
@@ -617,7 +683,14 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
             {groups.map(([group, groupProjects]) => (
               <section key={group}>
                 <div className="group/device mb-1 flex h-6 items-center justify-between rounded px-2 text-muted hover:bg-panel2">
-                  <span className="min-w-0 truncate text-[10px] font-medium uppercase tracking-wider">{group}</span>
+                  <button
+                    type="button"
+                    className="min-w-0 flex-1 truncate text-left text-[10px] font-medium uppercase tracking-wider hover:text-text"
+                    title={`Open ${group} device`}
+                    onClick={() => openDevices(group)}
+                  >
+                    {group}
+                  </button>
                   <button
                     type="button"
                     className="grid h-5 w-5 shrink-0 place-items-center rounded text-muted opacity-0 hover:bg-bg hover:text-text focus:opacity-100 group-hover/device:opacity-100"
@@ -699,7 +772,7 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
                               }
                             }}
                           >
-                            <span className={cn('h-2 w-2 shrink-0 rounded-full', statusDot(agentConnected ? project.status : 'sleeping'))} />
+                            <span className={cn('h-2 w-2 shrink-0 rounded-full', statusDot(connectedDeviceNames.has(project.rootKey) ? project.status : 'sleeping'))} />
                             <TabLabel
                               name={project.name}
                               className="min-w-0 flex-1 truncate"
@@ -709,20 +782,58 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
                           <button
                             type="button"
                             className="mr-1 grid h-6 w-6 shrink-0 place-items-center rounded text-muted opacity-0 hover:bg-bg hover:text-text focus:opacity-100 group-hover/project:opacity-100"
+                            onPointerDown={(event) => event.stopPropagation()}
                             onClick={(event) => {
                               event.stopPropagation();
-                              createTab(project.id);
+                              setProjectMenuId((current) => (current === project.id ? null : project.id));
                             }}
-                            title={`New agent${shortcutSuffix(['mod', 'enter'], platform)}`}
-                            aria-label="New agent"
+                            title="Project actions"
+                            aria-label={`${project.name} actions`}
                           >
                             <Plus className="h-3.5 w-3.5" />
                           </button>
                         </div>
+                        {projectMenuId === project.id && (
+                          <div
+                            className="absolute right-1 top-8 z-30 w-56 rounded-md border border-line bg-panel p-1 shadow-xl"
+                            onPointerDown={(event) => event.stopPropagation()}
+                            onClick={(event) => event.stopPropagation()}
+                          >
+                            <button
+                              type="button"
+                              className="flex h-8 w-full items-center gap-2 rounded px-2 text-left text-sm text-muted hover:bg-panel2 hover:text-text"
+                              onClick={() => {
+                                setProjectMenuId(null);
+                                createTab(project.id);
+                              }}
+                            >
+                              <Plus className="h-3.5 w-3.5" />
+                              <span className="flex-1">New agent</span>
+                              <Shortcut keys={['mod', 'enter']} />
+                            </button>
+                            <button
+                              type="button"
+                              className="flex h-8 w-full items-center gap-2 rounded px-2 text-left text-sm text-muted hover:bg-panel2 hover:text-text"
+                              onClick={() => copyText(`connect:${project.id}`, connectCommand(project.name))}
+                            >
+                              {copiedCommand === `connect:${project.id}` ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
+                              <span className="truncate">{copiedCommand === `connect:${project.id}` ? 'Copied' : 'Copy connect command'}</span>
+                            </button>
+                            <button
+                              type="button"
+                              className="flex h-8 w-full items-center gap-2 rounded px-2 text-left text-sm text-muted hover:bg-panel2 hover:text-text"
+                              onClick={() => copyText(`connect-session:${project.id}`, connectCommand(project.name, true))}
+                            >
+                              {copiedCommand === `connect-session:${project.id}` ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
+                              <span className="truncate">{copiedCommand === `connect-session:${project.id}` ? 'Copied' : 'Copy session command'}</span>
+                            </button>
+                          </div>
+                        )}
                         {project.tabs.length > 0 && (
                           <div className="mt-0.5 space-y-0.5 pl-4">
                             {project.tabs.map((tab) => {
                               const isActiveTab = isActiveProject && tab.id === activeTab?.id;
+                              const tabManaged = tab.session?.tmuxManaged !== false;
                               return (
                                 <div
                                   key={tab.id}
@@ -737,7 +848,7 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
                                     }
                                   }}
                                 >
-                                  <span className={cn('h-1.5 w-1.5 shrink-0 rounded-full', statusDot(agentConnected ? tab.status : 'sleeping'))} />
+                                  <span className={cn('h-1.5 w-1.5 shrink-0 rounded-full', statusDot(connectedDeviceNames.has(project.rootKey) ? tab.status : 'sleeping'))} />
                                   <TabLabel
                                     name={tab.name}
                                     liveTitle={tab.session ? liveTitles[tab.session.id] : null}
@@ -747,7 +858,7 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
                                   {project.tabs.length > 1 && (
                                     <span
                                       className="grid h-4 w-4 shrink-0 place-items-center rounded text-muted opacity-0 hover:bg-bg hover:text-text group-hover/tab:opacity-100"
-                                      title="Close session"
+                                      title={tabManaged ? 'Delete (kill tmux window)' : 'Detach'}
                                       onClick={(event) => {
                                         event.stopPropagation();
                                         closeTab(project.id, tab.id);
@@ -776,9 +887,9 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
             <span className="flex-1 text-left">Command</span>
             <Shortcut keys={['mod', 'K']} />
           </button>
-          <button className="flex h-8 w-full items-center gap-2 rounded-md px-2 text-sm text-muted hover:bg-panel2 hover:text-text" onClick={openSettings}>
-            <Settings className="h-3.5 w-3.5" />
-            <span className="flex-1 text-left">Settings</span>
+          <button className="flex h-8 w-full items-center gap-2 rounded-md px-2 text-sm text-muted hover:bg-panel2 hover:text-text" onClick={() => openDevices()}>
+            <Laptop className="h-3.5 w-3.5" />
+            <span className="flex-1 text-left">Devices</span>
             <Shortcut keys={['mod', ';']} />
           </button>
           <button
@@ -811,7 +922,7 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
             )}
             <div className="min-w-0">
               <div className="flex items-center gap-2">
-                <span className={cn('h-2 w-2 rounded-full', statusDot(agentConnected ? activeProject?.status : 'sleeping'))} />
+                <span className={cn('h-2 w-2 rounded-full', statusDot(activeDeviceConnected ? activeProject?.status : 'sleeping'))} />
                 <h1 className="truncate text-sm font-semibold">{activeProject?.name ?? 'No project'}</h1>
               </div>
               <div className="truncate font-mono text-[11px] text-muted">
@@ -841,6 +952,7 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
               <div className="flex h-9 items-end gap-px overflow-x-auto bg-panel pl-1.5 pr-1">
                 {activeProject.tabs.map((tab) => {
                   const isActive = tab.id === activeTab.id && !mobileViewCtrl;
+                  const tabManaged = tab.session?.tmuxManaged !== false;
                   return (
                     <div
                       key={tab.id}
@@ -862,7 +974,7 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
                         }
                       }}
                     >
-                      <span className={cn('h-1.5 w-1.5 shrink-0 rounded-full', statusDot(agentConnected ? tab.status : 'sleeping'))} />
+                      <span className={cn('h-1.5 w-1.5 shrink-0 rounded-full', statusDot(activeDeviceConnected ? tab.status : 'sleeping'))} />
                       <TabLabel
                         name={tab.name}
                         liveTitle={tab.session ? liveTitles[tab.session.id] : null}
@@ -872,7 +984,7 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
                       {activeProject.tabs.length > 1 && (
                         <span
                           className="grid h-4 w-4 shrink-0 place-items-center rounded text-muted opacity-0 hover:bg-panel2 hover:text-text group-hover/tab:opacity-100"
-                          title="Close session"
+                          title={tabManaged ? 'Delete (kill tmux window)' : 'Detach'}
                           onClick={(event) => {
                             event.stopPropagation();
                             closeTab(activeProject.id, tab.id);
@@ -911,7 +1023,7 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
                     }}
                     title="Project ctrl shell"
                   >
-                    <span className={cn('h-1.5 w-1.5 shrink-0 rounded-full', statusDot(agentConnected ? ctrlSession.status : 'sleeping'))} />
+                    <span className={cn('h-1.5 w-1.5 shrink-0 rounded-full', statusDot(activeDeviceConnected ? ctrlSession.status : 'sleeping'))} />
                     <span className="font-mono">ctrl</span>
                   </div>
                 )}
@@ -923,7 +1035,7 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
                     active
                     sessionId={ctrlSession.id}
                     title={liveTitles[ctrlSession.id] || 'ctrl'}
-                    status={agentConnected ? ctrlSession.status : 'sleeping'}
+                    status={activeDeviceConnected ? ctrlSession.status : 'sleeping'}
                     onTitleChange={handleSessionTitle}
                     hideHeader
                   />
@@ -933,7 +1045,7 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
                     active
                     sessionId={activeTab.session.id}
                     title={liveTitles[activeTab.session.id] || activeTab.name}
-                    status={agentConnected ? activeTab.session.status : 'sleeping'}
+                    status={activeDeviceConnected ? activeTab.session.status : 'sleeping'}
                     onTitleChange={handleSessionTitle}
                     hideHeader
                   />
@@ -941,7 +1053,35 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
               </div>
             </section>
           ) : (
-            <div className="grid flex-1 place-items-center rounded-lg border border-dashed border-line bg-panel text-sm text-muted">Create a project to open an agent.</div>
+            <div className="grid flex-1 place-items-center rounded-lg border border-dashed border-line bg-panel px-4">
+              <div className="w-full max-w-lg text-sm">
+                <div className="mb-2 font-medium text-text">Publish a tmux workspace from any device.</div>
+                <div className="mb-3 text-muted">Create a device token, run the agent, then connect an existing tmux window or session.</div>
+                <div className="flex items-center gap-2 rounded-md border border-line bg-bg p-2">
+                  <code className="min-w-0 flex-1 truncate font-mono text-xs text-muted">
+                    termag-agent connect --project "My Project" --session
+                  </code>
+                  <button
+                    type="button"
+                    className="grid h-7 w-7 shrink-0 place-items-center rounded-md text-muted hover:bg-panel2 hover:text-text"
+                    title="Copy connect command"
+                    aria-label="Copy connect command"
+                    onClick={() => copyText('empty-connect', 'termag-agent connect --project "My Project" --session')}
+                  >
+                    {copiedCommand === 'empty-connect' ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
+                  </button>
+                </div>
+                <a
+                  href="https://github.com/yeutterg/termag-next#quick-setup"
+                  target="_blank"
+                  rel="noreferrer"
+                  className="mt-3 inline-flex items-center gap-1 text-xs text-accent hover:underline"
+                >
+                  Setup instructions
+                  <ExternalLink className="h-3 w-3" />
+                </a>
+              </div>
+            </div>
           )}
           {/* ctrl pane: only on md+, hidden on mobile */}
           {showCtrl && ctrlSession && (
@@ -951,7 +1091,7 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
                 active
                 sessionId={ctrlSession.id}
                 title={liveTitles[ctrlSession.id] || 'ctrl'}
-                status={agentConnected ? ctrlSession.status : 'sleeping'}
+                status={activeDeviceConnected ? ctrlSession.status : 'sleeping'}
                 onTitleChange={handleSessionTitle}
               />
             </div>
@@ -970,7 +1110,7 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
             onKill={onCommandKill}
             onTheme={cycleTheme}
             onSearch={() => setSearchOpen(true)}
-            onSettings={openSettings}
+            onDevices={() => openDevices()}
             authMode={authMode}
           />
         </Suspense>
@@ -980,13 +1120,18 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
           <SearchPalette open={searchOpen} onOpenChange={setSearchOpen} />
         </Suspense>
       )}
-      {settingsOpen && (
+      {devicesOpen && (
         <Suspense fallback={null}>
-          <SettingsDialog
-            open={settingsOpen}
-            onOpenChange={setSettingsOpen}
+          <DevicesDialog
+            open={devicesOpen}
+            onOpenChange={(open) => {
+              setDevicesOpen(open);
+              if (!open) setFocusedDevice(null);
+            }}
             user={user}
-            agentConnected={agentConnected}
+            devices={agentDevices}
+            knownDeviceNames={devices}
+            focusedDevice={focusedDevice}
             onTokenDeleted={(name) => {
               setTokenDevices((current) => current.filter((device) => device !== name));
             }}
