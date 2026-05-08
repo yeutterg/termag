@@ -277,7 +277,13 @@ export async function publishTmuxProject(input: {
     for (const window of windows) {
       const tmuxName = window.target.trim();
       const existing = await tx.session.findFirst({
-        where: { projectId: targetProject.id, tmuxName },
+        where: {
+          projectId: targetProject.id,
+          OR: [
+            { tmuxName },
+            { tmuxWindowName: tmuxName }
+          ]
+        },
         include: { tab: true }
       });
       if (existing) {

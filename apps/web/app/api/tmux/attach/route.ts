@@ -38,8 +38,11 @@ export const POST = withAuth(async (user, request: Request) => {
   const connectedWindows = new Set(
     (await prisma.session.findMany({
       where: { project: { userId: user.id, rootKey } },
-      select: { tmuxName: true }
-    })).map((item) => key(rootKey, item.tmuxName))
+      select: { tmuxName: true, tmuxWindowName: true }
+    })).flatMap((item) => [
+      key(rootKey, item.tmuxName),
+      ...(item.tmuxWindowName ? [key(rootKey, item.tmuxWindowName)] : [])
+    ])
   );
   const windows = session.windows.filter((window) => window.target && !connectedWindows.has(key(rootKey, window.target)));
   if (windows.length === 0) {

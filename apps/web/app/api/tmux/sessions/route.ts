@@ -13,7 +13,7 @@ async function connectedTmuxTargets(userId: string) {
     select: {
       rootKey: true,
       tmuxSessionName: true,
-      sessions: { select: { tmuxName: true } }
+      sessions: { select: { tmuxName: true, tmuxWindowName: true } }
     }
   });
   return {
@@ -21,7 +21,10 @@ async function connectedTmuxTargets(userId: string) {
       project.tmuxSessionName ? [key(project.rootKey, project.tmuxSessionName)] : []
     )),
     windows: new Set(projects.flatMap((project) =>
-      project.sessions.map((session) => key(project.rootKey, session.tmuxName))
+      project.sessions.flatMap((session) => [
+        key(project.rootKey, session.tmuxName),
+        ...(session.tmuxWindowName ? [key(project.rootKey, session.tmuxWindowName)] : [])
+      ])
     ))
   };
 }

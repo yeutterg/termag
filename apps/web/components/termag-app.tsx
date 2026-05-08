@@ -156,6 +156,13 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
   }, [projectMenuId]);
 
   useEffect(() => {
+    if (!createMenuOpen) return;
+    const close = () => setCreateMenuOpen(false);
+    window.addEventListener('pointerdown', close);
+    return () => window.removeEventListener('pointerdown', close);
+  }, [createMenuOpen]);
+
+  useEffect(() => {
     let cancelled = false;
     fetch('/api/agent-tokens')
       .then((res) => (res.ok ? res.json() : []))
@@ -213,6 +220,7 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
         setPaletteOpen(false);
         setSearchOpen(false);
         setDevicesOpen(false);
+        setFocusedDevice(null);
         setNewDeviceOpen(false);
         setNewProjectOpen(false);
         setAttachTmuxOpen(false);
@@ -285,6 +293,7 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
       // ⌘; opens the devices dialog (replaces ⌘, which is browser settings).
       if (mod && event.key === ';') {
         event.preventDefault();
+        setFocusedDevice(null);
         setDevicesOpen(true);
         return;
       }
@@ -334,6 +343,7 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
       };
       ws.onclose = () => {
         if (cancelled) return;
+        setAgentDevices((current) => current.map((device) => ({ ...device, connected: false })));
         attempts += 1;
         const delay = Math.min(15000, 500 * 2 ** Math.min(attempts, 5));
         retryTimer = setTimeout(connect, delay);
@@ -625,6 +635,7 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
             <button
               type="button"
               className="grid h-7 w-7 place-items-center rounded-md text-muted hover:bg-panel2 hover:text-text"
+              onPointerDown={(event) => event.stopPropagation()}
               onClick={() => setCreateMenuOpen((value) => !value)}
               title="Create"
               aria-label="Create"
@@ -632,7 +643,10 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
               <Plus className="h-4 w-4" />
             </button>
             {createMenuOpen && (
-              <div className="absolute right-8 top-8 z-50 w-52 rounded-md border border-line bg-panel p-1 shadow-xl">
+              <div
+                className="absolute right-8 top-8 z-50 w-52 rounded-md border border-line bg-panel p-1 shadow-xl"
+                onPointerDown={(event) => event.stopPropagation()}
+              >
                 <button
                   type="button"
                   className="flex h-8 w-full items-center gap-2 rounded px-2 text-left text-sm text-muted hover:bg-panel2 hover:text-text"

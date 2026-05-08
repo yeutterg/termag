@@ -23,7 +23,19 @@ export function DevicesDialog({ open, onOpenChange, user, devices, knownDeviceNa
   const deviceRefs = useRef(new Map<string, HTMLDivElement>());
 
   useEffect(() => {
-    if (open) fetch('/api/agent-tokens').then((res) => res.json()).then(setTokens).catch(() => setTokens([]));
+    if (!open) return;
+    let cancelled = false;
+    fetch('/api/agent-tokens')
+      .then((res) => (res.ok ? res.json() : []))
+      .then((next) => {
+        if (!cancelled) setTokens(Array.isArray(next) ? next : []);
+      })
+      .catch(() => {
+        if (!cancelled) setTokens([]);
+      });
+    return () => {
+      cancelled = true;
+    };
   }, [open]);
 
   async function copyText(id: string, value: string) {
@@ -126,7 +138,8 @@ export function DevicesDialog({ open, onOpenChange, user, devices, knownDeviceNa
                     title="Revoke device token"
                     aria-label={`Revoke ${token.name} token`}
                     onClick={async () => {
-                      await fetch(`/api/agent-tokens/${token.id}`, { method: 'DELETE' });
+                      const res = await fetch(`/api/agent-tokens/${token.id}`, { method: 'DELETE' });
+                      if (!res.ok) return;
                       setTokens((items) => items.filter((item) => item.id !== token.id));
                       onTokenDeleted?.(token.name);
                     }}

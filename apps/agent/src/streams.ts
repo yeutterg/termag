@@ -375,6 +375,9 @@ export async function attachReal(opts: RealAttachOpts): Promise<Stream> {
 
   const { wasNew, target } = await ensureTmuxTarget(opts);
   const tmuxName = await resolveTmuxWindowId(target);
+  if (opts.createMode === 'window' && opts.tmuxWindowName) {
+    await execFileAsync('tmux', ['rename-window', '-t', tmuxName, opts.tmuxWindowName]).catch(() => {});
+  }
 
   // Set the window size up front so the spawned process and any redraws
   // target the browser's actual viewport.

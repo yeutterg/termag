@@ -28,18 +28,19 @@ export const PATCH = withAuth(async (user, request: Request, { params }: Params)
       name: parsed.data.name.trim()
     });
   }
+  const sessionUpdate = tab.session && tab.session.tmuxManaged !== false
+    ? {
+      update: {
+        tmuxName: tmuxUpdate?.tmuxName ?? tab.session.tmuxName,
+        tmuxWindowName: tmuxUpdate?.tmuxWindowName || parsed.data.name.trim()
+      }
+    }
+    : undefined;
   const updated = await prisma.tab.update({
     where: { id: tab.id },
     data: {
       name: parsed.data.name.trim(),
-      session: tmuxUpdate?.tmuxName
-        ? {
-          update: {
-            tmuxName: tmuxUpdate.tmuxName,
-            tmuxWindowName: tmuxUpdate.tmuxWindowName || parsed.data.name.trim()
-          }
-        }
-        : undefined
+      session: sessionUpdate
     },
     include: { session: true }
   });
