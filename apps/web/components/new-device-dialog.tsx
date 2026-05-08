@@ -66,7 +66,9 @@ export function NewDeviceDialog({ open, onOpenChange, onCreated }: NewDeviceDial
             <span className="mb-1 block text-xs font-medium text-muted">Device name</span>
             <input
               name="name"
+              type="text"
               autoFocus
+              autoComplete="off"
               placeholder="MacBook Pro, Mac Mini, Hetzner VPS, homelab"
               className="h-9 w-full rounded-md border border-line bg-bg px-3 text-sm outline-none focus:border-accent"
             />
