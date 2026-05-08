@@ -45,14 +45,13 @@ type DeviceToken = { id: string; name: string; tokenPrefix: string; createdAt: s
 interface TermagAppProps {
   user: { id: string; email: string; name?: string | null; theme: string };
   initialProjects: Project[];
-  roots: Record<string, string>;
   platform: Platform;
   authMode: AuthMode;
 }
 
-export function TermagApp({ user, initialProjects, roots, platform, authMode }: TermagAppProps) {
+export function TermagApp({ user, initialProjects, platform, authMode }: TermagAppProps) {
   const [projects, setProjects] = useState<Project[]>(initialProjects);
-  const [devices, setDevices] = useState(() => Object.keys(roots));
+  const [tokenDevices, setTokenDevices] = useState<string[]>([]);
   const [activeProjectId, setActiveProjectId] = useState(initialProjects[0]?.id ?? '');
   const [activeTabId, setActiveTabId] = useState(initialProjects[0]?.tabs[0]?.id ?? '');
   // Open by default on desktop, closed on mobile (the drawer pattern). The
@@ -66,6 +65,7 @@ export function TermagApp({ user, initialProjects, roots, platform, authMode }: 
   const [createMenuOpen, setCreateMenuOpen] = useState(false);
   const [newDeviceOpen, setNewDeviceOpen] = useState(false);
   const [newProjectOpen, setNewProjectOpen] = useState(false);
+  const [newProjectDevice, setNewProjectDevice] = useState<string | null>(null);
   const [helpOpen, setHelpOpen] = useState(false);
   const [agentConnected, setAgentConnected] = useState(false);
   const [theme, setTheme] = useState(user.theme);
@@ -117,19 +117,19 @@ export function TermagApp({ user, initialProjects, roots, platform, authMode }: 
       .then((res) => (res.ok ? res.json() : []))
       .then((tokens: DeviceToken[]) => {
         if (cancelled) return;
-        const next = new Set(Object.keys(roots));
+        const next = new Set<string>();
         for (const token of tokens) {
           if (token.name) next.add(token.name);
         }
-        setDevices([...next]);
+        setTokenDevices([...next]);
       })
       .catch(() => {
-        if (!cancelled) setDevices(Object.keys(roots));
+        if (!cancelled) setTokenDevices([]);
       });
     return () => {
       cancelled = true;
     };
-  }, [roots]);
+  }, []);
 
   useEffect(() => {
     const root = document.documentElement;
@@ -231,6 +231,7 @@ export function TermagApp({ user, initialProjects, roots, platform, authMode }: 
       if (mod && event.shiftKey && event.key.toLowerCase() === 'p') {
         event.preventDefault();
         setSidebarOpen(true);
+        setNewProjectDevice(null);
         setNewProjectOpen(true);
         return;
       }
@@ -470,6 +471,12 @@ export function TermagApp({ user, initialProjects, roots, platform, authMode }: 
   // Keep the keyboard ref pointed at the latest values without re-binding.
   handlersRef.current = { activeProject, activeTab, projects, createTab, closeTab, cycleTheme, selectTab };
 
+  const devices = useMemo(() => {
+    const next = new Set(tokenDevices);
+    for (const project of projects) next.add(project.rootKey);
+    return [...next];
+  }, [projects, tokenDevices]);
+
   const groups = useMemo(() => {
     const result = new Map<string, Project[]>();
     for (const device of devices) result.set(device, []);
@@ -479,6 +486,12 @@ export function TermagApp({ user, initialProjects, roots, platform, authMode }: 
     }
     return [...result.entries()];
   }, [devices, projects]);
+
+  const openNewProject = useCallback((device?: string) => {
+    setCreateMenuOpen(false);
+    setNewProjectDevice(device ?? null);
+    setNewProjectOpen(true);
+  }, []);
 
   const onCommandSession = useCallback((projectId: string, tabId: string) => {
     selectTab(projectId, tabId);
@@ -546,10 +559,7 @@ export function TermagApp({ user, initialProjects, roots, platform, authMode }: 
                 <button
                   type="button"
                   className="flex h-8 w-full items-center gap-2 rounded px-2 text-left text-sm text-muted hover:bg-panel2 hover:text-text"
-                  onClick={() => {
-                    setCreateMenuOpen(false);
-                    setNewProjectOpen(true);
-                  }}
+                  onClick={() => openNewProject()}
                 >
                   <FolderPlus className="h-3.5 w-3.5" />
                   <span className="flex-1 whitespace-nowrap">New Project</span>
@@ -573,7 +583,18 @@ export function TermagApp({ user, initialProjects, roots, platform, authMode }: 
           <div className="space-y-3">
             {groups.map(([group, groupProjects]) => (
               <section key={group}>
-                <div className="mb-1 px-2 text-[10px] font-medium uppercase tracking-wider text-muted">{group}</div>
+                <div className="group/device mb-1 flex h-6 items-center justify-between rounded px-2 text-muted hover:bg-panel2">
+                  <span className="min-w-0 truncate text-[10px] font-medium uppercase tracking-wider">{group}</span>
+                  <button
+                    type="button"
+                    className="grid h-5 w-5 shrink-0 place-items-center rounded text-muted opacity-0 hover:bg-bg hover:text-text focus:opacity-100 group-hover/device:opacity-100"
+                    title={`New project on ${group}`}
+                    aria-label={`New project on ${group}`}
+                    onClick={() => openNewProject(group)}
+                  >
+                    <Plus className="h-3.5 w-3.5" />
+                  </button>
+                </div>
                 <div className="space-y-1">
                   {groupProjects.length === 0 && (
                     <div className="px-2 py-1 text-xs text-muted/70">No projects yet</div>
@@ -928,7 +949,15 @@ export function TermagApp({ user, initialProjects, roots, platform, authMode }: 
       )}
       {settingsOpen && (
         <Suspense fallback={null}>
-          <SettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} user={user} agentConnected={agentConnected} />
+          <SettingsDialog
+            open={settingsOpen}
+            onOpenChange={setSettingsOpen}
+            user={user}
+            agentConnected={agentConnected}
+            onTokenDeleted={(name) => {
+              setTokenDevices((current) => current.filter((device) => device !== name));
+            }}
+          />
         </Suspense>
       )}
       {newDeviceOpen && (
@@ -937,7 +966,7 @@ export function TermagApp({ user, initialProjects, roots, platform, authMode }: 
             open={newDeviceOpen}
             onOpenChange={setNewDeviceOpen}
             onCreated={(token) => {
-              if (token.name) setDevices((current) => [...new Set([...current, token.name])]);
+              if (token.name) setTokenDevices((current) => [...new Set([...current, token.name])]);
             }}
           />
         </Suspense>
@@ -952,7 +981,8 @@ export function TermagApp({ user, initialProjects, roots, platform, authMode }: 
               if (created && !platform.showShortcuts) setSidebarOpen(false);
               return created;
             }}
-            roots={roots}
+            devices={devices}
+            selectedDevice={newProjectDevice}
           />
         </Suspense>
       )}

@@ -2,7 +2,6 @@ import { headers } from 'next/headers';
 import { redirect } from 'next/navigation';
 import { currentUser, passwordGateEnabled, trustedNetworkEnabled } from '@/lib/auth';
 import { listProjects } from '@/lib/projects';
-import { parseRoots } from '@/lib/defaults';
 import { detectPlatformFromUserAgent } from '@/lib/platform';
 import { TermagApp } from '@/components/termag-app';
 
@@ -22,7 +21,6 @@ export default async function HomePage() {
     <TermagApp
       user={{ id: user.id, email: user.email, name: user.displayName, theme: user.theme }}
       initialProjects={JSON.parse(JSON.stringify(projects))}
-      roots={parseRoots()}
       platform={platform}
       authMode={authMode}
     />

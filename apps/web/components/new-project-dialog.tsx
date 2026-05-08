@@ -13,16 +13,20 @@ interface NewProjectDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onCreate: (formData: FormData) => Promise<boolean>;
-  roots: Record<string, string>;
+  devices: string[];
+  selectedDevice?: string | null;
 }
 
-export function NewProjectDialog({ open, onOpenChange, onCreate, roots }: NewProjectDialogProps) {
+export function NewProjectDialog({ open, onOpenChange, onCreate, devices, selectedDevice }: NewProjectDialogProps) {
   const [error, setError] = useState('');
-  const devices = Object.keys(roots);
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const formData = new FormData(event.currentTarget);
+    if (!formData.get('rootKey')) {
+      setError('Create a device first.');
+      return;
+    }
     const customAgents = String(formData.get('customAgents') || '')
       .split(/\r?\n/)
       .map((line) => line.trim())
@@ -56,8 +60,11 @@ export function NewProjectDialog({ open, onOpenChange, onCreate, roots }: NewPro
               <select
                 name="rootKey"
                 required
+                defaultValue={selectedDevice ?? devices[0] ?? ''}
+                disabled={devices.length === 0}
                 className="h-9 w-full rounded-md border border-line bg-bg px-3 text-sm outline-none focus:border-accent"
               >
+                {devices.length === 0 && <option value="">Create a device first</option>}
                 {devices.map((device) => (
                   <option key={device} value={device}>{device}</option>
                 ))}

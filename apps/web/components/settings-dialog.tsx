@@ -11,9 +11,10 @@ interface SettingsDialogProps {
   onOpenChange: (open: boolean) => void;
   user: { email: string; name?: string | null };
   agentConnected: boolean;
+  onTokenDeleted?: (tokenName: string) => void;
 }
 
-export function SettingsDialog({ open, onOpenChange, user, agentConnected }: SettingsDialogProps) {
+export function SettingsDialog({ open, onOpenChange, user, agentConnected, onTokenDeleted }: SettingsDialogProps) {
   const [tokens, setTokens] = useState<Token[]>([]);
 
   useEffect(() => {
@@ -54,6 +55,7 @@ export function SettingsDialog({ open, onOpenChange, user, agentConnected }: Set
                 onClick={async () => {
                   await fetch(`/api/agent-tokens/${token.id}`, { method: 'DELETE' });
                   setTokens((items) => items.filter((item) => item.id !== token.id));
+                  onTokenDeleted?.(token.name);
                 }}
               >
                 <Trash2 className="h-4 w-4" />
