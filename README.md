@@ -207,6 +207,12 @@ Run it:
 termag-agent
 ```
 
+When testing an unreleased checkout of termag-next, run the agent from this repo instead of a globally installed Homebrew/npm copy:
+
+```bash
+npm run agent
+```
+
 `TERMAG_URL` always includes the port unless you're using a default-port reverse proxy. Common shapes:
 
 ```bash
