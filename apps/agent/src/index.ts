@@ -586,11 +586,19 @@ function writePidFile(pid: number) {
 }
 
 function removePidFile() {
+  // Only unlink if the file still records THIS process's pid. If a newer
+  // agent has already overwritten the file with its own pid (the common
+  // "replaced" sequence), unlinking would erase the live agent's record
+  // and let a subsequent `termag connect` spawn a duplicate, kicking us
+  // into a thrash loop. Read-then-check-then-unlink is racy in theory but
+  // safe in practice for a personal-tool single-machine workflow.
   try {
     const fs = require('node:fs') as typeof import('node:fs');
+    const raw = fs.readFileSync(PID_FILE, 'utf8').trim();
+    if (Number.parseInt(raw, 10) !== process.pid) return;
     fs.unlinkSync(PID_FILE);
   } catch {
-    // Already gone or never created.
+    // Already gone, never created, or unreadable.
   }
 }
 
@@ -905,6 +913,15 @@ function connect(validatedUrl: URL, token: string) {
       console.log(`[${tag}] connection replaced by another agent process; exiting.`);
       removePidFile();
       process.exit(0);
+    }
+    // Code 1008 = Policy Violation. The broker uses this for invalid tokens
+    // and revoked devices. No amount of reconnecting will fix the underlying
+    // problem; exit with a clear error so the user notices.
+    if (code === 1008) {
+      console.error(`[${tag}] broker rejected the connection: ${reasonText || 'policy violation'}.`);
+      console.error(`[${tag}] check TERMAG_AGENT_TOKEN — was the device token revoked or replaced?`);
+      removePidFile();
+      process.exit(1);
     }
     const delay = nextReconnectDelay();
     reconnectAttempts += 1;
