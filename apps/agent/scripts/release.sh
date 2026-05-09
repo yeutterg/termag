@@ -56,7 +56,9 @@ echo "Bumping termag-agent: $old_version -> $new_version"
 
 git -C "$repo_root" add "$agent_dir/package.json" package-lock.json
 git -C "$repo_root" -c commit.gpgsign=false commit -m "agent: release v$new_version"
-git -C "$repo_root" tag "agent-v$new_version"
+# Annotated (-a) so `git push --follow-tags` actually pushes it.
+# Lightweight tags get skipped by --follow-tags and stay local-only.
+git -C "$repo_root" tag -a "agent-v$new_version" -m "agent v$new_version"
 
 if [ "${TERMAG_AGENT_DRY_RUN:-}" = "1" ]; then
   echo "[dry-run] skipping npm publish and git push"
