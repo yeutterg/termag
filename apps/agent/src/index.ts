@@ -14,6 +14,7 @@ import { type Stream, attachReal, attachFake, killTmuxSession, killTmuxWindow, r
 const execFileAsync = promisify(execFile);
 
 type Json = Record<string, unknown>;
+type NodeError = Error & { code?: string };
 
 const isFake = process.env.TERMAG_AGENT_FAKE === 'true';
 const tag = isFake ? 'fake-agent' : 'agent';
@@ -21,7 +22,7 @@ const insecureLocalTls = process.env.TERMAG_TLS_INSECURE_SKIP_VERIFY === 'true';
 
 const PING_INTERVAL_MS = 30_000;
 const PONG_TIMEOUT_MS = 60_000;
-const HEALTH_INTERVAL_MS = 60_000;
+const HEALTH_INTERVAL_MS = 10_000;
 
 const streams = new Map<string, Stream>();
 
@@ -35,30 +36,38 @@ try {
   // running without package.json available; version reporting falls back to 0.0.0
 }
 
-const subcommand = process.argv[2];
+const argv = process.argv.slice(2);
+const subcommand = argv[0];
 if (subcommand === 'update') {
   void runUpdate();
 } else if (subcommand === 'connect') {
-  void runConnect(process.argv.slice(3));
+  void runConnect(argv.slice(1));
 } else if (subcommand === '--version' || subcommand === '-v') {
   console.log(pkgVersion);
   process.exit(0);
 } else if (subcommand === '--help' || subcommand === '-h') {
   printHelp();
   process.exit(0);
+} else if (looksLikeConnectArgs(argv)) {
+  void runConnect(argv);
+} else if (subcommand?.startsWith('-')) {
+  console.error(`[${tag}] Unknown option: ${subcommand}`);
+  printHelp();
+  process.exit(1);
 } else {
   void run();
 }
 
 function printHelp() {
-  console.log(`termag-agent ${pkgVersion}
+  console.log(`termag ${pkgVersion}
 
 Usage:
-  termag-agent              connect to the broker and serve sessions (default)
-  termag-agent connect      publish current tmux window/session to the web UI
-  termag-agent update       upgrade the agent in place (auto-detects npm vs brew)
-  termag-agent --version    print version
-  termag-agent --help       show this message
+  termag              connect to the broker and serve sessions (default)
+  termag connect      publish current tmux window/session to the web UI
+  termag -p/--project shorthand for "termag connect --project"
+  termag update       upgrade the agent in place (auto-detects npm vs brew)
+  termag --version    print version
+  termag --help       show this message
 
 Environment:
   TERMAG_URL                wss://… or ws://localhost… of /api/ws/agent
@@ -69,6 +78,19 @@ Environment:
   TERMAG_RECONNECT_MS       initial reconnect delay (default 1000)
   TERMAG_RECONNECT_MAX_MS   max reconnect delay (default 30000)
 `);
+}
+
+function looksLikeConnectArgs(args: string[]) {
+  return args.some((arg) => (
+    arg === '--project'
+    || arg === '-p'
+    || arg.startsWith('--project=')
+    || arg === '--tab'
+    || arg === '-t'
+    || arg.startsWith('--tab=')
+    || arg === '--session'
+    || arg === '--window'
+  ));
 }
 
 async function runUpdate() {
@@ -87,6 +109,8 @@ type ConnectArgs = {
   projectName: string;
   tabName?: string;
   mode: 'window' | 'session';
+  localAttach?: boolean;
+  startAgent: boolean;
 };
 
 type TmuxWindowInfo = {
@@ -102,6 +126,9 @@ type TmuxContext = {
   sessionPath: string;
   currentWindow: TmuxWindowInfo;
   windows: TmuxWindowInfo[];
+  createdSession?: boolean;
+  createdWindow?: boolean;
+  createdFromShell?: boolean;
 };
 
 async function runConnect(args: string[]) {
@@ -131,19 +158,21 @@ async function runConnect(args: string[]) {
 
   await preflightTmux();
 
+  const connectArgs = await resolveConnectArgs(parsedArgs);
+
   let tmux: TmuxContext;
   try {
-    tmux = await detectTmuxContext();
+    tmux = await detectOrCreateTmuxContext(connectArgs);
   } catch (err) {
     console.error(`[${tag}] ${err instanceof Error ? err.message : String(err)}`);
     process.exit(1);
   }
 
-  const windows = parsedArgs.mode === 'session'
+  const windows = connectArgs.mode === 'session'
     ? tmux.windows
     : [{
       ...tmux.currentWindow,
-      name: parsedArgs.tabName || tmux.currentWindow.name
+      name: connectArgs.tabName || tmux.currentWindow.name
     }];
 
   const publishUrl = publishUrlFromAgentUrl(validatedUrl);
@@ -152,9 +181,9 @@ async function runConnect(args: string[]) {
       publishUrl,
       token,
       {
-        projectName: parsedArgs.projectName,
+        projectName: connectArgs.projectName,
         tmuxSessionName: tmux.sessionName,
-        path: tmux.currentWindow.path || tmux.sessionPath,
+        path: publishPathForCwd(tmux.currentWindow.path || tmux.sessionPath),
         windows: windows.map((window) => ({
           name: window.name,
           target: window.target,
@@ -167,16 +196,27 @@ async function runConnect(args: string[]) {
     const totalTabs = Array.isArray(result?.tabs) ? result.tabs.length : windows.length;
     const added = typeof result?.addedWindowCount === 'number' ? result.addedWindowCount : windows.length;
     const skipped = Math.max(0, windows.length - added);
-    const what = parsedArgs.mode === 'session' ? 'session' : 'window';
+    const what = connectArgs.mode === 'session' ? 'session' : 'window';
     if (added === 0) {
-      console.log(`[${tag}] ${what} "${tmux.sessionName}" already published to project "${parsedArgs.projectName}" (${totalTabs} tab${totalTabs === 1 ? '' : 's'}, no changes).`);
+      console.log(`[${tag}] ${what} "${tmux.sessionName}" already published to project "${connectArgs.projectName}" (${totalTabs} tab${totalTabs === 1 ? '' : 's'}, no changes).`);
     } else if (skipped > 0) {
-      console.log(`[${tag}] published ${added} new tab${added === 1 ? '' : 's'} to project "${parsedArgs.projectName}" (${skipped} already existed; ${totalTabs} total).`);
+      console.log(`[${tag}] published ${added} new tab${added === 1 ? '' : 's'} to project "${connectArgs.projectName}" (${skipped} already existed; ${totalTabs} total).`);
     } else {
-      console.log(`[${tag}] published ${what} "${tmux.sessionName}" to project "${parsedArgs.projectName}" (${added} tab${added === 1 ? '' : 's'}).`);
+      console.log(`[${tag}] published ${what} "${tmux.sessionName}" to project "${connectArgs.projectName}" (${added} tab${added === 1 ? '' : 's'}).`);
+    }
+    if (tmux.createdFromShell) {
+      const action = tmux.createdSession ? 'created tmux session' : tmux.createdWindow ? 'created tmux window in existing session' : 'using existing tmux window';
+      console.log(`[${tag}] ${action} "${tmux.sessionName}" at ${tmux.currentWindow.path}. Attach locally with: tmux attach -t ${shellArgForLog(tmux.sessionName)}`);
+    }
+    if (connectArgs.startAgent) {
+      startBackgroundAgent();
+    }
+    if (shouldAttachLocal(connectArgs, tmux)) {
+      const code = await attachLocalTmux(tmux);
+      process.exit(code);
     }
   } catch (err) {
-    console.error(`[${tag}] ${err instanceof Error ? err.message : String(err)}`);
+    console.error(`[${tag}] ${err instanceof Error ? formatConnectionError(err, publishUrl) : String(err)}`);
     process.exit(1);
   }
 }
@@ -185,6 +225,8 @@ function parseConnectArgs(args: string[]): ConnectArgs {
   let projectName = '';
   let tabName = '';
   let mode: 'window' | 'session' = 'window';
+  let localAttach: boolean | undefined;
+  let startAgent = true;
   const positional: string[] = [];
 
   for (let i = 0; i < args.length; i += 1) {
@@ -199,6 +241,22 @@ function parseConnectArgs(args: string[]): ConnectArgs {
     }
     if (arg === '--window') {
       mode = 'window';
+      continue;
+    }
+    if (arg === '--attach') {
+      localAttach = true;
+      continue;
+    }
+    if (arg === '--no-attach') {
+      localAttach = false;
+      continue;
+    }
+    if (arg === '--background-agent') {
+      startAgent = true;
+      continue;
+    }
+    if (arg === '--no-background-agent' || arg === '--no-agent') {
+      startAgent = false;
       continue;
     }
     if (arg === '--project' || arg === '-p') {
@@ -227,8 +285,7 @@ function parseConnectArgs(args: string[]): ConnectArgs {
   if (!tabName && positional.length > 0) tabName = positional.shift() || '';
   projectName = projectName.trim();
   tabName = tabName.trim();
-  if (!projectName) throw new Error('connect requires --project <name>');
-  return { projectName, tabName: tabName || undefined, mode };
+  return { projectName, tabName: tabName || undefined, mode, localAttach, startAgent };
 }
 
 function requiredFlagValue(flag: string, value: string | undefined) {
@@ -237,31 +294,63 @@ function requiredFlagValue(flag: string, value: string | undefined) {
 }
 
 function printConnectHelp() {
-  console.log(`termag-agent connect
+  console.log(`termag connect
 
 Usage:
-  termag-agent connect --project <project>            # current tmux window only
-  termag-agent connect --project <project> --tab <label>
-  termag-agent connect --project <project> --session  # every window in this tmux session
-  termag-agent connect <project> [tab-label]          # positional shorthand
+  termag connect --project <project>            # current tmux window only
+  termag connect --project <project> --tab <label>
+  termag connect --project <project> --session  # every window in this tmux session
+  termag connect                                # infer project from git/cwd
+  termag connect <project> [tab-label]          # positional shorthand
 
   --project, -p   Project name to publish to (created on first connect).
+                  Defaults to the current git repo or directory name.
   --tab, -t       Override the tab label shown in the web UI. Free-form
                   text — NOT a tmux window index. Defaults to the current
-                  tmux window's name.
+                  tmux window's name, or "shell" outside tmux.
   --session       Publish every window in the current tmux session as
                   separate tabs.
+  --no-attach     Outside tmux, create/publish the tmux session but do not
+                  attach this terminal to it.
+  --no-agent      Do NOT start a background termag websocket process after
+                  publishing. By default a single background agent is
+                  spawned (one per device); subsequent connects skip the
+                  spawn if a live one is found via ~/.termag/agent.pid.
 
 Publishes the current tmux window, or every window in the current tmux
-session with --session, to the termag web UI. Run this from inside tmux.
+session with --session, to the termag web UI. When run outside tmux, this
+creates or reuses a detached tmux session named after the project and a window
+named after --tab, then attaches this terminal when running interactively.
 `);
 }
 
 const TMUX_FIELD_SEPARATOR = '\x1f';
 
+async function resolveConnectArgs(args: ConnectArgs): Promise<ConnectArgs> {
+  const projectName = args.projectName.trim() || await inferProjectName();
+  return { ...args, projectName };
+}
+
+async function inferProjectName() {
+  const cwd = process.cwd();
+  try {
+    const { stdout } = await execFileAsync('git', ['-C', cwd, 'rev-parse', '--show-toplevel']);
+    const rootName = path.basename(stdout.trim());
+    if (rootName) return rootName;
+  } catch {
+    // Not a git worktree; fall back to the directory name below.
+  }
+  return path.basename(cwd) || 'termag';
+}
+
+async function detectOrCreateTmuxContext(args: ConnectArgs): Promise<TmuxContext> {
+  if (process.env.TMUX) return detectTmuxContext();
+  return createTmuxContextFromShell(args);
+}
+
 async function detectTmuxContext(): Promise<TmuxContext> {
   if (!process.env.TMUX) {
-    throw new Error('termag-agent connect must run inside tmux. Start or attach tmux first, then rerun connect.');
+    throw new Error('termag connect must run inside tmux. Start or attach tmux first, then rerun connect.');
   }
 
   const currentFormat = [
@@ -293,6 +382,95 @@ async function detectTmuxContext(): Promise<TmuxContext> {
   };
 }
 
+async function createTmuxContextFromShell(args: ConnectArgs): Promise<TmuxContext> {
+  const cwd = process.cwd();
+  const sessionName = safeTmuxName(args.projectName, 'termag');
+  const windowName = safeTmuxName(args.tabName || defaultShellTabName(), 'shell');
+  const shellCommand = process.env.SHELL || '/bin/zsh';
+  let createdSession = false;
+  let createdWindow = false;
+
+  // Concurrent `termag connect` invocations can both reach the existence
+  // check before either has created the session/window. Catch failure and
+  // re-check rather than crashing the second caller.
+  if (!(await tmuxSessionExists(sessionName))) {
+    try {
+      await execFileAsync('tmux', [
+        'new-session', '-d', '-s', sessionName, '-n', windowName, '-c', cwd,
+        '-x', '120', '-y', '32', shellCommand
+      ]);
+      await configureTmuxSession(sessionName);
+      createdSession = true;
+      createdWindow = true;
+    } catch (err) {
+      if (!(await tmuxSessionExists(sessionName))) throw err;
+    }
+  }
+  if (!createdWindow && !(await tmuxWindowExists(sessionName, windowName))) {
+    try {
+      await execFileAsync('tmux', ['new-window', '-d', '-t', sessionName, '-n', windowName, '-c', cwd, shellCommand]);
+      await configureTmuxSession(sessionName);
+      createdWindow = true;
+    } catch (err) {
+      if (!(await tmuxWindowExists(sessionName, windowName))) throw err;
+    }
+  }
+
+  const currentWindow = await tmuxWindowInfo(`${sessionName}:${windowName}`, cwd);
+  const windows = await listCurrentTmuxWindows(sessionName, cwd);
+  return {
+    sessionName,
+    sessionPath: cwd,
+    currentWindow,
+    windows: windows.length > 0 ? windows : [currentWindow],
+    createdSession,
+    createdWindow,
+    createdFromShell: true
+  };
+}
+
+async function configureTmuxSession(sessionName: string) {
+  await execFileAsync('tmux', ['set-option', '-t', sessionName, '-w', 'window-size', 'largest']).catch(() => {});
+  await execFileAsync('tmux', ['set-option', '-t', sessionName, 'history-limit', '10000']).catch(() => {});
+}
+
+async function tmuxSessionExists(sessionName: string): Promise<boolean> {
+  try {
+    await execFileAsync('tmux', ['has-session', '-t', sessionName]);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function tmuxWindowExists(sessionName: string, windowName: string): Promise<boolean> {
+  try {
+    const { stdout } = await execFileAsync('tmux', ['list-windows', '-t', sessionName, '-F', '#W']);
+    return stdout.split('\n').some((line) => line.trim() === windowName);
+  } catch {
+    return false;
+  }
+}
+
+async function tmuxWindowInfo(target: string, fallbackPath: string): Promise<TmuxWindowInfo> {
+  const format = [
+    '#{window_index}',
+    '#{window_id}',
+    '#{window_name}',
+    '#{pane_current_path}'
+  ].join(TMUX_FIELD_SEPARATOR);
+  const { stdout } = await execFileAsync('tmux', ['display-message', '-p', '-t', target, format]);
+  const [rawIndex = '0', windowId = '', windowName = '', panePath = ''] = stdout.trimEnd().split(TMUX_FIELD_SEPARATOR);
+  if (!windowId) throw new Error(`Could not detect tmux window ${target}.`);
+  return {
+    index: Number(rawIndex) || 0,
+    id: windowId,
+    name: windowName || `Window ${rawIndex}`,
+    target: windowId,
+    path: panePath || fallbackPath
+  };
+}
+
 async function listCurrentTmuxWindows(sessionName: string, sessionPath: string): Promise<TmuxWindowInfo[]> {
   const windowFormat = [
     '#{window_index}',
@@ -301,7 +479,7 @@ async function listCurrentTmuxWindows(sessionName: string, sessionPath: string):
     '#{pane_active}',
     '#{pane_current_path}'
   ].join(TMUX_FIELD_SEPARATOR);
-  const { stdout } = await execFileAsync('tmux', ['list-panes', '-t', sessionName, '-F', windowFormat]);
+  const { stdout } = await execFileAsync('tmux', ['list-panes', '-s', '-t', sessionName, '-F', windowFormat]);
   const windows: TmuxWindowInfo[] = [];
   const seen = new Set<string>();
   for (const line of stdout.split('\n')) {
@@ -318,6 +496,138 @@ async function listCurrentTmuxWindows(sessionName: string, sessionPath: string):
     });
   }
   return windows.sort((a, b) => a.index - b.index);
+}
+
+function safeTmuxName(raw: string, fallback: string) {
+  return raw
+    .trim()
+    .replace(/[:\r\n\t]/g, ' ')
+    .replace(/[^a-zA-Z0-9_. -]/g, '-')
+    .replace(/\s+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 80)
+    || fallback;
+}
+
+function shellArgForLog(value: string) {
+  if (/^[a-zA-Z0-9_./:@-]+$/.test(value)) return value;
+  return `'${value.replace(/'/g, "'\\''")}'`;
+}
+
+function defaultShellTabName() {
+  return process.env.TERMAG_DEFAULT_TAB?.trim()
+    || process.env.TERMAG_TAB?.trim()
+    || 'shell';
+}
+
+function publishPathForCwd(cwd: string): string | undefined {
+  const absoluteCwd = path.resolve(expandRoot(cwd));
+  const candidates = Object.entries(parseRoots(process.env.TERMAG_AGENT_ROOTS))
+    .map(([rootKey, rootPath]) => ({ rootKey, rootPath: path.resolve(expandRoot(rootPath)) }))
+    .sort((a, b) => b.rootPath.length - a.rootPath.length);
+
+  for (const candidate of candidates) {
+    if (absoluteCwd === candidate.rootPath) return undefined;
+    if (absoluteCwd.startsWith(`${candidate.rootPath}${path.sep}`)) {
+      return path.relative(candidate.rootPath, absoluteCwd);
+    }
+  }
+
+  return cwd;
+}
+
+function startBackgroundAgent() {
+  // Guard against multiple `termag connect` invocations spawning duplicate
+  // background agents that would thrash kicking each other via the broker's
+  // "replaced" close. Skip if a live PID is already on file.
+  const existingPid = readLivePid();
+  if (existingPid !== null) {
+    console.log(`[${tag}] background agent already running (pid ${existingPid}); skipping spawn.`);
+    return;
+  }
+  const command = currentAgentCommand();
+  try {
+    const child = spawn(command.cmd, command.args, {
+      detached: true,
+      stdio: 'ignore',
+      env: process.env
+    });
+    child.unref();
+    if (child.pid) writePidFile(child.pid);
+    console.log(`[${tag}] background agent started (pid ${child.pid}).`);
+  } catch (err) {
+    console.warn(`[${tag}] could not start background agent: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
+const PID_FILE = path.join(os.homedir(), '.termag', 'agent.pid');
+
+function readLivePid(): number | null {
+  try {
+    const raw = readFileSync(PID_FILE, 'utf8').trim();
+    const pid = Number.parseInt(raw, 10);
+    if (!Number.isInteger(pid) || pid <= 0) return null;
+    process.kill(pid, 0); // signal 0 = liveness probe; throws if process is gone
+    return pid;
+  } catch {
+    return null;
+  }
+}
+
+function writePidFile(pid: number) {
+  try {
+    const fs = require('node:fs') as typeof import('node:fs');
+    fs.mkdirSync(path.dirname(PID_FILE), { recursive: true, mode: 0o700 });
+    fs.writeFileSync(PID_FILE, `${pid}\n`, { mode: 0o600 });
+  } catch {
+    // Non-fatal — agent will run without a PID file; only loses dedup.
+  }
+}
+
+function removePidFile() {
+  try {
+    const fs = require('node:fs') as typeof import('node:fs');
+    fs.unlinkSync(PID_FILE);
+  } catch {
+    // Already gone or never created.
+  }
+}
+
+function currentAgentCommand() {
+  if (__filename.endsWith('.ts')) {
+    let tsxLoader = 'tsx';
+    try {
+      tsxLoader = require.resolve('tsx');
+    } catch {
+      // Fall back to package resolution from the child process cwd.
+    }
+    return { cmd: process.execPath, args: ['--import', tsxLoader, __filename] };
+  }
+  return { cmd: process.execPath, args: [__filename] };
+}
+
+function shouldAttachLocal(args: ConnectArgs, tmux: TmuxContext) {
+  if (!tmux.createdFromShell || process.env.TMUX) return false;
+  if (args.localAttach === false) return false;
+  return args.localAttach === true || (Boolean(process.stdin.isTTY) && Boolean(process.stdout.isTTY));
+}
+
+async function attachLocalTmux(tmux: TmuxContext) {
+  if (!process.stdin.isTTY || !process.stdout.isTTY) {
+    console.warn(`[${tag}] cannot attach local terminal because stdin/stdout are not TTYs.`);
+    return 0;
+  }
+
+  await execFileAsync('tmux', ['select-window', '-t', tmux.currentWindow.target]).catch(() => {});
+  return new Promise<number>((resolve) => {
+    const child = spawn('tmux', ['attach-session', '-t', tmux.sessionName], { stdio: 'inherit' });
+    child.on('exit', (code) => resolve(code ?? 0));
+    child.on('error', (err) => {
+      console.error(`[${tag}] could not attach tmux session: ${err.message}`);
+      resolve(1);
+    });
+  });
 }
 
 function publishUrlFromAgentUrl(agentUrl: URL) {
@@ -394,6 +704,10 @@ async function run() {
 
   await preflightTmux();
 
+  // Record this process as the live agent so future `termag connect`
+  // invocations skip spawning a duplicate. Cleanup happens on shutdown +
+  // on "replaced" close.
+  writePidFile(process.pid);
   connect(validatedUrl, token);
 }
 
@@ -497,8 +811,8 @@ function connect(validatedUrl: URL, token: string) {
     }, PING_INTERVAL_MS);
 
     // Health: periodic structured snapshot the broker surfaces in Devices.
-    sendHealth(ws);
-    healthTimer = setInterval(() => sendHealth(ws), HEALTH_INTERVAL_MS);
+    void sendHealth(ws);
+    healthTimer = setInterval(() => { void sendHealth(ws); }, HEALTH_INTERVAL_MS);
   });
 
   ws.on('pong', () => {
@@ -575,28 +889,63 @@ function connect(validatedUrl: URL, token: string) {
     }
   });
 
-  ws.on('close', () => {
+  ws.on('close', (code: number, reason: Buffer | string) => {
     clearTimers();
-    const delay = nextReconnectDelay();
-    reconnectAttempts += 1;
-    console.log(`[${tag}] disconnected; reconnecting in ${delay}ms`);
-    // Tear down our local stream readers — the tmux sessions themselves stay
-    // alive on disk so the next agent connection can re-attach to them.
+    // Tear down local stream readers — tmux sessions themselves stay alive
+    // so the next agent connection can re-attach.
     for (const stream of [...streams.values()]) {
       stream.close();
     }
     streams.clear();
+    // The broker closes us with code 1000 + reason "replaced" when another
+    // agent process for the same user connects. Reconnecting would just
+    // start a thrash loop with that newer agent. Exit cleanly instead.
+    const reasonText = Buffer.isBuffer(reason) ? reason.toString() : String(reason || '');
+    if (code === 1000 && reasonText === 'replaced') {
+      console.log(`[${tag}] connection replaced by another agent process; exiting.`);
+      removePidFile();
+      process.exit(0);
+    }
+    const delay = nextReconnectDelay();
+    reconnectAttempts += 1;
+    console.log(`[${tag}] disconnected; reconnecting in ${delay}ms`);
     setTimeout(() => connect(validatedUrl, token), delay);
   });
 
   ws.on('error', (err) => {
-    console.error(`[${tag}] ${err.message}`);
+    console.error(`[${tag}] ${formatConnectionError(err, validatedUrl)}`);
   });
 }
 
-function sendHealth(ws: WebSocket) {
+const TLS_CERT_ERROR_CODES = new Set([
+  'UNABLE_TO_GET_ISSUER_CERT',
+  'UNABLE_TO_GET_ISSUER_CERT_LOCALLY',
+  'SELF_SIGNED_CERT_IN_CHAIN',
+  'DEPTH_ZERO_SELF_SIGNED_CERT',
+  'CERT_HAS_EXPIRED',
+  'ERR_TLS_CERT_ALTNAME_INVALID'
+]);
+
+function formatConnectionError(err: Error, url: URL) {
+  const rawCode = (err as NodeError).code;
+  const code = typeof rawCode === 'string' ? rawCode : '';
+  if (!TLS_CERT_ERROR_CODES.has(code) && !/certificate|self[- ]signed|issuer cert/i.test(err.message)) {
+    return err.message;
+  }
+
+  const target = `${url.protocol}//${url.hostname}${url.port ? `:${url.port}` : ''}`;
+  if (url.protocol === 'wss:' && isLocalHost(url.hostname) && !insecureLocalTls) {
+    return `${err.message}. ${target} is using a local TLS certificate; for local Docker/Caddy previews, set TERMAG_TLS_INSECURE_SKIP_VERIFY=true and restart the agent.`;
+  }
+
+  return `${err.message}. Node does not trust the TLS certificate for ${target}; use a publicly trusted certificate with the full chain, or set NODE_EXTRA_CA_CERTS to your private CA PEM file.`;
+}
+
+async function sendHealth(ws: WebSocket) {
   if (ws.readyState !== WebSocket.OPEN) return;
   const memMb = Math.round(process.memoryUsage().rss / (1024 * 1024));
+  const tmuxSessions = isFake ? fakeTmuxSessions() : await listTmuxSessions();
+  if (ws.readyState !== WebSocket.OPEN) return;
   ws.send(JSON.stringify({
     type: 'health',
     streamCount: streams.size,
@@ -604,7 +953,8 @@ function sendHealth(ws: WebSocket) {
     memMb,
     version: pkgVersion,
     fake: isFake,
-    roots
+    roots,
+    tmux: { sessions: tmuxSessions }
   }));
 }
 
@@ -798,6 +1148,7 @@ function respond(ws: WebSocket, requestId: string | undefined, data: unknown, er
 function shutdown() {
   for (const stream of [...streams.values()]) stream.close();
   streams.clear();
+  removePidFile();
   process.exit(0);
 }
 process.on('SIGINT', shutdown);

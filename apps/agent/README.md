@@ -1,8 +1,8 @@
-# termag-agent
+# termag CLI
 
-Outbound laptop agent for [termag-next](https://github.com/yeutterg/termag-next). Bridges tmux sessions and windows on your machine to the termag broker over a single WebSocket. No native deps, no inbound port, no public tmux surface.
+Outbound laptop agent for [termag-next](https://github.com/yeutterg/termag-next). Bridges tmux sessions and windows on your machine to the termag broker over a single WebSocket. No inbound port, no public tmux surface.
 
-The agent is intentionally tiny: it owns Termag-created tmux sessions on the local box, streams pane output through `tmux pipe-pane`, and forwards your keystrokes through `tmux send-keys`. It reconnects on its own, supervises a heartbeat, reports existing tmux sessions for attach workflows, and never creates new project windows outside the named roots you configure.
+The agent is intentionally tiny: it owns Termag-created tmux sessions on the local box, runs a real tmux client in a PTY so browser rendering matches a local terminal, and forwards terminal I/O over WebSocket. It reconnects on its own, supervises a heartbeat, reports existing tmux sessions for attach workflows, and never creates new project windows outside the named roots you configure.
 
 In the web app, a project maps to a tmux session and each terminal tab maps to a tmux window. When you attach an existing tmux session, the broker treats the imported windows as external so closing Termag detaches from them instead of killing your existing tmux work.
 
@@ -20,7 +20,7 @@ brew services start termag-agent
 ```bash
 sudo apt install tmux            # or dnf/pacman/...
 npm install -g termag-agent
-termag-agent                     # foreground; wrap in systemd for production
+termag                           # foreground; wrap in systemd for production
 ```
 
 ### Windows
@@ -58,15 +58,17 @@ export TERMAG_TLS_INSECURE_SKIP_VERIFY=true
 ## Subcommands
 
 ```bash
-termag-agent              # connect to the broker (default)
-termag-agent connect --project Restful-ESP32 --tab codex
-termag-agent connect --project Restful-ESP32 --session
-termag-agent update       # auto-detects brew vs npm and upgrades in place
-termag-agent --version
-termag-agent --help
+termag              # connect to the broker (default)
+termag connect      # infer project from git/cwd and publish this shell
+termag connect --project Restful-ESP32 --tab codex
+termag -p Restful-ESP32 -t codex
+termag connect --project Restful-ESP32 --session
+termag update       # auto-detects brew vs npm and upgrades in place
+termag --version
+termag --help
 ```
 
-`connect` is a one-shot publish command. Run it from inside tmux to make the current window appear as a Termag terminal tab, or add `--session` to publish every window in the current tmux session. It uses the same `TERMAG_URL` and `TERMAG_AGENT_TOKEN` as the foreground agent.
+`connect` publishes the current workspace. With no flags it infers the project from the current git repo or directory name. Run it from inside tmux to make the current window appear as a Termag terminal tab, or add `--session` to publish every window in the current tmux session. If you run it outside tmux, the agent creates or reuses a detached tmux session named after the project and a window named after `--tab`, starts the background websocket agent, and attaches this terminal to the tmux session. `termag -p <project> -t <tab>` is shorthand for the same connect flow. Use `--no-attach` to publish without attaching locally, or `--no-agent` to skip starting the background websocket agent.
 
 ## Requirements
 
