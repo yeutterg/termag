@@ -1,6 +1,6 @@
 {
   "name": "termag-agent",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "description": "Outbound termag laptop agent. Bridges tmux clients to the termag broker over WebSocket.",
   "author": "Greg Yeutter <yeutterg@gmail.com>",
   "license": "MIT",
