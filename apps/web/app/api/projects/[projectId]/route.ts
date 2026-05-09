@@ -28,13 +28,16 @@ export const PATCH = withAuth(async (user, request: Request, { params }: Params)
   if (body.relativePath && !relativePath) {
     return NextResponse.json({ error: 'Project path is required' }, { status: 400 });
   }
+  const data: z.infer<typeof updateSchema> = {};
+  if (body.name !== undefined) data.name = body.name;
+  if (body.rootKey !== undefined) data.rootKey = body.rootKey;
+  if (relativePath !== undefined) data.relativePath = relativePath;
+  if (body.agentSpawnCommand !== undefined) data.agentSpawnCommand = body.agentSpawnCommand;
+
   try {
     const project = await prisma.project.update({
       where: { id: projectId },
-      data: {
-        ...body,
-        relativePath
-      },
+      data,
       include: { tabs: { orderBy: { ordinal: 'asc' }, include: { session: true } }, sessions: true }
     });
     return NextResponse.json(project);

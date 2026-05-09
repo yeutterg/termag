@@ -1,6 +1,7 @@
 type Broker = {
   listTmuxSessions?: (userId: string) => Promise<TmuxDeviceSession[]>;
   refreshUser?: (userId: string) => void;
+  requestHealthRefresh?: (userId: string, deviceName: string) => void;
   killTmuxSession?: (userId: string, deviceName: string, tmuxSessionName: string, timeoutMs?: number) => Promise<boolean>;
   killTmuxWindow?: (userId: string, deviceName: string, tmuxName: string, timeoutMs?: number) => Promise<boolean>;
   renameTmuxWindow?: (userId: string, deviceName: string, tmuxName: string, name: string, timeoutMs?: number) => Promise<{ tmuxName?: string; tmuxWindowName?: string } | null>;
@@ -34,6 +35,13 @@ export async function listTmuxSessions(userId: string): Promise<TmuxDeviceSessio
 
 export function refreshUserProjects(userId: string) {
   broker()?.refreshUser?.(userId);
+}
+
+// Fire-and-forget — asks a specific device's agent to send a fresh health
+// ping immediately. Used right after a publish so the UI sees the new tmux
+// state without waiting for the next scheduled health tick.
+export function requestAgentHealthRefresh(userId: string, deviceName: string) {
+  broker()?.requestHealthRefresh?.(userId, deviceName);
 }
 
 export async function killTmuxWindows(userId: string, targets: Array<{ rootKey: string; tmuxName: string | null | undefined }>) {

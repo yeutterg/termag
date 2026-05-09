@@ -26,9 +26,9 @@ flowchart LR
 
   subgraph Machines["Remote machines"]
     direction TB
-    AgentA["termag-agent<br/>MacBook"] --> TmuxA["tmux<br/>sessions = projects<br/>windows = terminal tabs"]
-    AgentB["termag-agent<br/>homelab"] --> TmuxB["tmux<br/>sessions = projects<br/>windows = terminal tabs"]
-    AgentC["termag-agent<br/>VPS"] --> TmuxC["tmux<br/>sessions = projects<br/>windows = terminal tabs"]
+    AgentA["termag<br/>MacBook"] --> TmuxA["tmux<br/>sessions = projects<br/>windows = terminal tabs"]
+    AgentB["termag<br/>homelab"] --> TmuxB["tmux<br/>sessions = projects<br/>windows = terminal tabs"]
+    AgentC["termag<br/>VPS"] --> TmuxC["tmux<br/>sessions = projects<br/>windows = terminal tabs"]
   end
 
   Browser <-->|HTTPS + WebSocket| Next
@@ -42,12 +42,12 @@ The agent always dials out to the web app. You do not need to expose tmux, SSH, 
 ## Components
 
 - `apps/web`: the Next.js app. It includes the browser UI, route handlers, WebSocket broker, Prisma, and SQLite database.
-- `apps/agent`: the small daemon that runs beside tmux on each remote device and bridges terminal I/O back to the browser.
+- `apps/agent`: the small daemon that runs beside tmux on each remote device and bridges a PTY-backed tmux client back to the browser.
 - `infra`: Docker Compose and Caddy files for running the web app on a small VPS.
 
 The user-facing shape is:
 
-- Device: a machine running `termag-agent`. Create one device token per machine.
+- Device: a machine running `termag`. Create one device token per machine.
 - Project: a tmux session on that device. A new project creates a Termag-managed tmux session; attaching an existing tmux session imports it as a project.
 - Terminal tab: one tmux window inside that project/session, running Claude Code, Codex, a YOLO variant, another CLI command, or an existing tmux window.
 - Ctrl shell: a regular tmux window for git, tests, and quick commands in Termag-managed projects.
@@ -58,7 +58,7 @@ There is no shared termag-next service. Each user runs their own broker, and age
 
 ```mermaid
 graph LR
-    Agent[termag-agent<br/>your laptop] -- wss + token --> Broker[your broker<br/>apps/web]
+    Agent[termag<br/>your laptop] -- wss + token --> Broker[your broker<br/>apps/web]
     Browser[browser<br/>your login] -- wss --> Broker
     Broker -. token check .-> DB[(SQLite<br/>AgentToken)]
 ```
@@ -204,7 +204,7 @@ export TERMAG_AGENT_ROOTS='{"MacBook Pro M1":"~/Code"}'
 Run it:
 
 ```bash
-termag-agent
+termag
 ```
 
 When testing an unreleased checkout of termag-next, run the agent from this repo instead of a globally installed Homebrew/npm copy:
@@ -261,16 +261,20 @@ To bind Termag to work you already have running, click `+` → **Attach tmux ses
 You can also publish from the device itself. From inside an existing tmux window:
 
 ```bash
-termag-agent connect --project Restful-ESP32 --tab codex
+termag connect
+# explicit project/tab override:
+termag connect --project Restful-ESP32 --tab codex
+# equivalent shorthand:
+termag -p Restful-ESP32 -t codex
 ```
 
-That creates or updates the project in the browser and adds the current tmux window as a terminal tab. To publish every window in the current tmux session:
+With no flags, `connect` infers the project from the current git repo or directory name. That creates or updates the project in the browser and adds the current tmux window as a terminal tab. To publish every window in the current tmux session:
 
 ```bash
-termag-agent connect --project Restful-ESP32 --session
+termag connect --project Restful-ESP32 --session
 ```
 
-The connect command uses the same `TERMAG_URL` and `TERMAG_AGENT_TOKEN` exports as the long-running agent. It must run inside tmux; a normal Terminal or iTerm shell cannot be adopted after it has already started outside tmux.
+The connect command uses the same `TERMAG_URL` and `TERMAG_AGENT_TOKEN` exports as the long-running agent. If it runs outside tmux, it creates or reuses a detached tmux session named after the project and a window named after `--tab`, starts the background websocket agent, then attaches your local terminal to the tmux session. A normal Terminal or iTerm shell cannot be moved into tmux after it has already started, so this fallback starts a new shell at the current directory. Use `--no-attach` to publish without attaching locally, or `--no-agent` if you already manage the long-running agent separately.
 
 ## Local Development
 

@@ -22,7 +22,18 @@ const insecureLocalTls = process.env.TERMAG_TLS_INSECURE_SKIP_VERIFY === 'true';
 
 const PING_INTERVAL_MS = 30_000;
 const PONG_TIMEOUT_MS = 60_000;
-const HEALTH_INTERVAL_MS = 10_000;
+// Health interval is configurable so cellular-tethered agents can dial it
+// down. Default 10s; clamped to [1s, 5min] to keep both runaway pings and
+// effectively-disabled health off the table.
+const HEALTH_INTERVAL_MS = (() => {
+  const raw = Number.parseInt(process.env.TERMAG_HEALTH_INTERVAL_MS || '', 10);
+  if (!Number.isFinite(raw) || raw <= 0) return 10_000;
+  return Math.min(300_000, Math.max(1_000, raw));
+})();
+
+// Wire-protocol constant shared with the broker. Keep in sync with
+// apps/web/server/broker.js → WS_REPLACED_REASON.
+const WS_REPLACED_REASON = 'replaced';
 
 const streams = new Map<string, Stream>();
 
@@ -569,11 +580,36 @@ function readLivePid(): number | null {
     const pid = Number.parseInt(raw, 10);
     if (!Number.isInteger(pid) || pid <= 0) return null;
     process.kill(pid, 0); // signal 0 = liveness probe; throws if process is gone
+    // PID-recycle guard: kill(pid, 0) succeeds even if a different program now
+    // owns the recycled pid. Verify the process is actually our agent before
+    // skipping a spawn.
+    if (!pidIsTermagAgent(pid)) return null;
     return pid;
   } catch {
     return null;
   }
 }
+
+function pidIsTermagAgent(pid: number): boolean {
+  try {
+    if (process.platform === 'linux') {
+      const cmdline = readFileSync(`/proc/${pid}/cmdline`, 'utf8').replace(/\0/g, ' ');
+      return TERMAG_PROCESS_PATTERN.test(cmdline);
+    }
+    // macOS / BSD have no /proc; ask ps for the command of the pid.
+    const fs = require('node:child_process') as typeof import('node:child_process');
+    const stdout = fs.execFileSync('ps', ['-p', String(pid), '-o', 'command='], {
+      encoding: 'utf8',
+      timeout: 2000
+    });
+    return TERMAG_PROCESS_PATTERN.test(stdout);
+  } catch {
+    // ps failed (pid gone, permission denied, etc.) — assume not ours.
+    return false;
+  }
+}
+
+const TERMAG_PROCESS_PATTERN = /termag(-agent)?(\b|[\s\/]|\.js)/i;
 
 function writePidFile(pid: number) {
   try {
@@ -889,6 +925,13 @@ function connect(validatedUrl: URL, token: string) {
         }
         case 'hello':
           break;
+        case 'health-request':
+          // Broker pokes us when something just changed (e.g., a publish API
+          // call) and the UI needs current tmux state without waiting for
+          // the next scheduled tick.
+          await sendHealth(ws);
+          if (requestId) respond(ws, requestId, { ok: true });
+          break;
         default:
           if (requestId) respond(ws, requestId, null, `Unknown command: ${type}`);
       }
@@ -909,7 +952,7 @@ function connect(validatedUrl: URL, token: string) {
     // agent process for the same user connects. Reconnecting would just
     // start a thrash loop with that newer agent. Exit cleanly instead.
     const reasonText = Buffer.isBuffer(reason) ? reason.toString() : String(reason || '');
-    if (code === 1000 && reasonText === 'replaced') {
+    if (code === 1000 && reasonText === WS_REPLACED_REASON) {
       console.log(`[${tag}] connection replaced by another agent process; exiting.`);
       removePidFile();
       process.exit(0);

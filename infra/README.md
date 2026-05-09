@@ -28,7 +28,7 @@ docker compose --env-file .env -f infra/docker-compose.yml up -d --build
 TERMAG_URL=wss://termag.example.com/api/ws/agent \
 TERMAG_AGENT_TOKEN=tmag_... \
 TERMAG_AGENT_ROOTS='{"Mac Mini":"~/Code"}' \
-npx @termag/agent
+termag
 ```
 
 The laptop agent dials out to the VPS. No inbound laptop port or tunnel is required.

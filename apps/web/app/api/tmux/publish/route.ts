@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server';
 import { z } from 'zod';
 import { prisma } from '@/lib/prisma';
 import { publishTmuxProject } from '@/lib/projects';
-import { refreshUserProjects } from '@/lib/broker';
+import { refreshUserProjects, requestAgentHealthRefresh } from '@/lib/broker';
 import { hashToken } from '@/lib/tokens';
 
 const windowSchema = z.object({
@@ -59,6 +59,11 @@ export async function POST(request: Request) {
       windows: parsed.data.windows
     });
     refreshUserProjects(token.userId);
+    // Tell the device's persistent agent to send a fresh health ping right
+    // away — without this, the UI's missing-target detection has up to
+    // HEALTH_INTERVAL_MS of stale tmuxSessions data after each publish and
+    // can flag freshly-published tabs as missing.
+    requestAgentHealthRefresh(token.userId, token.name || 'Local device');
     return NextResponse.json(project, { status: 201 });
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Could not publish tmux session';

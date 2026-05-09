@@ -64,9 +64,13 @@ function safeTimingEqual(left: string, right: string): boolean {
   return leftBuffer.length === rightBuffer.length && crypto.timingSafeEqual(leftBuffer, rightBuffer);
 }
 
+function sha256Hex(value: string): string {
+  return crypto.createHash('sha256').update(value).digest('hex');
+}
+
 export function checkPassword(provided: string): boolean {
   const expected = process.env.TERMAG_PASSWORD || '';
-  return expected.length > 0 && safeTimingEqual(expected, provided);
+  return expected.length > 0 && safeTimingEqual(sha256Hex(expected), sha256Hex(provided));
 }
 
 export async function passwordCookieValid(): Promise<boolean> {

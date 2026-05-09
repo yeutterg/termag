@@ -3,6 +3,10 @@ const { WebSocket } = require('ws');
 const { getToken } = require('next-auth/jwt');
 const { appendScrollback } = require('./scrollback');
 
+// Wire-protocol constant shared with the agent. Keep in sync with
+// apps/agent/src/index.ts → WS_REPLACED_REASON.
+const WS_REPLACED_REASON = 'replaced';
+
 function sendJson(ws, msg) {
   if (ws.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify(msg));
@@ -154,6 +158,24 @@ function createBroker({ prisma, wss }) {
     };
   }
 
+  function normalizeTmuxSessions(input) {
+    const sessions = Array.isArray(input) ? input : [];
+    return sessions.map((session) => ({
+      name: typeof session?.name === 'string' ? session.name : '',
+      path: typeof session?.path === 'string' ? session.path : undefined,
+      windowCount: Number.isFinite(Number(session?.windowCount)) ? Number(session.windowCount) : undefined,
+      windows: Array.isArray(session?.windows)
+        ? session.windows.map((window) => ({
+          index: Number.isFinite(Number(window?.index)) ? Number(window.index) : 0,
+          id: typeof window?.id === 'string' ? window.id : '',
+          name: typeof window?.name === 'string' ? window.name : '',
+          target: typeof window?.target === 'string' ? window.target : '',
+          path: typeof window?.path === 'string' ? window.path : undefined
+        })).filter((window) => window.target || window.id || window.name)
+        : []
+    })).filter((session) => session.name);
+  }
+
   function connectedAgents(userId) {
     return [...agentsForUser(userId).values()].filter((agent) => agent.ws.readyState === WebSocket.OPEN);
   }
@@ -220,8 +242,134 @@ function createBroker({ prisma, wss }) {
     });
     const statuses = sessions.map((session) => session.status);
     const status = ['error', 'waiting', 'working', 'idle'].find((candidate) => statuses.includes(candidate)) || 'sleeping';
-    await prisma.project.update({ where: { id: projectId }, data: { status } }).catch(() => {});
+    const project = await prisma.project.findUnique({
+      where: { id: projectId },
+      select: { status: true }
+    }).catch(() => null);
+    if (project?.status !== status) {
+      await prisma.project.update({ where: { id: projectId }, data: { status } }).catch(() => {});
+    }
     return status;
+  }
+
+  function addTmuxTarget(targets, value) {
+    if (typeof value !== 'string') return;
+    const trimmed = value.trim();
+    if (trimmed) targets.add(trimmed);
+  }
+
+  function scopedTmuxTarget(sessionName, target) {
+    return `${sessionName}\u0000${target}`;
+  }
+
+  function buildLiveTmuxState(tmuxSessions) {
+    const state = {
+      sessions: new Set(),
+      windows: new Set(),
+      globalWindows: new Set()
+    };
+    const sessions = Array.isArray(tmuxSessions) ? tmuxSessions : [];
+    for (const session of sessions) {
+      const sessionName = typeof session?.name === 'string' ? session.name.trim() : '';
+      if (!sessionName) continue;
+      state.sessions.add(sessionName);
+      const windows = Array.isArray(session.windows) ? session.windows : [];
+      for (const window of windows) {
+        const targets = new Set();
+        addTmuxTarget(targets, window?.target);
+        addTmuxTarget(targets, window?.id);
+        addTmuxTarget(targets, window?.name);
+        for (const target of targets) {
+          state.globalWindows.add(target);
+          state.windows.add(scopedTmuxTarget(sessionName, target));
+        }
+      }
+    }
+    return state;
+  }
+
+  function sessionTargetCandidates(session, projectSessionName) {
+    const candidates = new Set();
+    addTmuxTarget(candidates, session.tmuxName);
+    addTmuxTarget(candidates, session.tmuxWindowName);
+    if (projectSessionName && typeof session.tmuxName === 'string') {
+      const prefix = `${projectSessionName}:`;
+      if (session.tmuxName.startsWith(prefix)) addTmuxTarget(candidates, session.tmuxName.slice(prefix.length));
+    }
+    return candidates;
+  }
+
+  function tmuxSessionIsLive(session, tmuxState) {
+    const projectSessionName = typeof session.project?.tmuxSessionName === 'string'
+      ? session.project.tmuxSessionName.trim()
+      : '';
+    const tmuxName = typeof session.tmuxName === 'string' ? session.tmuxName.trim() : '';
+    if (projectSessionName) {
+      if (tmuxName === projectSessionName && tmuxState.sessions.has(projectSessionName)) return true;
+      for (const candidate of sessionTargetCandidates(session, projectSessionName)) {
+        if (tmuxState.windows.has(scopedTmuxTarget(projectSessionName, candidate))) return true;
+      }
+      return false;
+    }
+    if (tmuxState.sessions.has(tmuxName)) return true;
+    for (const candidate of sessionTargetCandidates(session, '')) {
+      if (tmuxState.globalWindows.has(candidate)) return true;
+    }
+    return false;
+  }
+
+  function statusForLiveTmuxSession(currentStatus) {
+    return currentStatus && currentStatus !== 'sleeping' ? currentStatus : 'idle';
+  }
+
+  async function reconcileDeviceTmuxStatus(userId, deviceName, tmuxSessions) {
+    const tmuxState = buildLiveTmuxState(tmuxSessions);
+    const sessions = await prisma.session.findMany({
+      where: { project: { userId, rootKey: deviceName } },
+      select: {
+        id: true,
+        projectId: true,
+        tabId: true,
+        tmuxName: true,
+        tmuxWindowName: true,
+        status: true,
+        project: { select: { tmuxSessionName: true, status: true } },
+        tab: { select: { status: true } }
+      }
+    });
+    const now = new Date();
+    const updates = [];
+    const projectStatuses = new Map();
+    let changed = false;
+
+    for (const session of sessions) {
+      projectStatuses.set(session.projectId, session.project.status);
+      const live = tmuxSessionIsLive(session, tmuxState);
+      const nextStatus = live ? statusForLiveTmuxSession(session.status) : 'sleeping';
+      if (session.status !== nextStatus) {
+        changed = true;
+        updates.push(prisma.session.update({
+          where: { id: session.id },
+          data: nextStatus === 'sleeping' ? { status: nextStatus } : { status: nextStatus, lastSeenAt: now }
+        }).catch(() => {}));
+      } else if (live) {
+        updates.push(prisma.session.update({
+          where: { id: session.id },
+          data: { lastSeenAt: now }
+        }).catch(() => {}));
+      }
+      if (session.tabId && session.tab?.status !== nextStatus) {
+        changed = true;
+        updates.push(prisma.tab.update({ where: { id: session.tabId }, data: { status: nextStatus } }).catch(() => {}));
+      }
+    }
+
+    await Promise.all(updates);
+    for (const [projectId, oldStatus] of projectStatuses) {
+      const nextStatus = await updateProjectStatus(projectId);
+      if (nextStatus !== oldStatus) changed = true;
+    }
+    return changed;
   }
 
   function broadcastStatus(userId, refresh = false) {
@@ -252,23 +400,15 @@ function createBroker({ prisma, wss }) {
     const deviceName = record.name || 'Local device';
     const existing = agentsForUser(record.userId).get(deviceName);
     if (existing?.ws.readyState === WebSocket.OPEN) {
-      existing.ws.close(1000, 'replaced');
+      existing.ws.close(1000, WS_REPLACED_REASON);
     }
 
     const agent = { ws, userId: record.userId, deviceName, tokenId: record.id, pending: new Map(), lastSeenAt: new Date(), health: null };
     setAgent(record.userId, deviceName, agent);
 
-    await prisma.project.updateMany({
-      where: { userId: record.userId, rootKey: deviceName },
-      data: { status: 'idle' }
-    });
     await prisma.session.updateMany({
       where: { project: { userId: record.userId, rootKey: deviceName } },
-      data: { status: 'idle', lastSeenAt: new Date() }
-    });
-    await prisma.tab.updateMany({
-      where: { project: { userId: record.userId, rootKey: deviceName } },
-      data: { status: 'idle' }
+      data: { lastSeenAt: new Date() }
     });
     broadcastStatus(record.userId, true);
 
@@ -303,9 +443,11 @@ function createBroker({ prisma, wss }) {
           streamCount: Number.isFinite(Number(msg.streamCount)) ? Number(msg.streamCount) : 0,
           uptimeSec: Number.isFinite(Number(msg.uptimeSec)) ? Number(msg.uptimeSec) : 0,
           memMb: Number.isFinite(Number(msg.memMb)) ? Number(msg.memMb) : 0,
-          roots: msg.roots && typeof msg.roots === 'object' ? msg.roots : {}
+          roots: msg.roots && typeof msg.roots === 'object' ? msg.roots : {},
+          tmuxSessions: normalizeTmuxSessions(msg.tmux?.sessions)
         };
-        broadcastStatus(record.userId);
+        const changed = await reconcileDeviceTmuxStatus(record.userId, deviceName, msg.tmux?.sessions);
+        broadcastStatus(record.userId, changed);
         return;
       }
 
@@ -367,7 +509,7 @@ function createBroker({ prisma, wss }) {
       for (const stream of browserStreams.values()) {
         if (stream.userId === record.userId && stream.deviceName === deviceName && stream.attached) {
           stream.attached = false;
-          sendJson(stream.ws, { type: 'sleeping', message: 'Agent disconnected; reconnect termag-agent on your laptop.' });
+          sendJson(stream.ws, { type: 'sleeping', message: 'Agent disconnected; reconnect termag on your laptop.' });
         }
       }
       await prisma.project.updateMany({
@@ -520,7 +662,7 @@ function createBroker({ prisma, wss }) {
         } catch {
           stream.attached = false;
           await markSessionStatus('sleeping');
-          sendJson(ws, { type: 'sleeping', message: 'Agent offline; open termag-agent on your laptop to reconnect.' });
+          sendJson(ws, { type: 'sleeping', message: 'Agent offline; open termag on your laptop to reconnect.' });
           return false;
         } finally {
           stream.attachPromise = null;
@@ -583,6 +725,15 @@ function createBroker({ prisma, wss }) {
     registerBrowser,
     refreshUser(userId) {
       broadcastStatus(userId, true);
+    },
+    // Fire-and-forget poke that asks a specific device's agent to send a
+    // fresh health ping right now. Used by the publish API so the UI sees
+    // the new tmux state without waiting for the next scheduled health
+    // tick (HEALTH_INTERVAL_MS gap would otherwise show false missing-targets).
+    requestHealthRefresh(userId, deviceName) {
+      const agent = agentForUser(userId, deviceName);
+      if (!agent) return;
+      sendJson(agent.ws, { type: 'health-request' });
     },
     async listTmuxSessions(userId) {
       const liveAgents = connectedAgents(userId);

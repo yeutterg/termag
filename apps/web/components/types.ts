@@ -33,6 +33,21 @@ export type Project = {
   sessions: Session[];
 };
 
+export type TmuxWindow = {
+  index: number;
+  id: string;
+  name: string;
+  target: string;
+  path?: string;
+};
+
+export type TmuxDeviceSession = {
+  name: string;
+  path?: string;
+  windowCount?: number;
+  windows: TmuxWindow[];
+};
+
 export type AgentDeviceStatus = {
   name: string;
   connected: boolean;
@@ -43,4 +58,5 @@ export type AgentDeviceStatus = {
   memMb?: number;
   lastSeenAt?: string | null;
   roots?: Record<string, string>;
+  tmuxSessions?: TmuxDeviceSession[];
 };

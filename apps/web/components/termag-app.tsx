@@ -24,7 +24,7 @@ import { TerminalPane } from './terminal/terminal-pane';
 import { PlatformProvider, Shortcut, shortcutSuffix } from './shortcut';
 import { TabLabel } from './tab-label';
 import { useTabHistory } from './use-tab-history';
-import type { AgentDeviceStatus, Project, Tab } from './types';
+import type { AgentDeviceStatus, Project, Tab, TmuxDeviceSession, TmuxWindow } from './types';
 import type { Platform } from '@/lib/platform';
 import { cn, statusDot } from '@/lib/utils';
 
@@ -46,6 +46,7 @@ function isTypingTarget(target: EventTarget | null): boolean {
 function normalizeAgentDevice(input: unknown): AgentDeviceStatus {
   if (typeof input === 'string') return { name: input, connected: true };
   const raw = (input && typeof input === 'object' ? input : {}) as Record<string, unknown>;
+  const rawTmux = raw.tmux && typeof raw.tmux === 'object' ? raw.tmux as Record<string, unknown> : null;
   return {
     name: String(raw.name || 'Local device'),
     connected: raw.connected !== false,
@@ -55,8 +56,36 @@ function normalizeAgentDevice(input: unknown): AgentDeviceStatus {
     uptimeSec: Number.isFinite(Number(raw.uptimeSec)) ? Number(raw.uptimeSec) : undefined,
     memMb: Number.isFinite(Number(raw.memMb)) ? Number(raw.memMb) : undefined,
     lastSeenAt: typeof raw.lastSeenAt === 'string' ? raw.lastSeenAt : null,
-    roots: raw.roots && typeof raw.roots === 'object' ? raw.roots as Record<string, string> : undefined
+    roots: raw.roots && typeof raw.roots === 'object' ? raw.roots as Record<string, string> : undefined,
+    tmuxSessions: normalizeTmuxSessions(raw.tmuxSessions ?? rawTmux?.sessions)
   };
+}
+
+function normalizeTmuxSessions(input: unknown): TmuxDeviceSession[] | undefined {
+  if (!Array.isArray(input)) return undefined;
+  return input.map((session): TmuxDeviceSession => {
+    const raw = (session && typeof session === 'object' ? session : {}) as Record<string, unknown>;
+    return {
+      name: String(raw.name || ''),
+      path: typeof raw.path === 'string' ? raw.path : undefined,
+      windowCount: Number.isFinite(Number(raw.windowCount)) ? Number(raw.windowCount) : undefined,
+      windows: normalizeTmuxWindows(raw.windows)
+    };
+  }).filter((session) => session.name);
+}
+
+function normalizeTmuxWindows(input: unknown): TmuxWindow[] {
+  if (!Array.isArray(input)) return [];
+  return input.map((window): TmuxWindow => {
+    const raw = (window && typeof window === 'object' ? window : {}) as Record<string, unknown>;
+    return {
+      index: Number.isFinite(Number(raw.index)) ? Number(raw.index) : 0,
+      id: String(raw.id || ''),
+      name: String(raw.name || ''),
+      target: String(raw.target || ''),
+      path: typeof raw.path === 'string' ? raw.path : undefined
+    };
+  }).filter((window) => window.target || window.id || window.name);
 }
 
 function shellArg(value: string) {
@@ -64,7 +93,7 @@ function shellArg(value: string) {
 }
 
 function connectCommand(projectName: string, wholeSession = false) {
-  return `termag-agent connect --project ${shellArg(projectName)}${wholeSession ? ' --session' : ''}`;
+  return `termag connect -p ${shellArg(projectName)}${wholeSession ? ' --session' : ''}`;
 }
 
 type AuthMode = 'oauth' | 'password' | 'trusted';
@@ -1070,17 +1099,17 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
             <div className="grid flex-1 place-items-center rounded-lg border border-dashed border-line bg-panel px-4">
               <div className="w-full max-w-lg text-sm">
                 <div className="mb-2 font-medium text-text">Publish a tmux workspace from any device.</div>
-                <div className="mb-3 text-muted">Create a device token, run the agent, then connect an existing tmux window or session.</div>
+                <div className="mb-3 text-muted">Create a device token, then run connect from any terminal to publish a tmux-backed shell.</div>
                 <div className="flex items-center gap-2 rounded-md border border-line bg-bg p-2">
                   <code className="min-w-0 flex-1 truncate font-mono text-xs text-muted">
-                    termag-agent connect --project "My Project" --session
+                    termag connect
                   </code>
                   <button
                     type="button"
                     className="grid h-7 w-7 shrink-0 place-items-center rounded-md text-muted hover:bg-panel2 hover:text-text"
                     title="Copy connect command"
                     aria-label="Copy connect command"
-                    onClick={() => copyText('empty-connect', 'termag-agent connect --project "My Project" --session')}
+                    onClick={() => copyText('empty-connect', 'termag connect')}
                   >
                     {copiedCommand === 'empty-connect' ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
                   </button>
@@ -1145,11 +1174,13 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
             user={user}
             devices={agentDevices}
             knownDeviceNames={devices}
+            projects={projects}
             focusedDevice={focusedDevice}
             onTokenDeleted={(name) => {
               setTokenDevices((current) => current.filter((device) => device !== name));
             }}
             onAddDevice={() => setNewDeviceOpen(true)}
+            onCleanup={() => reloadProjects()}
           />
         </Suspense>
       )}

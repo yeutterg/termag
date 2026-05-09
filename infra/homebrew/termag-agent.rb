@@ -16,7 +16,7 @@ class TermagAgent < Formula
   end
 
   service do
-    run [opt_bin/"termag-agent"]
+    run [opt_bin/"termag"]
     keep_alive true
     log_path var/"log/termag-agent.log"
     error_log_path var/"log/termag-agent.log"
@@ -26,6 +26,6 @@ class TermagAgent < Formula
   end
 
   test do
-    assert_match version.to_s, shell_output("#{bin}/termag-agent --version")
+    assert_match version.to_s, shell_output("#{bin}/termag --version")
   end
 end
