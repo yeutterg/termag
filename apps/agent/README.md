@@ -53,7 +53,29 @@ export TERMAG_TLS_INSECURE_SKIP_VERIFY=true
 | `TERMAG_TLS_INSECURE_SKIP_VERIFY` | Allow self-signed `wss://localhost` certs only | `false` |
 | `TERMAG_RECONNECT_MS` | Initial reconnect delay (ms) | `1000` |
 | `TERMAG_RECONNECT_MAX_MS` | Max reconnect delay (ms) | `30000` |
+| `TERMAG_MAC_MENUBAR` | Enable the macOS menu bar helper. Set `true` to enable. | `false` |
+| `TERMAG_TERMINAL_APP` | Terminal app used by the menu helper: `Terminal`, `iTerm2`, `Ghostty`, or `auto`. | inferred, then `Terminal` |
+| `TERMAG_CONFIG` | Local config file path. | `~/.termag/config.json` |
 | `TERMAG_AGENT_FAKE` | Run a no-tmux fake stream for UI preview | `false` |
+
+## macOS Menu Bar
+
+On macOS, the foreground agent can start a small status item. It lists local tmux sessions, can create a new detached tmux session (with a Finder folder picker to choose the starting directory), can focus or attach an existing session, and can quit Termag without killing tmux sessions.
+
+You can configure it with environment variables or `~/.termag/config.json`:
+
+```json
+{
+  "menuBar": {
+    "enabled": true,
+    "terminalApp": "Terminal"
+  }
+}
+```
+
+Environment variables take precedence. Use `TERMAG_MAC_MENUBAR=true` for a one-off enable.
+
+Focus behavior is terminal-specific. Terminal.app and iTerm2 are matched by tmux client TTY and can select the existing attached tab/session. Ghostty can be opened or activated, but exact selection of an already-attached tab is best-effort because it does not expose the same AppleScript session API.
 
 ## Subcommands
 

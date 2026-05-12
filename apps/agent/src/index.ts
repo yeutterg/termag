@@ -10,6 +10,7 @@ import https from 'node:https';
 import type { RequestOptions as HttpsRequestOptions } from 'node:https';
 import WebSocket from 'ws';
 import { type Stream, attachReal, attachFake, killTmuxSession, killTmuxWindow, renameTmuxWindow } from './streams';
+import { startMacMenuBar, stopMacMenuBar } from './menubar';
 
 const execFileAsync = promisify(execFile);
 
@@ -88,6 +89,9 @@ Environment:
                             allow self-signed localhost TLS only (default false)
   TERMAG_RECONNECT_MS       initial reconnect delay (default 1000)
   TERMAG_RECONNECT_MAX_MS   max reconnect delay (default 30000)
+  TERMAG_MAC_MENUBAR        macOS menu bar helper toggle (default false)
+  TERMAG_TERMINAL_APP       Terminal, iTerm2, Ghostty, or auto for menu actions
+  TERMAG_CONFIG             config file path (default ~/.termag/config.json)
 `);
 }
 
@@ -747,6 +751,7 @@ async function run() {
   }
 
   await preflightTmux();
+  startMacMenuBar({ tag });
 
   // Record this process as the live agent so future `termag connect`
   // invocations skip spawning a duplicate. Cleanup happens on shutdown +
@@ -954,6 +959,7 @@ function connect(validatedUrl: URL, token: string) {
     const reasonText = Buffer.isBuffer(reason) ? reason.toString() : String(reason || '');
     if (code === 1000 && reasonText === WS_REPLACED_REASON) {
       console.log(`[${tag}] connection replaced by another agent process; exiting.`);
+      stopMacMenuBar();
       removePidFile();
       process.exit(0);
     }
@@ -963,6 +969,7 @@ function connect(validatedUrl: URL, token: string) {
     if (code === 1008) {
       console.error(`[${tag}] broker rejected the connection: ${reasonText || 'policy violation'}.`);
       console.error(`[${tag}] check TERMAG_AGENT_TOKEN — was the device token revoked or replaced?`);
+      stopMacMenuBar();
       removePidFile();
       process.exit(1);
     }
@@ -1208,6 +1215,7 @@ function respond(ws: WebSocket, requestId: string | undefined, data: unknown, er
 function shutdown() {
   for (const stream of [...streams.values()]) stream.close();
   streams.clear();
+  stopMacMenuBar();
   removePidFile();
   process.exit(0);
 }
