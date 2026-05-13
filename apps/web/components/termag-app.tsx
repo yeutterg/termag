@@ -433,23 +433,22 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
     }
   }, [reloadProjects]);
 
-  const createProject = useCallback(async (formData: FormData) => {
-    const customAgents = String(formData.get('customAgents') || '')
-      .split(/\r?\n/)
-      .map((line) => line.trim())
-      .filter(Boolean)
-      .map((spawnCommand) => ({ spawnCommand }));
-    const builtinAgents = formData.getAll('agentTypes')
-      .map(String)
-      .filter(Boolean)
-      .map((agentType) => ({ agentType }));
+  const createProject = useCallback(async (input: {
+    rootKey: string;
+    relativePath: string;
+    name?: string;
+    agentTypes: string[];
+    customAgents: string[];
+  }) => {
+    const customAgents = input.customAgents.map((spawnCommand) => ({ spawnCommand }));
+    const builtinAgents = input.agentTypes.map((agentType) => ({ agentType }));
     const res = await fetch('/api/projects', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
-        name: formData.get('name'),
-        rootKey: formData.get('rootKey'),
-        directory: formData.get('directory'),
+        name: input.name,
+        rootKey: input.rootKey,
+        relativePath: input.relativePath,
         agents: [...customAgents, ...builtinAgents]
       })
     });
@@ -1200,12 +1199,13 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
           <NewProjectDialog
             open={newProjectOpen}
             onOpenChange={setNewProjectOpen}
-            onCreate={async (formData) => {
-              const result = await createProject(formData);
+            onCreate={async (input) => {
+              const result = await createProject(input);
               if (result.ok && !platform.showShortcuts) setSidebarOpen(false);
               return result;
             }}
-            devices={devices}
+            agentDevices={agentDevices}
+            knownDeviceNames={devices}
             selectedDevice={newProjectDevice}
           />
         </Suspense>

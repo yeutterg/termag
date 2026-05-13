@@ -1,11 +1,20 @@
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
-import { Check, Copy, ExternalLink, Plus, Trash2 } from 'lucide-react';
+import { Check, Copy, ExternalLink, FolderCog, Plus, Trash2, X } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import type { AgentDeviceStatus, Project, Session, TmuxDeviceSession } from './types';
+import { DirectoryBrowser } from './directory-browser';
 
-type Token = { id: string; name: string; tokenPrefix: string; createdAt: string; lastUsedAt?: string | null };
+type Token = {
+  id: string;
+  name: string;
+  tokenPrefix: string;
+  createdAt: string;
+  lastUsedAt?: string | null;
+  defaultRootKey?: string | null;
+  defaultRelativePath?: string | null;
+};
 
 interface DevicesDialogProps {
   open: boolean;
@@ -34,7 +43,25 @@ export function DevicesDialog({ open, onOpenChange, user, devices, knownDeviceNa
   const [copied, setCopied] = useState('');
   const [deleting, setDeleting] = useState('');
   const [cleanupError, setCleanupError] = useState('');
+  const [editingDefault, setEditingDefault] = useState('');
+  const [savingDefault, setSavingDefault] = useState('');
   const deviceRefs = useRef(new Map<string, HTMLDivElement>());
+
+  async function patchToken(tokenId: string, payload: Partial<Pick<Token, 'defaultRootKey' | 'defaultRelativePath'>>) {
+    setSavingDefault(tokenId);
+    try {
+      const res = await fetch(`/api/agent-tokens/${tokenId}`, {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      if (!res.ok) throw new Error(await res.text().catch(() => 'Update failed'));
+      const next = await res.json();
+      setTokens((items) => items.map((item) => (item.id === tokenId ? { ...item, ...next } : item)));
+    } finally {
+      setSavingDefault((current) => (current === tokenId ? '' : current));
+    }
+  }
 
   useEffect(() => {
     if (!open) return;
@@ -212,6 +239,68 @@ export function DevicesDialog({ open, onOpenChange, user, devices, knownDeviceNa
                       {Object.entries(device.roots).map(([rootName, rootPath]) => (
                         <div key={rootName} className="truncate">{rootName}: {rootPath}</div>
                       ))}
+                    </div>
+                  )}
+                  {token && (
+                    <div className="mt-3 border-t border-line pt-3">
+                      <div className="flex items-center justify-between gap-2 text-xs">
+                        <div className="min-w-0">
+                          <div className="font-medium text-text">Default folder</div>
+                          <div className="truncate text-[11px] text-muted">
+                            {token.defaultRootKey
+                              ? `${token.defaultRootKey}${token.defaultRelativePath ? `/${token.defaultRelativePath}` : ''}`
+                              : 'Not set — picker opens at the first reported root.'}
+                          </div>
+                        </div>
+                        <div className="flex shrink-0 items-center gap-1">
+                          {token.defaultRootKey && (
+                            <button
+                              type="button"
+                              onClick={() => patchToken(token.id, { defaultRootKey: null, defaultRelativePath: null })}
+                              disabled={savingDefault === token.id}
+                              className="grid h-7 w-7 place-items-center rounded text-muted hover:bg-panel2 hover:text-bad disabled:opacity-50"
+                              title="Clear default folder"
+                              aria-label="Clear default folder"
+                            >
+                              <X className="h-3.5 w-3.5" />
+                            </button>
+                          )}
+                          <button
+                            type="button"
+                            onClick={() => setEditingDefault(editingDefault === token.id ? '' : token.id)}
+                            disabled={!device?.connected && !token.defaultRootKey}
+                            className="inline-flex h-7 items-center gap-1 rounded-md border border-line bg-bg px-2 text-[11px] text-text hover:bg-panel2 disabled:opacity-50"
+                            title={device?.connected ? 'Browse to set the default folder' : 'Device must be connected to browse'}
+                          >
+                            <FolderCog className="h-3.5 w-3.5" />
+                            {editingDefault === token.id ? 'Close' : 'Set default'}
+                          </button>
+                        </div>
+                      </div>
+                      {editingDefault === token.id && device?.connected && device.roots && Object.keys(device.roots).length > 0 && (
+                        <div className="mt-2">
+                          <DirectoryBrowser
+                            deviceName={name}
+                            roots={device.roots}
+                            initialRootKey={token.defaultRootKey || Object.keys(device.roots)[0]}
+                            initialRelativePath={token.defaultRelativePath || ''}
+                            onSelect={async (nextRootKey, nextRelative) => {
+                              await patchToken(token.id, {
+                                defaultRootKey: nextRootKey || null,
+                                defaultRelativePath: nextRelative || null
+                              });
+                              setEditingDefault('');
+                            }}
+                            selectLabel="Save as default"
+                            disabled={savingDefault === token.id}
+                          />
+                        </div>
+                      )}
+                      {editingDefault === token.id && (!device?.connected || !device.roots || Object.keys(device.roots).length === 0) && (
+                        <div className="mt-2 rounded-md border border-line bg-bg px-3 py-2 text-[11px] text-muted">
+                          Device must be connected and reporting roots to pick a default. Reconnect the agent and try again.
+                        </div>
+                      )}
                     </div>
                   )}
                   {device?.connected && (

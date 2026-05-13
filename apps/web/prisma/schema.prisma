@@ -34,6 +34,11 @@ model AgentToken {
   lastUsedAt  DateTime?
   revokedAt   DateTime?
 
+  // Default folder the New Project dialog seeds when this device is selected.
+  // Identifies a (rootKey, relativePath) under the agent's reported roots.
+  defaultRootKey      String?
+  defaultRelativePath String?
+
   userId String
   user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
 

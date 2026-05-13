@@ -11,6 +11,7 @@ import type { RequestOptions as HttpsRequestOptions } from 'node:https';
 import WebSocket from 'ws';
 import { type Stream, attachReal, attachFake, killTmuxSession, killTmuxWindow, renameTmuxWindow } from './streams';
 import { startMacMenuBar, stopMacMenuBar } from './menubar';
+import { listDirectory } from './fs';
 
 const execFileAsync = promisify(execFile);
 
@@ -926,6 +927,17 @@ function connect(validatedUrl: URL, token: string) {
         case 'tmux-list': {
           const sessions = isFake ? fakeTmuxSessions() : await listTmuxSessions();
           respond(ws, requestId, { sessions });
+          break;
+        }
+        case 'list-directory': {
+          const requestedRootKey = typeof msg.rootKey === 'string' && msg.rootKey ? msg.rootKey : Object.keys(roots)[0] || '';
+          const requestedRelative = typeof msg.relativePath === 'string' ? msg.relativePath : '';
+          if (!requestedRootKey || !roots[requestedRootKey]) {
+            respond(ws, requestId, { roots, entries: [] }, `Unknown root ${requestedRootKey}`);
+            break;
+          }
+          const listing = await listDirectory(roots, requestedRootKey, requestedRelative);
+          respond(ws, requestId, { ...listing, roots });
           break;
         }
         case 'hello':

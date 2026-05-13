@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { z } from 'zod';
 import { withAuth } from '@/lib/auth';
+import { prisma } from '@/lib/prisma';
 import { createProject, listProjects } from '@/lib/projects';
 import { AGENT_DEFAULTS, DEFAULT_AGENT_TYPE, normalizeRelativePath, parseRoots, resolveProjectDirectory } from '@/lib/defaults';
 
@@ -41,13 +42,25 @@ export const POST = withAuth(async (user, request: Request) => {
   const roots = parseRoots();
   const selectedRoots = body.rootKey && roots[body.rootKey] ? { [body.rootKey]: roots[body.rootKey] } : roots;
 
+  // A rootKey is "owned" if the user has a token by that name. The agent on
+  // that device is the authority on which paths are valid; the broker only
+  // needs to know which device the project belongs to. This decouples the
+  // web tier from the agent's TERMAG_AGENT_ROOTS env: a device can report
+  // any rootKey via its health snapshot and the picker writes those values
+  // straight through to projects without needing them mirrored in TERMAG_ROOTS.
+  const ownedRootKey = body.rootKey
+    ? await prisma.agentToken
+        .findFirst({ where: { userId: user.id, name: body.rootKey, revokedAt: null }, select: { id: true } })
+        .then((token) => (token ? body.rootKey : null))
+    : null;
+
   const resolvedFromDirectory = body.directory ? resolveProjectDirectory(body.directory, selectedRoots) : null;
   const resolved = resolvedFromDirectory
     ? {
       rootKey: body.rootKey && !roots[body.rootKey] ? body.rootKey : resolvedFromDirectory.rootKey,
       relativePath: resolvedFromDirectory.relativePath
     }
-    : body.rootKey && body.relativePath && roots[body.rootKey]
+    : body.rootKey && body.relativePath && (roots[body.rootKey] || ownedRootKey)
       ? { rootKey: body.rootKey, relativePath: normalizeRelativePath(body.relativePath) }
       : null;
 

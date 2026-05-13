@@ -1,6 +1,8 @@
 'use client';
 
-import { type FormEvent, useState } from 'react';
+import { type FormEvent, useEffect, useMemo, useState } from 'react';
+import { DirectoryBrowser } from './directory-browser';
+import type { AgentDeviceStatus } from './types';
 
 const AGENT_OPTIONS = [
   { id: 'claude', label: 'Claude Code' },
@@ -9,34 +11,152 @@ const AGENT_OPTIONS = [
   { id: 'codex-yolo', label: 'Codex YOLO' }
 ] as const;
 
+export type NewProjectInput = {
+  rootKey: string;
+  relativePath: string;
+  name?: string;
+  agentTypes: string[];
+  customAgents: string[];
+};
+
 interface NewProjectDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  onCreate: (formData: FormData) => Promise<{ ok: boolean; error?: string }>;
-  devices: string[];
+  onCreate: (input: NewProjectInput) => Promise<{ ok: boolean; error?: string }>;
+  agentDevices: AgentDeviceStatus[];
+  knownDeviceNames: string[];
   selectedDevice?: string | null;
 }
 
-export function NewProjectDialog({ open, onOpenChange, onCreate, devices, selectedDevice }: NewProjectDialogProps) {
+type TokenWithDefaults = {
+  id: string;
+  name: string;
+  defaultRootKey?: string | null;
+  defaultRelativePath?: string | null;
+};
+
+export function NewProjectDialog({ open, onOpenChange, onCreate, agentDevices, knownDeviceNames, selectedDevice }: NewProjectDialogProps) {
+  const devices = useMemo(() => {
+    const names = new Set<string>(knownDeviceNames);
+    for (const device of agentDevices) names.add(device.name);
+    return [...names];
+  }, [agentDevices, knownDeviceNames]);
+
+  const initialDevice = selectedDevice && devices.includes(selectedDevice)
+    ? selectedDevice
+    : devices[0] ?? '';
+
+  const [deviceName, setDeviceName] = useState(initialDevice);
+  const [tokens, setTokens] = useState<TokenWithDefaults[]>([]);
+  const [tokensLoaded, setTokensLoaded] = useState(false);
+  const [rootKey, setRootKey] = useState('');
+  const [relativePath, setRelativePath] = useState('');
   const [error, setError] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+
+  useEffect(() => {
+    if (!open) return;
+    let cancelled = false;
+    setTokensLoaded(false);
+    fetch('/api/agent-tokens')
+      .then((res) => (res.ok ? res.json() : []))
+      .then((next) => {
+        if (cancelled) return;
+        setTokens(Array.isArray(next) ? next : []);
+        setTokensLoaded(true);
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setTokens([]);
+        setTokensLoaded(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [open]);
+
+  useEffect(() => {
+    if (!open) return;
+    if (selectedDevice && devices.includes(selectedDevice)) {
+      setDeviceName(selectedDevice);
+    } else if (deviceName && devices.includes(deviceName)) {
+      // keep
+    } else if (devices.length > 0) {
+      setDeviceName(devices[0]);
+    } else {
+      setDeviceName('');
+    }
+    setError('');
+    setSubmitting(false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, selectedDevice, devices.join('\0')]);
+
+  const currentDevice = useMemo(
+    () => agentDevices.find((device) => device.name === deviceName) || null,
+    [agentDevices, deviceName]
+  );
+  const currentToken = useMemo(
+    () => tokens.find((token) => token.name === deviceName) || null,
+    [tokens, deviceName]
+  );
+  const deviceRoots: Record<string, string> = useMemo(() => {
+    const reported = currentDevice?.roots && Object.keys(currentDevice.roots).length > 0
+      ? currentDevice.roots
+      : null;
+    if (reported) return reported;
+    // Fallback: the device hasn't reported health yet but we know its name —
+    // assume the convention (rootKey == deviceName, path unknown). The user
+    // can still type a path via the browser's "type a path" mode.
+    return deviceName ? { [deviceName]: '' } : {};
+  }, [currentDevice, deviceName]);
+
+  const defaultRootKey = currentToken?.defaultRootKey ?? '';
+  const defaultRelativePath = currentToken?.defaultRelativePath ?? '';
+
+  // When the device or its defaults change, reset the picker.
+  useEffect(() => {
+    if (!open) return;
+    setRootKey(defaultRootKey && deviceRoots[defaultRootKey] !== undefined ? defaultRootKey : Object.keys(deviceRoots)[0] ?? '');
+    setRelativePath(defaultRootKey && deviceRoots[defaultRootKey] !== undefined ? defaultRelativePath : '');
+    setError('');
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, deviceName, tokensLoaded, defaultRootKey, defaultRelativePath]);
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const formData = new FormData(event.currentTarget);
-    if (!formData.get('rootKey')) {
+    if (submitting) return;
+    if (!deviceName) {
       setError('Create a device first.');
       return;
     }
+    if (!rootKey) {
+      setError('Pick a root folder for this project.');
+      return;
+    }
+    if (!relativePath) {
+      setError('Pick a folder under the root (cannot create at the root itself).');
+      return;
+    }
+    const formData = new FormData(event.currentTarget);
     const customAgents = String(formData.get('customAgents') || '')
       .split(/\r?\n/)
       .map((line) => line.trim())
       .filter(Boolean);
-    if (formData.getAll('agentTypes').length + customAgents.length === 0) {
+    const agentTypes = formData.getAll('agentTypes').map(String).filter(Boolean);
+    if (agentTypes.length + customAgents.length === 0) {
       setError('Select at least one agent.');
       return;
     }
     setError('');
-    const result = await onCreate(formData);
+    setSubmitting(true);
+    const result = await onCreate({
+      rootKey,
+      relativePath,
+      name: String(formData.get('name') || '').trim() || undefined,
+      agentTypes,
+      customAgents
+    });
+    setSubmitting(false);
     if (!result.ok) {
       setError(result.error || 'Could not create that project. Check the directory and try again.');
       return;
@@ -48,38 +168,50 @@ export function NewProjectDialog({ open, onOpenChange, onCreate, devices, select
   if (!open) return null;
   return (
     <div className="fixed inset-0 z-50 bg-black/35 p-4" onClick={() => onOpenChange(false)}>
-      <section className="mx-auto mt-[10vh] max-w-lg rounded-lg border border-line bg-panel p-4 shadow-2xl" onClick={(event) => event.stopPropagation()}>
+      <section className="mx-auto mt-[6vh] flex max-h-[88vh] max-w-lg flex-col rounded-lg border border-line bg-panel p-4 shadow-2xl" onClick={(event) => event.stopPropagation()}>
         <div className="mb-4">
           <h2 className="text-base font-semibold">New project</h2>
-          <p className="mt-1 text-sm text-muted">Device → Project → Agents</p>
+          <p className="mt-1 text-sm text-muted">Device → Folder → Agents</p>
         </div>
-        <form onSubmit={submit} className="space-y-3">
-          <div className="grid gap-2 sm:grid-cols-[11rem_1fr]">
-            <label className="block">
-              <span className="mb-1 block text-xs font-medium text-muted">Device</span>
-              <select
-                name="rootKey"
-                required
-                defaultValue={selectedDevice ?? devices[0] ?? ''}
-                disabled={devices.length === 0}
-                className="h-9 w-full rounded-md border border-line bg-bg px-3 text-sm outline-none focus:border-accent"
-              >
-                {devices.length === 0 && <option value="">Create a device first</option>}
-                {devices.map((device) => (
-                  <option key={device} value={device}>{device}</option>
-                ))}
-              </select>
-            </label>
-            <label className="block">
-              <span className="mb-1 block text-xs font-medium text-muted">Directory</span>
-              <input
-                name="directory"
-                autoFocus
-                required
-                placeholder="/path/to/project"
-                className="h-9 w-full rounded-md border border-line bg-bg px-3 text-sm outline-none focus:border-accent"
+        <form onSubmit={submit} className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto pr-1">
+          <label className="block">
+            <span className="mb-1 block text-xs font-medium text-muted">Device</span>
+            <select
+              value={deviceName}
+              onChange={(event) => setDeviceName(event.target.value)}
+              required
+              disabled={devices.length === 0}
+              className="h-9 w-full rounded-md border border-line bg-bg px-3 text-sm outline-none focus:border-accent"
+            >
+              {devices.length === 0 && <option value="">Create a device first</option>}
+              {devices.map((device) => (
+                <option key={device} value={device}>{device}</option>
+              ))}
+            </select>
+          </label>
+          <div className="space-y-1">
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-xs font-medium text-muted">Folder</span>
+              {currentToken && (currentToken.defaultRootKey || currentToken.defaultRelativePath) && (
+                <span className="truncate text-[10px] text-muted">
+                  Default: {currentToken.defaultRootKey}{currentToken.defaultRelativePath ? `/${currentToken.defaultRelativePath}` : ''}
+                </span>
+              )}
+            </div>
+            {deviceName ? (
+              <DirectoryBrowser
+                deviceName={deviceName}
+                roots={deviceRoots}
+                initialRootKey={rootKey || defaultRootKey || undefined}
+                initialRelativePath={relativePath || defaultRelativePath || undefined}
+                onChange={(nextRoot, nextRel) => {
+                  setRootKey(nextRoot);
+                  setRelativePath(nextRel);
+                }}
               />
-            </label>
+            ) : (
+              <div className="rounded-md border border-line bg-bg px-3 py-3 text-xs text-muted">No device selected.</div>
+            )}
           </div>
           <label className="block">
             <span className="mb-1 block text-xs font-medium text-muted">Project name</span>
@@ -87,7 +219,7 @@ export function NewProjectDialog({ open, onOpenChange, onCreate, devices, select
               name="name"
               type="text"
               autoComplete="off"
-              placeholder="Defaults to the directory name"
+              placeholder="Defaults to the folder name"
               className="h-9 w-full rounded-md border border-line bg-bg px-3 text-sm outline-none focus:border-accent"
             />
           </label>
@@ -118,7 +250,13 @@ export function NewProjectDialog({ open, onOpenChange, onCreate, devices, select
             </div>
           </fieldset>
           {error && <div className="text-xs text-bad">{error}</div>}
-          <button className="h-9 rounded-md bg-text px-3 text-sm font-medium text-bg">Create project</button>
+          <button
+            type="submit"
+            disabled={submitting}
+            className="h-9 shrink-0 rounded-md bg-text px-3 text-sm font-medium text-bg disabled:opacity-60"
+          >
+            {submitting ? 'Creating…' : 'Create project'}
+          </button>
         </form>
       </section>
     </div>

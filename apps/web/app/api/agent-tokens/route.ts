@@ -7,7 +7,15 @@ import { createRawToken, hashToken, tokenPrefix } from '@/lib/tokens';
 const createSchema = z.object({ name: z.string().trim().min(1).max(80) });
 
 // Explicit select to keep tokenHash off the wire.
-const tokenView = { id: true, name: true, tokenPrefix: true, createdAt: true, lastUsedAt: true } as const;
+const tokenView = {
+  id: true,
+  name: true,
+  tokenPrefix: true,
+  createdAt: true,
+  lastUsedAt: true,
+  defaultRootKey: true,
+  defaultRelativePath: true
+} as const;
 
 export const GET = withAuth(async (user) => {
   const tokens = await prisma.agentToken.findMany({

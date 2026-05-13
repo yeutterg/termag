@@ -748,6 +748,10 @@ function createBroker({ prisma, wss }) {
       }));
       return results.flat();
     },
+    async listDirectory(userId, deviceName, rootKey, relativePath) {
+      if (!agentForUser(userId, deviceName)) throw new Error('Agent offline');
+      return sendToAgent(userId, deviceName, 'list-directory', { rootKey, relativePath: relativePath || '' }, 5000);
+    },
     killTmuxSession(userId, deviceName, tmuxSessionName, timeoutMs = 5000) {
       if (!tmuxSessionName || !agentForUser(userId, deviceName)) return Promise.resolve(false);
       return sendToAgent(userId, deviceName, 'tmux-kill-session', { tmuxSessionName }, timeoutMs)

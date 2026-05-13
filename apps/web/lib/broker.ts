@@ -1,5 +1,6 @@
 type Broker = {
   listTmuxSessions?: (userId: string) => Promise<TmuxDeviceSession[]>;
+  listDirectory?: (userId: string, deviceName: string, rootKey: string, relativePath: string) => Promise<DirectoryListing>;
   refreshUser?: (userId: string) => void;
   requestHealthRefresh?: (userId: string, deviceName: string) => void;
   killTmuxSession?: (userId: string, deviceName: string, tmuxSessionName: string, timeoutMs?: number) => Promise<boolean>;
@@ -7,6 +8,16 @@ type Broker = {
   renameTmuxWindow?: (userId: string, deviceName: string, tmuxName: string, name: string, timeoutMs?: number) => Promise<{ tmuxName?: string; tmuxWindowName?: string } | null>;
   disconnectAgentToken?: (userId: string, tokenId: string) => void;
   killTmux: (userId: string, tmuxName: string, timeoutMs?: number) => Promise<boolean>;
+};
+
+export type DirectoryListing = {
+  rootKey: string;
+  relativePath: string;
+  absolutePath: string;
+  parent: { rootKey: string; relativePath: string } | null;
+  entries: Array<{ name: string; isDir: boolean }>;
+  truncated: boolean;
+  roots: Record<string, string>;
 };
 
 export type TmuxDeviceSession = {
@@ -84,4 +95,15 @@ export async function killTmuxSessions(userId: string, tmuxNames: Array<string |
   const targets = tmuxNames.filter((name): name is string => Boolean(name));
   if (targets.length === 0) return;
   await Promise.all(targets.map((name) => live.killTmux(userId, name).catch(() => false)));
+}
+
+export async function listDeviceDirectory(
+  userId: string,
+  deviceName: string,
+  rootKey: string,
+  relativePath: string
+): Promise<DirectoryListing> {
+  const live = broker();
+  if (!live?.listDirectory) throw new Error('Agent offline');
+  return live.listDirectory(userId, deviceName, rootKey, relativePath);
 }
