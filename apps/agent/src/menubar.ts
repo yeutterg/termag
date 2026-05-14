@@ -213,6 +213,12 @@ enum TermagBanner {
     }()
 }
 
+struct AppleScriptResult {
+    let ok: Bool
+    let status: Int32
+    let output: String
+}
+
 struct TmuxWindow {
     let index: String
     let name: String
@@ -333,6 +339,19 @@ final class TermagStatusController: NSObject, NSApplicationDelegate, NSMenuDeleg
             }
         }
 
+        submenu.addItem(NSMenuItem.separator())
+        let killItem = NSMenuItem(title: "Kill Session…", action: #selector(killSession(_:)), keyEquivalent: "")
+        killItem.target = self
+        killItem.representedObject = session.name
+        killItem.isEnabled = true
+        // Render the kill action in a destructive red on macOS 14+.
+        if #available(macOS 14.0, *) {
+            let title = NSMutableAttributedString(string: "Kill Session…")
+            title.addAttribute(.foregroundColor, value: NSColor.systemRed, range: NSRange(location: 0, length: title.length))
+            killItem.attributedTitle = title
+        }
+        submenu.addItem(killItem)
+
         item.submenu = submenu
         return item
     }
@@ -349,10 +368,70 @@ final class TermagStatusController: NSObject, NSApplicationDelegate, NSMenuDeleg
         guard let sessionName = sender.representedObject as? String else {
             return
         }
+        // Re-validate at click time. The menu's session list is a snapshot
+        // taken on menuNeedsUpdate; short-lived sessions (Claude Code
+        // wrappers, etc.) often die between snapshot and click. Without this
+        // we would open a Terminal tab that immediately fails with "can't
+        // find session".
+        if !tmuxSessionExists(sessionName) {
+            rebuildMenu()
+            showAlert(
+                "Session \"\(sessionName)\" is no longer running.",
+                details: "The list has been refreshed. Sessions started by Claude Code or other wrappers can exit when their last client detaches.\n\nIf you believe the session is still alive, run\n\ttmux has-session -t '=\(sessionName)'\nin a terminal — exit code 0 means tmux can find it."
+            )
+            return
+        }
         if focusAttachedClient(sessionName: sessionName) {
             return
         }
         openTerminalSession(sessionName: sessionName)
+    }
+
+    @objc private func killSession(_ sender: NSMenuItem) {
+        guard let sessionName = sender.representedObject as? String else {
+            return
+        }
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Kill tmux session \"\(sessionName)\"?"
+        alert.informativeText = "Any work in this session that isn't saved or piped out will be lost. Attached clients will be detached."
+        alert.addButton(withTitle: "Kill Session")
+        alert.addButton(withTitle: "Cancel")
+        // Make the Kill button the destructive one — Enter still confirms,
+        // but the button reads as red on macOS 11+.
+        if #available(macOS 11.0, *) {
+            alert.buttons.first?.hasDestructiveAction = true
+        }
+        if alert.runModal() != .alertFirstButtonReturn {
+            return
+        }
+        let result = runTmux(["kill-session", "-t", "=\(sessionName)"])
+        if result.status != 0 {
+            showAlert("Could not kill session \(sessionName).", details: result.output)
+        }
+        rebuildMenu()
+    }
+
+    private func tmuxSessionExists(_ sessionName: String) -> Bool {
+        // The =name prefix tells tmux to match the literal string, disabling
+        // its session:window.pane parser. Without it, names containing ":"
+        // or "." are mis-parsed and has-session reports false negatives.
+        if runTmux(["has-session", "-t", "=\(sessionName)"]).status == 0 {
+            return true
+        }
+        // Belt-and-suspenders: if has-session still fails on an unusual name,
+        // fall back to scanning list-sessions output for an exact match. That
+        // matches the very check that put the session in the menu in the
+        // first place, so we never tell the user a listed session is gone
+        // when it really isn't.
+        let listing = runTmux(["list-sessions", "-F", "#{session_name}"])
+        if listing.status != 0 {
+            return false
+        }
+        return listing.output
+            .split(separator: "\n", omittingEmptySubsequences: true)
+            .contains { String($0).trimmingCharacters(in: .whitespacesAndNewlines) == sessionName }
     }
 
     @objc private func createSession(_ sender: NSMenuItem) {
@@ -466,7 +545,7 @@ final class TermagStatusController: NSObject, NSApplicationDelegate, NSMenuDeleg
         end tell
         return "not-found"
         """
-        return runAppleScript(script).contains("focused")
+        return runAppleScript(script).output.contains("focused")
     }
 
     private func focusITerm2(tty: String) -> Bool {
@@ -490,7 +569,7 @@ final class TermagStatusController: NSObject, NSApplicationDelegate, NSMenuDeleg
         end tell
         return "not-found"
         """
-        return runAppleScript(script).contains("focused")
+        return runAppleScript(script).output.contains("focused")
     }
 
     private func activateTerminalOwner(tty: String) -> Bool {
@@ -519,26 +598,35 @@ final class TermagStatusController: NSObject, NSApplicationDelegate, NSMenuDeleg
 
     private func openTerminalSession(sessionName: String) {
         let terminal = normalizedTerminalApp()
-        if terminal == "iterm2" || terminal == "iterm" {
-            if openITerm2Session(sessionName: sessionName) {
-                return
-            }
-        } else if terminal == "ghostty" {
-            if openGhosttySession(sessionName: sessionName) {
-                return
-            }
-        } else if terminal == "terminal" || terminal == "auto" {
-            if openTerminalAppSession(sessionName: sessionName) {
-                return
-            }
-        }
+        let isTerminalAppPrimary = terminal == "terminal" || terminal == "auto" || terminal.isEmpty
 
-        if !openTerminalAppSession(sessionName: sessionName) {
-            showAlert("Could not open tmux session.", details: "Configure ~/.termag/config.json with menuBar.terminalApp set to Terminal, iTerm2, or Ghostty.")
+        let primaryResult: AppleScriptResult
+        switch terminal {
+        case "iterm2", "iterm":
+            primaryResult = openITerm2Session(sessionName: sessionName)
+        case "ghostty":
+            // Ghostty is launched via open(1), not AppleScript. Map success/failure
+            // onto the same result shape so the fallback branch below can stay generic.
+            primaryResult = openGhosttySession(sessionName: sessionName)
+                ? AppleScriptResult(ok: true, status: 0, output: "")
+                : AppleScriptResult(ok: false, status: 1, output: "open(1) for Ghostty failed.")
+        default:
+            primaryResult = openTerminalAppSession(sessionName: sessionName)
         }
+        if primaryResult.ok { return }
+
+        // Fall back to Terminal.app only when it wasn't already the primary —
+        // avoids opening a second Terminal tab on every click.
+        if !isTerminalAppPrimary {
+            let fallback = openTerminalAppSession(sessionName: sessionName)
+            if fallback.ok { return }
+            showOpenSessionFailure(primary: primaryResult, fallback: fallback)
+            return
+        }
+        showOpenSessionFailure(primary: primaryResult, fallback: nil)
     }
 
-    private func openTerminalAppSession(sessionName: String) -> Bool {
+    private func openTerminalAppSession(sessionName: String) -> AppleScriptResult {
         let command = attachCommand(sessionName: sessionName)
         let script = """
         tell application "Terminal"
@@ -546,10 +634,14 @@ final class TermagStatusController: NSObject, NSApplicationDelegate, NSMenuDeleg
           do script "\(appleScriptString(command))"
         end tell
         """
-        return runAppleScript(script).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        let result = runAppleScript(script)
+        // Terminal.app's "do script" returns a tab reference, so the script's
+        // string output is never empty on success. Status is the only reliable
+        // signal: 0 = the AppleScript ran end-to-end without throwing.
+        return AppleScriptResult(ok: result.status == 0, status: result.status, output: result.output)
     }
 
-    private func openITerm2Session(sessionName: String) -> Bool {
+    private func openITerm2Session(sessionName: String) -> AppleScriptResult {
         let command = attachCommand(sessionName: sessionName)
         let script = """
         tell application "iTerm2"
@@ -560,7 +652,30 @@ final class TermagStatusController: NSObject, NSApplicationDelegate, NSMenuDeleg
           end tell
         end tell
         """
-        return runAppleScript(script).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        let result = runAppleScript(script)
+        return AppleScriptResult(ok: result.status == 0, status: result.status, output: result.output)
+    }
+
+    private func showOpenSessionFailure(primary: AppleScriptResult, fallback: AppleScriptResult?) {
+        let attempts = [("primary", primary), ("fallback", fallback)].compactMap { (label, value) -> String? in
+            guard let value = value else { return nil }
+            let trimmed = value.output.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.isEmpty { return "\(label): status \(value.status)" }
+            return "\(label): \(trimmed.prefix(200))"
+        }.joined(separator: "\n")
+
+        let combinedOutput = "\(primary.output)\n\(fallback?.output ?? "")"
+        if combinedOutput.contains("Not authorized") || combinedOutput.contains("not allowed assistive") || combinedOutput.contains("(-1743)") {
+            showAlert(
+                "Termag isn't allowed to control your terminal.",
+                details: "Open System Settings → Privacy & Security → Automation, expand the Termag entry, and enable Terminal (or iTerm). Then try again.\n\n\(attempts)"
+            )
+            return
+        }
+        showAlert(
+            "Could not open tmux session.",
+            details: "\(attempts)\n\nSet menuBar.terminalApp in ~/.termag/config.json (Terminal, iTerm2, or Ghostty) if the wrong app is being targeted."
+        )
     }
 
     private func openGhosttySession(sessionName: String) -> Bool {
@@ -573,7 +688,9 @@ final class TermagStatusController: NSObject, NSApplicationDelegate, NSMenuDeleg
     }
 
     private func attachCommand(sessionName: String) -> String {
-        "\(shellQuote(tmuxPath)) attach-session -t \(shellQuote(sessionName))"
+        // The =name exact-match prefix is required for names containing ":"
+        // or ".", which tmux otherwise treats as session:window.pane.
+        "\(shellQuote(tmuxPath)) attach-session -t \(shellQuote("=\(sessionName)"))"
     }
 
     private func listSessions() -> [TmuxSession] {
@@ -621,12 +738,8 @@ final class TermagStatusController: NSObject, NSApplicationDelegate, NSMenuDeleg
         return runProcess(tmuxPath, args: args)
     }
 
-    private func runAppleScript(_ script: String) -> String {
-        let result = runProcess("/usr/bin/osascript", args: ["-e", script])
-        if result.status != 0 {
-            return result.output
-        }
-        return result.output
+    private func runAppleScript(_ script: String) -> (status: Int32, output: String) {
+        return runProcess("/usr/bin/osascript", args: ["-e", script])
     }
 
     private func runProcess(_ executable: String, args: [String]) -> (status: Int32, output: String) {
