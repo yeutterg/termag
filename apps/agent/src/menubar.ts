@@ -191,6 +191,28 @@ let parentPid = commandArgs.count > 1 ? pid_t(Int32(commandArgs[1]) ?? 0) : pid_
 let tmuxPath = commandArgs.count > 2 ? commandArgs[2] : "/usr/bin/tmux"
 let requestedTerminalApp = commandArgs.count > 3 ? commandArgs[3] : "Terminal"
 
+// Italic ASCII banner shown at the top of every fresh shell tmux pane the
+// menu helper spawns. Matches apps/agent/src/banner.ts so the experience is
+// the same whether the session was created from the browser, the CLI, or
+// the menu bar.
+enum TermagBanner {
+    static let text: String = {
+        // Backticks are written as \u{0060} so the TypeScript host file can
+        // embed this Swift source inside a String.raw template literal
+        // without closing it prematurely.
+        let bt = "\u{0060}"
+        let art = [
+            "  _                                 ",
+            " | |_ ___ _ __ _ __ ___   __ _  __ _",
+            " | __/ _ \\ '__| '_ \(bt) _ \\ / _\(bt) |/ _\(bt) |",
+            " | ||  __/ |  | | | | | | (_| | (_| |",
+            "  \\__\\___|_|  |_| |_| |_|\\__,_|\\__, |",
+            "                                |___/"
+        ].joined(separator: "\n")
+        return "\u{001B}[3m\(art)\u{001B}[0m\n\n"
+    }()
+}
+
 struct TmuxWindow {
     let index: String
     let name: String
@@ -374,7 +396,8 @@ final class TermagStatusController: NSObject, NSApplicationDelegate, NSMenuDeleg
         }
 
         let shell = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
-        let result = runTmux(["new-session", "-d", "-s", name, "-c", chosenCwd, "-x", "120", "-y", "32", shell])
+        let shellCommand = "printf %s \(shellQuote(TermagBanner.text)); exec \(shell)"
+        let result = runTmux(["new-session", "-d", "-s", name, "-c", chosenCwd, "-x", "120", "-y", "32", shellCommand])
         if result.status != 0 {
             showAlert("Could not create tmux session.", details: result.output)
             return

@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
 import WebSocket from 'ws';
 import * as pty from '@lydell/node-pty';
+import { wrapWithBanner } from './banner';
 
 const execFileAsync = promisify(execFile);
 
@@ -88,7 +89,8 @@ async function ensureTmuxSession(tmuxName: string, cwd: string, command: string)
     await execFileAsync('tmux', ['has-session', '-t', tmuxName]);
     return { wasNew: false };
   } catch {
-    const shellCommand = command === '$SHELL' ? (process.env.SHELL || '/bin/zsh') : command;
+    const resolved = command === '$SHELL' ? (process.env.SHELL || '/bin/zsh') : command;
+    const shellCommand = wrapWithBanner(resolved);
     try {
       await execFileAsync('tmux', [
         'new-session', '-d', '-s', tmuxName, '-c', cwd,
@@ -140,7 +142,8 @@ async function tmuxWindowExists(sessionName: string, windowName: string): Promis
 
 async function ensureTmuxWindow(sessionName: string, windowName: string, cwd: string, command: string): Promise<{ wasNew: boolean }> {
   if (await tmuxWindowExists(sessionName, windowName)) return { wasNew: false };
-  const shellCommand = command === '$SHELL' ? (process.env.SHELL || '/bin/zsh') : command;
+  const resolved = command === '$SHELL' ? (process.env.SHELL || '/bin/zsh') : command;
+  const shellCommand = wrapWithBanner(resolved);
 
   if (!(await tmuxSessionExists(sessionName))) {
     try {

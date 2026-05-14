@@ -12,6 +12,7 @@ import WebSocket from 'ws';
 import { type Stream, attachReal, attachFake, killTmuxSession, killTmuxWindow, renameTmuxWindow } from './streams';
 import { startMacMenuBar, stopMacMenuBar } from './menubar';
 import { listDirectory } from './fs';
+import { wrapWithBanner } from './banner';
 
 const execFileAsync = promisify(execFile);
 
@@ -402,7 +403,8 @@ async function createTmuxContextFromShell(args: ConnectArgs): Promise<TmuxContex
   const cwd = process.cwd();
   const sessionName = safeTmuxName(args.projectName, 'termag');
   const windowName = safeTmuxName(args.tabName || defaultShellTabName(), 'shell');
-  const shellCommand = process.env.SHELL || '/bin/zsh';
+  const resolvedShell = process.env.SHELL || '/bin/zsh';
+  const shellCommand = wrapWithBanner(resolvedShell);
   let createdSession = false;
   let createdWindow = false;
 
