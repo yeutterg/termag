@@ -320,7 +320,14 @@ async function runConnect(args: string[], opts: { forceNew?: boolean } = {}) {
       console.log(`[${tag}] published ${what} "${tmux.sessionName}" to project "${connectArgs.projectName}" (${added} tab${added === 1 ? '' : 's'}).`);
     }
   } catch (err) {
-    const msg = err instanceof Error ? formatConnectionError(err, publishUrl) : String(err);
+    const raw = err instanceof Error ? formatConnectionError(err, publishUrl) : String(err);
+    // Some Node socket errors carry a useful `code` but an empty `.message` —
+    // without this fallback the user just sees "could not publish to <url>: "
+    // and no clue what went wrong.
+    const code = err && typeof err === 'object' && typeof (err as NodeError).code === 'string'
+      ? (err as NodeError).code
+      : '';
+    const msg = raw?.trim() || code || 'connection failed';
     console.warn(`[${tag}] could not publish to ${publishUrl.origin}: ${msg}`);
     console.warn(`[${tag}] tmux session "${tmux.sessionName}" is local-only until the broker is reachable. Re-run termag connect after fixing the URL/token.`);
   }
@@ -1113,7 +1120,12 @@ function connect(validatedUrl: URL, token: string) {
   });
 
   ws.on('error', (err) => {
-    console.error(`[${tag}] ${formatConnectionError(err, validatedUrl)}`);
+    const formatted = formatConnectionError(err, validatedUrl);
+    const code = (err as NodeError).code;
+    // Some WS-layer socket errors carry an empty `.message`; fall back to the
+    // code so users don't see a bare `[agent]` line during reconnect storms.
+    const msg = formatted?.trim() || (typeof code === 'string' ? code : '') || 'websocket error';
+    console.error(`[${tag}] ${msg}`);
   });
 }
 

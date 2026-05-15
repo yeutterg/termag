@@ -79,12 +79,95 @@ function TerminalPaneImpl({ sessionId, active, title, status, onTitleChange, hid
     if (!active || !hostRef.current) return;
     let disposed = false;
     let term: XTerm | null = null;
+    let fitAddon: { fit: () => void } | null = null;
     let raf = 0;
     let resizeTimer: ReturnType<typeof setTimeout> | null = null;
     let observer: ResizeObserver | null = null;
     let onKill: ((event: Event) => void) | null = null;
     let onVisibilityRef: (() => void) | null = null;
     let themeObserverRef: MutationObserver | null = null;
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+    let reconnectAttempts = 0;
+
+    // WebSocket lifecycle is its own function so we can re-run it on disconnect.
+    // All input sites (term.onData, onKill, onVisibility, ResizeObserver) read
+    // wsRef.current at call time so they always target the latest socket — no
+    // stale closure over a closed WS after a reconnect.
+    function connectWS() {
+      if (disposed || !term) return;
+      if (reconnectTimer) {
+        clearTimeout(reconnectTimer);
+        reconnectTimer = null;
+      }
+      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      // Hint the broker to trim initial scrollback when the user is on a
+      // metered/cellular connection or has Low Data Mode on.
+      type ConnectionLike = { saveData?: boolean; effectiveType?: string };
+      const conn = (navigator as Navigator & { connection?: ConnectionLike }).connection;
+      const saveDataHint = conn?.saveData || /^(slow-2g|2g|3g)$/.test(conn?.effectiveType ?? '') ? '&saveData=1' : '';
+      const ws = new WebSocket(`${protocol}//${window.location.host}/api/ws/terminal?sessionId=${sessionId}&cols=${term.cols}&rows=${term.rows}${saveDataHint}`);
+      ws.binaryType = 'arraybuffer';
+      wsRef.current = ws;
+
+      ws.onopen = () => {
+        if (reconnectAttempts > 0) {
+          term!.write('\r\n\x1b[2m[reconnected]\x1b[0m\r\n');
+        }
+        const justReconnected = reconnectAttempts > 0;
+        reconnectAttempts = 0;
+        fitAddon?.fit();
+        ws.send(JSON.stringify({ type: 'resize', cols: term!.cols, rows: term!.rows }));
+        // Only steal focus on the initial connect — yanking focus mid-typing
+        // when the broker hiccups would be infuriating.
+        if (!justReconnected) term!.focus();
+      };
+      ws.onmessage = (event) => {
+        // Binary frames carry raw terminal output (no JSON wrapper). Text
+        // frames carry control messages — ready/sleeping/exit/refresh.
+        if (typeof event.data !== 'string') {
+          term!.write(new Uint8Array(event.data as ArrayBuffer));
+          return;
+        }
+        let msg: { type?: string; data?: string; message?: string };
+        try {
+          msg = JSON.parse(event.data);
+        } catch {
+          return;
+        }
+        if (msg.type === 'output') term!.write(msg.data ?? ''); // legacy/control fallback
+        if (msg.type === 'sleeping') term!.write(`\r\n${msg.message ?? 'Agent sleeping'}\r\n`);
+        if (msg.type === 'exit') term!.write('\r\n[session ended]\r\n');
+      };
+      ws.onclose = (event) => {
+        if (disposed) return;
+        wsRef.current = null;
+        // Code 1008 (policy violation) is the broker's "this session is gone /
+        // you're not authorized" signal. Retrying would just loop forever, so
+        // surface the reason and stop. Anything else is treated as a transient
+        // network blip and gets exponential-backoff retry.
+        if (event.code === 1008) {
+          const reason = event.reason || 'session unavailable';
+          term!.write(`\r\n\x1b[2m[disconnected: ${reason}]\x1b[0m\r\n`);
+          return;
+        }
+        reconnectAttempts += 1;
+        if (reconnectAttempts === 1) {
+          term!.write('\r\n\x1b[2m[disconnected, reconnecting…]\x1b[0m\r\n');
+        }
+        // Exponential backoff capped at 30s. Resets to 1s on next successful
+        // open. Tab visibility doesn't pause this; the next visible tick will
+        // open the new socket which fast-tracks recovery on a phone wake-up.
+        const delay = Math.min(30_000, 1000 * 2 ** Math.min(reconnectAttempts - 1, 5));
+        reconnectTimer = setTimeout(() => {
+          reconnectTimer = null;
+          connectWS();
+        }, delay);
+      };
+      ws.onerror = () => {
+        // The close handler will follow with reconnect bookkeeping; nothing to
+        // do here. Suppress the noisy default console error.
+      };
+    }
 
     void (async () => {
       const [{ Terminal }, { FitAddon }, { WebLinksAddon }] = await Promise.all([
@@ -122,6 +205,7 @@ function TerminalPaneImpl({ sessionId, active, title, status, onTitleChange, hid
       themeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ['class'] });
       themeObserverRef = themeObserver;
       const fit = new FitAddon();
+      fitAddon = fit;
       term.loadAddon(fit);
       term.loadAddon(new WebLinksAddon());
       term.open(hostRef.current);
@@ -134,58 +218,20 @@ function TerminalPaneImpl({ sessionId, active, title, status, onTitleChange, hid
         if (trimmed) onTitleChangeRef.current?.(sessionId, trimmed);
       });
 
-      raf = requestAnimationFrame(() => {
-      if (disposed) return;
-      fit.fit();
-      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-      // Hint the broker to trim initial scrollback when the user is on a
-      // metered/cellular connection or has Low Data Mode on. UA-based phone
-      // detection happens server-side too — both fire the same trim path.
-      type ConnectionLike = { saveData?: boolean; effectiveType?: string };
-      const conn = (navigator as Navigator & { connection?: ConnectionLike }).connection;
-      const saveDataHint = conn?.saveData || /^(slow-2g|2g|3g)$/.test(conn?.effectiveType ?? '') ? '&saveData=1' : '';
-      const ws = new WebSocket(`${protocol}//${window.location.host}/api/ws/terminal?sessionId=${sessionId}&cols=${term!.cols}&rows=${term!.rows}${saveDataHint}`);
-      ws.binaryType = 'arraybuffer';
-      wsRef.current = ws;
-
-      ws.onopen = () => {
-        fit.fit();
-        ws.send(JSON.stringify({ type: 'resize', cols: term!.cols, rows: term!.rows }));
-        term!.focus();
-      };
-      ws.onmessage = (event) => {
-        // Binary frames carry raw terminal output (no JSON wrapper). Text
-        // frames carry control messages — ready/sleeping/exit/refresh.
-        if (typeof event.data !== 'string') {
-          term!.write(new Uint8Array(event.data as ArrayBuffer));
-          return;
-        }
-        let msg: { type?: string; data?: string; message?: string };
-        try {
-          msg = JSON.parse(event.data);
-        } catch {
-          return;
-        }
-        if (msg.type === 'output') term!.write(msg.data ?? ''); // legacy/control fallback
-        if (msg.type === 'sleeping') term!.write(`\r\n${msg.message ?? 'Agent sleeping'}\r\n`);
-        if (msg.type === 'exit') term!.write('\r\n[session ended]\r\n');
-      };
-      ws.onclose = () => {
-        if (!disposed) term!.write('\r\n[disconnected]\r\n');
-      };
-      ws.onerror = () => {
-        if (!disposed) term!.write('\r\n[connection error]\r\n');
-      };
-
-      term!.onData((data) => {
-        if (ws.readyState === WebSocket.OPEN) {
+      // Bind once: every input goes through whatever socket is currently
+      // assigned to wsRef.current. After a reconnect, the new WS just gets
+      // the keystrokes naturally.
+      term.onData((data) => {
+        const ws = wsRef.current;
+        if (ws?.readyState === WebSocket.OPEN) {
           ws.send(JSON.stringify({ type: 'input', data }));
         }
       });
 
       onKill = (event: Event) => {
         const custom = event as CustomEvent<{ sessionId: string }>;
-        if (custom.detail?.sessionId === sessionId && ws.readyState === WebSocket.OPEN) {
+        const ws = wsRef.current;
+        if (custom.detail?.sessionId === sessionId && ws?.readyState === WebSocket.OPEN) {
           ws.send(JSON.stringify({ type: 'kill' }));
         }
       };
@@ -196,30 +242,37 @@ function TerminalPaneImpl({ sessionId, active, title, status, onTitleChange, hid
       // up to 64 KB; older bytes drop, the next visible frame includes a
       // [output trimmed while paused] marker.
       const onVisibility = () => {
-        if (ws.readyState !== WebSocket.OPEN) return;
+        const ws = wsRef.current;
+        if (ws?.readyState !== WebSocket.OPEN) return;
         ws.send(JSON.stringify({ type: document.visibilityState === 'hidden' ? 'pause' : 'resume' }));
       };
       document.addEventListener('visibilitychange', onVisibility);
       onVisibilityRef = onVisibility;
 
       observer = new ResizeObserver(() => {
-      if (disposed) return;
-      if (resizeTimer) clearTimeout(resizeTimer);
-      resizeTimer = setTimeout(() => {
-        fit.fit();
-        const ws = wsRef.current;
-        if (ws?.readyState === WebSocket.OPEN) {
-          ws.send(JSON.stringify({ type: 'resize', cols: term!.cols, rows: term!.rows }));
-        }
-      }, 120);
+        if (disposed) return;
+        if (resizeTimer) clearTimeout(resizeTimer);
+        resizeTimer = setTimeout(() => {
+          fit.fit();
+          const ws = wsRef.current;
+          if (ws?.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: 'resize', cols: term!.cols, rows: term!.rows }));
+          }
+        }, 120);
       });
       observer.observe(hostRef.current!);
+
+      raf = requestAnimationFrame(() => {
+        if (disposed) return;
+        fit.fit();
+        connectWS();
       });
     })();
 
     return () => {
       disposed = true;
       cancelAnimationFrame(raf);
+      if (reconnectTimer) clearTimeout(reconnectTimer);
       observer?.disconnect();
       if (resizeTimer) clearTimeout(resizeTimer);
       wsRef.current?.close();
