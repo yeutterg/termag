@@ -6,6 +6,8 @@ import { type AgentConfig, loadConfig } from './config';
 
 type StartMacMenuBarOptions = {
   tag: string;
+  agentVersion?: string;
+  deviceName?: string;
 };
 
 let activeMenuBar: ChildProcess | null = null;
@@ -42,7 +44,9 @@ export function startMacMenuBar(opts: StartMacMenuBarOptions): ChildProcess | nu
     [
       String(process.pid),
       tmuxPath,
-      terminalApp(config)
+      terminalApp(config),
+      opts.agentVersion ?? '',
+      opts.deviceName ?? ''
     ],
     {
       detached: false,
@@ -171,18 +175,20 @@ let commandArgs = CommandLine.arguments
 let parentPid = commandArgs.count > 1 ? pid_t(Int32(commandArgs[1]) ?? 0) : pid_t(0)
 let tmuxPath = commandArgs.count > 2 ? commandArgs[2] : "/usr/bin/tmux"
 let requestedTerminalApp = commandArgs.count > 3 ? commandArgs[3] : "Terminal"
+let agentVersion = commandArgs.count > 4 ? commandArgs[4] : ""
+let agentDeviceName = commandArgs.count > 5 ? commandArgs[5] : ""
 
-// Italic ASCII banner shown at the top of every fresh shell tmux pane the
-// menu helper spawns. Matches apps/agent/src/banner.ts so the experience is
-// the same whether the session was created from the browser, the CLI, or
-// the menu bar.
+// Italic ASCII banner + compact context block shown at the top of every
+// fresh shell tmux pane the menu helper spawns. Matches the TS
+// apps/agent/src/banner.ts output so the experience is the same whether
+// the session was created from the browser, the CLI, or the menu bar.
 enum TermagBanner {
-    static let text: String = {
+    private static let art: String = {
         // Backticks are written as \u{0060} so the TypeScript host file can
         // embed this Swift source inside a String.raw template literal
         // without closing it prematurely.
         let bt = "\u{0060}"
-        let art = [
+        return [
             "  _                                 ",
             " | |_ ___ _ __ _ __ ___   __ _  __ _",
             " | __/ _ \\ '__| '_ \(bt) _ \\ / _\(bt) |/ _\(bt) |",
@@ -190,8 +196,37 @@ enum TermagBanner {
             "  \\__\\___|_|  |_| |_| |_|\\__,_|\\__, |",
             "                                |___/"
         ].joined(separator: "\n")
-        return "\u{001B}[3m\(art)\u{001B}[0m\n\n"
     }()
+
+    static func render(version: String, deviceName: String, cwd: String, shell: String) -> String {
+        let home = ProcessInfo.processInfo.environment["HOME"] ?? ""
+        var displayCwd = cwd
+        if !home.isEmpty {
+            if cwd == home {
+                displayCwd = "~"
+            } else if cwd.hasPrefix(home + "/") {
+                displayCwd = "~/" + String(cwd.dropFirst(home.count + 1))
+            }
+        }
+        let shellLabel: String = {
+            let trimmed = shell.trimmingCharacters(in: .whitespacesAndNewlines)
+            let head = trimmed.split(separator: " ", maxSplits: 1).first.map(String.init) ?? trimmed
+            return head.split(separator: "/").last.map(String.init) ?? head
+        }()
+        var headerParts: [String] = []
+        if !version.isEmpty { headerParts.append("termag \(version)") }
+        // Menu-bar sessions are ad-hoc — no project to display, just device.
+        if !deviceName.isEmpty { headerParts.append(deviceName) }
+        if !shellLabel.isEmpty { headerParts.append(shellLabel) }
+        let header = "\u{001B}[3m\(art)\u{001B}[0m"
+        if headerParts.isEmpty && displayCwd.isEmpty {
+            return "\(header)\n\n"
+        }
+        var lines: [String] = []
+        if !headerParts.isEmpty { lines.append(headerParts.joined(separator: " · ")) }
+        if !displayCwd.isEmpty { lines.append(displayCwd) }
+        return "\(header)\n\u{001B}[2m\(lines.joined(separator: "\n"))\u{001B}[0m\n\n"
+    }
 }
 
 struct AppleScriptResult {
@@ -456,7 +491,13 @@ final class TermagStatusController: NSObject, NSApplicationDelegate, NSMenuDeleg
         }
 
         let shell = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
-        let shellCommand = "printf %s \(shellQuote(TermagBanner.text)); exec \(shell)"
+        let bannerText = TermagBanner.render(
+            version: agentVersion,
+            deviceName: agentDeviceName,
+            cwd: chosenCwd,
+            shell: shell
+        )
+        let shellCommand = "printf %s \(shellQuote(bannerText)); exec \(shell)"
         let result = runTmux(["new-session", "-d", "-s", name, "-c", chosenCwd, "-x", "120", "-y", "32", shellCommand])
         if result.status != 0 {
             showAlert("Could not create tmux session.", details: result.output)

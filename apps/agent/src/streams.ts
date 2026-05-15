@@ -2,7 +2,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { mkdir } from 'node:fs/promises';
 import WebSocket from 'ws';
-import { wrapWithBanner } from './banner';
+import { type BannerContext, wrapWithBanner } from './banner';
 import { destroyMatchingSessionStreams, SessionStream } from './session-stream';
 
 const execFileAsync = promisify(execFile);
@@ -30,6 +30,14 @@ export interface RealAttachOpts {
   readOnly?: boolean;
   /** Replay the SessionStream's recent-output ring buffer on subscribe. */
   replayRecent?: boolean;
+  /**
+   * Optional context baked into the banner printed at fresh-tmux-pane
+   * creation: termag version, project name, device name. cwd and shell are
+   * filled in by the spawn site from the resolved values that go to tmux.
+   */
+  agentVersion?: string;
+  projectName?: string;
+  deviceName?: string;
 }
 
 export interface FakeAttachOpts {
@@ -40,13 +48,13 @@ export interface FakeAttachOpts {
   cwd: { rootKey?: string; relativePath?: string };
 }
 
-async function ensureTmuxSession(tmuxName: string, cwd: string, command: string): Promise<{ wasNew: boolean }> {
+async function ensureTmuxSession(tmuxName: string, cwd: string, command: string, bannerCtx?: BannerContext): Promise<{ wasNew: boolean }> {
   try {
     await execFileAsync('tmux', ['has-session', '-t', tmuxName]);
     return { wasNew: false };
   } catch {
     const resolved = command === '$SHELL' ? (process.env.SHELL || '/bin/zsh') : command;
-    const shellCommand = wrapWithBanner(resolved);
+    const shellCommand = wrapWithBanner(resolved, { ...bannerCtx, cwd, shell: resolved });
     try {
       await execFileAsync('tmux', [
         'new-session', '-d', '-s', tmuxName, '-c', cwd,
@@ -100,10 +108,10 @@ async function tmuxWindowExists(sessionName: string, windowName: string): Promis
   }
 }
 
-async function ensureTmuxWindow(sessionName: string, windowName: string, cwd: string, command: string): Promise<{ wasNew: boolean }> {
+async function ensureTmuxWindow(sessionName: string, windowName: string, cwd: string, command: string, bannerCtx?: BannerContext): Promise<{ wasNew: boolean }> {
   if (await tmuxWindowExists(sessionName, windowName)) return { wasNew: false };
   const resolved = command === '$SHELL' ? (process.env.SHELL || '/bin/zsh') : command;
-  const shellCommand = wrapWithBanner(resolved);
+  const shellCommand = wrapWithBanner(resolved, { ...bannerCtx, cwd, shell: resolved });
 
   if (!(await tmuxSessionExists(sessionName))) {
     try {
@@ -144,12 +152,17 @@ async function ensureTmuxTarget(opts: RealAttachOpts): Promise<{ wasNew: boolean
     }
     return { wasNew: false, target: opts.tmuxName };
   }
+  const bannerCtx: BannerContext = {
+    version: opts.agentVersion,
+    projectName: opts.projectName,
+    deviceName: opts.deviceName
+  };
   if (opts.createMode === 'window' && opts.tmuxSessionName && opts.tmuxWindowName) {
     if (await tmuxTargetExists(opts.tmuxName)) return { wasNew: false, target: opts.tmuxName };
-    const result = await ensureTmuxWindow(opts.tmuxSessionName, opts.tmuxWindowName, opts.cwd, opts.spawnCommand);
+    const result = await ensureTmuxWindow(opts.tmuxSessionName, opts.tmuxWindowName, opts.cwd, opts.spawnCommand, bannerCtx);
     return { ...result, target: `${opts.tmuxSessionName}:${opts.tmuxWindowName}` };
   }
-  const result = await ensureTmuxSession(opts.tmuxName, opts.cwd, opts.spawnCommand);
+  const result = await ensureTmuxSession(opts.tmuxName, opts.cwd, opts.spawnCommand, bannerCtx);
   return { ...result, target: opts.tmuxName };
 }
 

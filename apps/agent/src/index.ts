@@ -515,7 +515,13 @@ async function createTmuxContextFromShell(args: ConnectArgs): Promise<TmuxContex
   const sessionName = safeTmuxName(args.projectName, 'termag');
   const windowName = safeTmuxName(args.tabName || defaultShellTabName(), 'shell');
   const resolvedShell = process.env.SHELL || '/bin/zsh';
-  const shellCommand = wrapWithBanner(resolvedShell);
+  const shellCommand = wrapWithBanner(resolvedShell, {
+    version: pkgVersion,
+    projectName: args.projectName,
+    deviceName: Object.keys(roots)[0] || undefined,
+    cwd,
+    shell: resolvedShell
+  });
   let createdSession = false;
   let createdWindow = false;
 
@@ -869,7 +875,7 @@ async function run() {
   }
 
   await preflightTmux();
-  startMacMenuBar({ tag });
+  startMacMenuBar({ tag, agentVersion: pkgVersion, deviceName: Object.keys(roots)[0] });
 
   // Record this process as the live agent so future `termag connect`
   // invocations skip spawning a duplicate. Cleanup happens on shutdown +
@@ -1210,9 +1216,23 @@ async function handleAttach(ws: WebSocket, msg: Json) {
   const readOnly = msg.readOnly === true;
   const replayRecent = msg.replayRecent === true;
   const cwd = createMode === 'none' ? process.cwd() : resolveCwd(msg.cwd as Json | undefined);
+  const rawCwd = msg.cwd as { rootKey?: unknown } | undefined;
+  const deviceName = typeof rawCwd?.rootKey === 'string' && rawCwd.rootKey
+    ? rawCwd.rootKey
+    : (Object.keys(roots)[0] || undefined);
+  const projectName = typeof msg.projectName === 'string' && msg.projectName.trim()
+    ? msg.projectName.trim()
+    : undefined;
   if (!tmuxName) throw new Error('tmuxName is required');
 
-  const stream = await attachReal({ ws, streamId, tmuxName, tmuxSessionName, tmuxWindowName, createMode, cwd, spawnCommand, cols, rows, readOnly, replayRecent });
+  const stream = await attachReal({
+    ws, streamId, tmuxName, tmuxSessionName, tmuxWindowName,
+    createMode, cwd, spawnCommand, cols, rows,
+    readOnly, replayRecent,
+    agentVersion: pkgVersion,
+    projectName,
+    deviceName
+  });
   streams.set(streamId, stream);
   return { tmuxName: stream.tmuxName };
 }

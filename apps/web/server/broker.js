@@ -760,6 +760,10 @@ function createBroker({ prisma, wss }) {
               : (session.project.tmuxSessionName && session.tmuxWindowName ? 'window' : 'session'),
             kind: session.kind,
             cwd: { rootKey: session.project.rootKey, relativePath: session.project.relativePath },
+            // projectName goes into the banner the agent prints when it
+            // creates the underlying tmux pane so the user lands with full
+            // context (project / device / cwd / shell / version) visible.
+            projectName: session.project.name,
             spawnCommand: session.kind === 'ctrl'
               ? session.project.ctrlSpawnCommand
               : (session.spawnCommand || session.project.agentSpawnCommand),
