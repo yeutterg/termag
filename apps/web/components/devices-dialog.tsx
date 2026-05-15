@@ -196,8 +196,8 @@ export function DevicesDialog({ open, onOpenChange, user, devices, knownDeviceNa
                 'export TERMAG_AGENT_TOKEN=tmag_REPLACE_WITH_DEVICE_TOKEN',
                 `export TERMAG_AGENT_ROOTS='${shellSingleQuoteContent(rootsJson)}'`
               ].join('\n');
-              const connectCommand = `termag connect`;
-              const sessionCommand = `termag connect --project "My Project" --session`;
+              const connectCommand = `termag new`;
+              const sessionCommand = `termag adopt`;
               return (
                 <div
                   key={name}
@@ -399,8 +399,8 @@ export function DevicesDialog({ open, onOpenChange, user, devices, knownDeviceNa
                   )}
                   <div className="mt-3 flex flex-wrap gap-2">
                     <CopyButton label="Env template" copied={copied === `env:${name}`} onClick={() => copyText(`env:${name}`, envTemplate)} title="Copy TERMAG_URL / TOKEN / ROOTS exports" />
-                    <CopyButton label="Connect here" copied={copied === `connect:${name}`} onClick={() => copyText(`connect:${name}`, connectCommand)} title="termag connect — publishes this directory or tmux window" />
-                    <CopyButton label="Adopt all tabs" copied={copied === `session:${name}`} onClick={() => copyText(`session:${name}`, sessionCommand)} title="termag connect --session — adopts every window in this tmux session" />
+                    <CopyButton label="New shell" copied={copied === `connect:${name}`} onClick={() => copyText(`connect:${name}`, connectCommand)} title="termag new publishes a shell in this directory" />
+                    <CopyButton label="Adopt tmux" copied={copied === `session:${name}`} onClick={() => copyText(`session:${name}`, sessionCommand)} title="termag adopt publishes every window in this tmux session" />
                   </div>
                 </div>
               );

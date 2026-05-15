@@ -19,7 +19,7 @@ const createSchema = z.object({
   rootKey: z.string().trim().min(1).optional(),
   relativePath: z.string().trim().min(1).optional(),
   agentType: z.string().trim().min(1).default(DEFAULT_AGENT_TYPE),
-  agentTypes: z.array(z.string().trim().min(1)).min(1).max(4).optional(),
+  agentTypes: z.array(z.string().trim().min(1)).min(1).max(8).optional(),
   agents: z.array(agentSchema).min(1).max(12).optional(),
   agentSpawnCommand: z.string().trim().min(1).max(1000).optional()
 });

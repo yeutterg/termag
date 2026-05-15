@@ -61,7 +61,7 @@ export function CommandPalette({
           <Command.Input
             autoFocus
             className="h-12 min-w-0 flex-1 bg-transparent text-sm outline-none placeholder:text-muted"
-            placeholder="Jump to a project, agent, or command…"
+            placeholder="Jump to a session, tab, or command..."
           />
           <span className="font-mono text-[10px] text-muted">esc</span>
         </div>
@@ -94,7 +94,7 @@ export function CommandPalette({
             </Command.Group>
           )}
           <Command.Group heading="Commands">
-            <CommandRow icon={<Plus className="h-3.5 w-3.5" />} label="New agent in current project" shortcut={['mod', 'enter']} onSelect={() => { onNewTab(); onOpenChange(false); }} />
+            <CommandRow icon={<Plus className="h-3.5 w-3.5" />} label="New tab in current session" shortcut={['mod', 'enter']} onSelect={() => { onNewTab(); onOpenChange(false); }} />
             <CommandRow icon={<SearchIcon className="h-3.5 w-3.5" />} label="Search scrollback" shortcut={['mod', 'shift', 'F']} onSelect={() => { onSearch(); onOpenChange(false); }} />
             <CommandRow icon={<Trash2 className="h-3.5 w-3.5" />} label="Delete current window" onSelect={() => { onKill(); onOpenChange(false); }} />
             <CommandRow icon={<Moon className="h-3.5 w-3.5" />} label="Toggle theme" shortcut={['mod', '.']} onSelect={() => { onTheme(); onOpenChange(false); }} />

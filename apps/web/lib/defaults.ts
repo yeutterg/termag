@@ -1,4 +1,9 @@
 export const AGENT_DEFAULTS = {
+  shell: {
+    label: 'Shell',
+    badge: 'SH',
+    spawn: '$SHELL'
+  },
   claude: {
     label: 'Claude Code',
     badge: 'CL',

@@ -250,31 +250,33 @@ export TERMAG_TLS_INSECURE_SKIP_VERIFY=true
 
 Add more devices by creating one token per device, installing the agent on that device, and giving it a named root. The root key is the device label in the sidebar.
 
-### 4. Create Or Attach Projects
+### 4. Create Or Attach Sessions
 
-Click `+` → **New Project**. Select the device, enter the project directory, then choose agents. The built-in checkboxes include **Claude Code**, **Claude Code YOLO**, **Codex**, and **Codex YOLO**. Add any other agent command in the text box, one command per line. Termag-next creates one terminal window per selected or typed agent.
+Click `+` -> **New session**. Select the device, enter the project directory, then choose the command to start. **Shell** is the lowest-friction default; add Codex, Claude Code, or any other command when you want an agent tab.
 
-New projects map to tmux sessions. Each terminal tab in that project maps to a tmux window in the same session, so the same workspace can still be inspected or recovered with native tmux.
+Sessions map to tmux sessions. Each terminal tab maps to a tmux window in the same session, so the same workspace can still be inspected or recovered with native tmux.
 
-To bind Termag to work you already have running, click `+` → **Attach tmux session**. The dialog lists unattached tmux sessions from every connected device. Pick a session and Termag creates a project for it, with one terminal tab for each tmux window. Existing attached windows are treated as external: deleting the Termag project detaches from them instead of killing the tmux session. New tabs you add later inside that attached project are Termag-created tmux windows in the same session.
+To bind Termag to work you already have running, click `+` -> **Connect tmux session**. The dialog lists unattached tmux sessions from every connected device. Pick a session and Termag adds one terminal tab for each tmux window. Existing attached windows are treated as external: deleting the Termag project detaches from them instead of killing the tmux session. New tabs you add later inside that attached project are Termag-created tmux windows in the same session.
 
-You can also publish from the device itself. From inside an existing tmux window:
+You can also publish from the device itself:
 
 ```bash
-termag connect
+termag new            # fresh tmux-backed shell here
+termag connect        # publish this tmux window, or create one if outside tmux
+termag adopt          # publish every window in the current tmux session
 # explicit project/tab override:
 termag connect --project Restful-ESP32 --tab codex
 # equivalent shorthand:
 termag -p Restful-ESP32 -t codex
 ```
 
-With no flags, `connect` infers the project from the current git repo or directory name. That creates or updates the project in the browser and adds the current tmux window as a terminal tab. To publish every window in the current tmux session:
+With no flags, `new` and `connect` infer the project from the current git repo or directory name. That creates or updates the project in the browser and adds the current tmux window as a terminal tab. To publish every window in the current tmux session:
 
 ```bash
-termag connect --project Restful-ESP32 --session
+termag adopt Restful-ESP32
 ```
 
-The connect command uses the same `TERMAG_URL` and `TERMAG_AGENT_TOKEN` exports as the long-running agent. If it runs outside tmux, it creates or reuses a detached tmux session named after the project and a window named after `--tab`, starts the background websocket agent, then attaches your local terminal to the tmux session. A normal Terminal or iTerm shell cannot be moved into tmux after it has already started, so this fallback starts a new shell at the current directory. Use `--no-attach` to publish without attaching locally, or `--no-agent` if you already manage the long-running agent separately.
+These commands use the same `TERMAG_URL` and `TERMAG_AGENT_TOKEN` exports as the long-running agent. If a command runs outside tmux, Termag creates or reuses a detached tmux session named after the project and a window named after `--tab`, starts the background websocket agent, then attaches your local terminal to the tmux session. A normal Terminal or iTerm shell cannot be moved into tmux after it has already started, so this fallback starts a new shell at the current directory. Use `--no-attach` to publish without attaching locally, or `--no-agent` if you already manage the long-running agent separately.
 
 ## Local Development
 

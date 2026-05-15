@@ -81,6 +81,8 @@ Focus behavior is terminal-specific. Terminal.app and iTerm2 are matched by tmux
 
 ```bash
 termag              # connect to the broker (default)
+termag new          # create/publish a tmux-backed shell here
+termag adopt        # publish every window in the current tmux session
 termag connect      # infer project from git/cwd and publish this shell
 termag connect --project Restful-ESP32 --tab codex
 termag -p Restful-ESP32 -t codex
@@ -90,7 +92,7 @@ termag --version
 termag --help
 ```
 
-`connect` publishes the current workspace. With no flags it infers the project from the current git repo or directory name. Run it from inside tmux to make the current window appear as a Termag terminal tab, or add `--session` to publish every window in the current tmux session. If you run it outside tmux, the agent creates or reuses a detached tmux session named after the project and a window named after `--tab`, starts the background websocket agent, and attaches this terminal to the tmux session. `termag -p <project> -t <tab>` is shorthand for the same connect flow. Use `--no-attach` to publish without attaching locally, or `--no-agent` to skip starting the background websocket agent.
+`termag new` is the shortest path to a fresh tmux-backed shell at the current directory. `connect` publishes the current workspace. With no flags it infers the project from the current git repo or directory name. Run it from inside tmux to make the current window appear as a Termag terminal tab, or use `termag adopt` / `--session` to publish every window in the current tmux session. If you run it outside tmux, the agent creates or reuses a detached tmux session named after the project and a window named after `--tab`, starts the background websocket agent, and attaches this terminal to the tmux session. `termag -p <project> -t <tab>` is shorthand for the same connect flow. Use `--no-attach` to publish without attaching locally, or `--no-agent` to skip starting the background websocket agent.
 
 ## Requirements
 

@@ -81,6 +81,14 @@ if (subcommand === 'update') {
   void runUpdate();
 } else if (subcommand === 'connect') {
   void runConnect(argv.slice(1));
+} else if (subcommand === 'new') {
+  void runConnect(argv.slice(1), { forceNew: true });
+} else if (subcommand === 'here' || subcommand === 'publish') {
+  void runConnect(argv.slice(1));
+} else if (subcommand === 'adopt') {
+  const args = argv.slice(1);
+  const hasMode = args.some((arg) => arg === '--session' || arg === '--all' || arg === '-a' || arg === '--window');
+  void runConnect(hasMode ? args : [...args, '--session']);
 } else if (subcommand === 'config') {
   void runConfig(argv.slice(1));
 } else if (subcommand === '--version' || subcommand === '-v') {
@@ -105,6 +113,8 @@ function printHelp() {
 Usage:
   termag              connect to the broker and serve sessions (default)
   termag connect      publish current tmux window/session to the web UI
+  termag new          start a tmux-backed shell here and publish it
+  termag adopt        publish every window in the current tmux session
   termag -p/--project shorthand for "termag connect --project"
   termag config show  print the resolved configuration (token masked)
   termag config migrate
@@ -172,6 +182,8 @@ function looksLikeConnectArgs(args: string[]) {
     || arg === '-t'
     || arg.startsWith('--tab=')
     || arg === '--session'
+    || arg === '--all'
+    || arg === '-a'
     || arg === '--window'
   ));
 }
@@ -194,6 +206,7 @@ type ConnectArgs = {
   mode: 'window' | 'session';
   localAttach?: boolean;
   startAgent: boolean;
+  forceNew?: boolean;
 };
 
 type TmuxWindowInfo = {
@@ -221,10 +234,11 @@ type TmuxContext = {
   createdFromShell?: boolean;
 };
 
-async function runConnect(args: string[]) {
+async function runConnect(args: string[], opts: { forceNew?: boolean } = {}) {
   let parsedArgs: ConnectArgs;
   try {
     parsedArgs = parseConnectArgs(args);
+    parsedArgs.forceNew = opts.forceNew;
   } catch (err) {
     console.error(`[${tag}] ${err instanceof Error ? err.message : String(err)}`);
     printConnectHelp();
@@ -333,7 +347,7 @@ function parseConnectArgs(args: string[]): ConnectArgs {
       printConnectHelp();
       process.exit(0);
     }
-    if (arg === '--session') {
+    if (arg === '--session' || arg === '--all' || arg === '-a') {
       mode = 'session';
       continue;
     }
@@ -395,9 +409,11 @@ function printConnectHelp() {
   console.log(`termag connect
 
 Usage:
+  termag new                                      # create/publish a shell here
   termag connect --project <project>            # current tmux window only
   termag connect --project <project> --tab <label>
   termag connect --project <project> --session  # every window in this tmux session
+  termag adopt [project]                         # shorthand for --session
   termag connect                                # infer project from git/cwd
   termag connect <project> [tab-label]          # positional shorthand
 
@@ -406,7 +422,8 @@ Usage:
   --tab, -t       Override the tab label shown in the web UI. Free-form
                   text — NOT a tmux window index. Defaults to the current
                   tmux window's name, or "shell" outside tmux.
-  --session       Publish every window in the current tmux session as
+  --session, --all, -a
+                  Publish every window in the current tmux session as
                   separate tabs.
   --no-attach     Outside tmux, create/publish the tmux session but do not
                   attach this terminal to it.
@@ -442,6 +459,7 @@ async function inferProjectName() {
 }
 
 async function detectOrCreateTmuxContext(args: ConnectArgs): Promise<TmuxContext> {
+  if (args.forceNew) return createTmuxContextFromShell(args);
   if (process.env.TMUX) return detectTmuxContext();
   return createTmuxContextFromShell(args);
 }

@@ -302,7 +302,7 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
         return;
       }
 
-      // ⌘↵ creates a new agent terminal — but yields to inputs (rename commit etc.)
+      // Cmd+Enter creates a new tab, but yields to inputs (rename commit etc.).
       if (mod && event.key === 'Enter') {
         if (typing) return;
         event.preventDefault();
@@ -310,7 +310,7 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
         return;
       }
 
-      // ⌘⇧P opens the inline new-project form (replaces ⌥⌘N).
+      // Cmd+Shift+P opens the new-session form.
       if (mod && event.shiftKey && event.key.toLowerCase() === 'p') {
         event.preventDefault();
         setSidebarOpen(true);
@@ -665,8 +665,8 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
               className="grid h-7 w-7 place-items-center rounded-md text-muted hover:bg-panel2 hover:text-text"
               onPointerDown={(event) => event.stopPropagation()}
               onClick={() => setCreateMenuOpen((value) => !value)}
-              title="New device, project, or attach a tmux session"
-              aria-label="New device, project, or attach a tmux session"
+              title="New device, session, or tmux connection"
+              aria-label="New device, session, or tmux connection"
             >
               <Plus className="h-4 w-4" />
             </button>
@@ -692,7 +692,7 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
                   onClick={() => openNewProject()}
                 >
                   <FolderPlus className="h-3.5 w-3.5" />
-                  <span className="flex-1 whitespace-nowrap">New Project</span>
+                  <span className="flex-1 whitespace-nowrap">New session</span>
                   <Shortcut keys={['mod', 'shift', 'P']} />
                 </button>
                 <button
@@ -704,7 +704,24 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
                   }}
                 >
                   <Terminal className="h-3.5 w-3.5" />
-                  <span className="whitespace-nowrap">Attach tmux session</span>
+                  <span className="whitespace-nowrap">Connect tmux session</span>
+                </button>
+                <div className="my-1 h-px bg-line" />
+                <button
+                  type="button"
+                  className="flex h-8 w-full items-center gap-2 rounded px-2 text-left text-sm text-muted hover:bg-panel2 hover:text-text"
+                  onClick={() => copyText('quick-new-session', 'termag new')}
+                >
+                  {copiedCommand === 'quick-new-session' ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
+                  <span className="truncate">{copiedCommand === 'quick-new-session' ? 'Copied' : 'Copy termag new'}</span>
+                </button>
+                <button
+                  type="button"
+                  className="flex h-8 w-full items-center gap-2 rounded px-2 text-left text-sm text-muted hover:bg-panel2 hover:text-text"
+                  onClick={() => copyText('quick-adopt-session', 'termag adopt')}
+                >
+                  {copiedCommand === 'quick-adopt-session' ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
+                  <span className="truncate">{copiedCommand === 'quick-adopt-session' ? 'Copied' : 'Copy termag adopt'}</span>
                 </button>
               </div>
             )}
@@ -736,8 +753,8 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
                   <button
                     type="button"
                     className="grid h-5 w-5 shrink-0 place-items-center rounded text-muted opacity-0 hover:bg-bg hover:text-text focus:opacity-100 group-hover/device:opacity-100"
-                    title={`New project on ${group}`}
-                    aria-label={`New project on ${group}`}
+                    title={`New session on ${group}`}
+                    aria-label={`New session on ${group}`}
                     onClick={() => openNewProject(group)}
                   >
                     <Plus className="h-3.5 w-3.5" />
@@ -850,7 +867,7 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
                               }}
                             >
                               <Plus className="h-3.5 w-3.5" />
-                              <span className="flex-1">New agent</span>
+                              <span className="flex-1">New tab</span>
                               <Shortcut keys={['mod', 'enter']} />
                             </button>
                             <button
@@ -968,7 +985,7 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
                 <h1 className="truncate text-sm font-semibold">{activeProject?.name ?? 'No project'}</h1>
               </div>
               <div className="truncate font-mono text-[11px] text-muted">
-                {activeProject ? `${activeProject.rootKey} · ${activeProject.relativePath}` : 'Create a project to start'}
+                {activeProject ? `${activeProject.rootKey} · ${activeProject.relativePath}` : 'Create a session to start'}
               </div>
             </div>
           </div>
@@ -1097,18 +1114,18 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
           ) : (
             <div className="grid flex-1 place-items-center rounded-lg border border-dashed border-line bg-panel px-4">
               <div className="w-full max-w-lg text-sm">
-                <div className="mb-2 font-medium text-text">Publish a tmux workspace from any device.</div>
-                <div className="mb-3 text-muted">Create a device token, then run connect from any terminal to publish a tmux-backed shell.</div>
+                <div className="mb-2 font-medium text-text">Start or connect a tmux workspace.</div>
+                <div className="mb-3 text-muted">Create a device token, then run a shell command or use the + menu.</div>
                 <div className="flex items-center gap-2 rounded-md border border-line bg-bg p-2">
                   <code className="min-w-0 flex-1 truncate font-mono text-xs text-muted">
-                    termag connect
+                    termag new
                   </code>
                   <button
                     type="button"
                     className="grid h-7 w-7 shrink-0 place-items-center rounded-md text-muted hover:bg-panel2 hover:text-text"
-                    title="Copy connect command"
-                    aria-label="Copy connect command"
-                    onClick={() => copyText('empty-connect', 'termag connect')}
+                    title="Copy new-session command"
+                    aria-label="Copy new-session command"
+                    onClick={() => copyText('empty-connect', 'termag new')}
                   >
                     {copiedCommand === 'empty-connect' ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
                   </button>

@@ -173,7 +173,7 @@ export function DirectoryBrowser({
                   applyTypedPath();
                 }
               }}
-              placeholder="/Users/you/Code/my-project"
+              placeholder="/path/to/project"
               className="h-8 w-full rounded-md border border-line bg-panel px-2 font-mono text-xs outline-none focus:border-accent"
             />
           </label>

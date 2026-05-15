@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { RefreshCw } from 'lucide-react';
+import { Check, Copy, RefreshCw, Search } from 'lucide-react';
 
 type TmuxWindow = {
   index: number;
@@ -30,14 +30,25 @@ export function AttachTmuxDialog({ open, onOpenChange, onAttach }: AttachTmuxDia
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [attaching, setAttaching] = useState('');
+  const [query, setQuery] = useState('');
+  const [copied, setCopied] = useState('');
 
   const groups = useMemo(() => {
     const next = new Map<string, TmuxSession[]>();
-    for (const session of sessions) {
+    const needle = query.trim().toLowerCase();
+    const visible = needle
+      ? sessions.filter((session) => [
+        session.rootKey,
+        session.name,
+        session.path,
+        ...session.windows.flatMap((window) => [window.name, window.id, window.target, window.path])
+      ].some((value) => value?.toLowerCase().includes(needle)))
+      : sessions;
+    for (const session of visible) {
       next.set(session.rootKey, [...(next.get(session.rootKey) ?? []), session]);
     }
     return [...next.entries()];
-  }, [sessions]);
+  }, [query, sessions]);
 
   const loadSessions = useCallback(async () => {
     setLoading(true);
@@ -72,32 +83,69 @@ export function AttachTmuxDialog({ open, onOpenChange, onAttach }: AttachTmuxDia
     onOpenChange(false);
   }
 
+  async function copyText(id: string, value: string) {
+    try {
+      await navigator.clipboard.writeText(value);
+    } catch {
+      const textarea = document.createElement('textarea');
+      textarea.value = value;
+      textarea.style.position = 'fixed';
+      textarea.style.opacity = '0';
+      document.body.appendChild(textarea);
+      textarea.select();
+      document.execCommand('copy');
+      document.body.removeChild(textarea);
+    }
+    setCopied(id);
+    window.setTimeout(() => setCopied((current) => (current === id ? '' : current)), 1500);
+  }
+
   if (!open) return null;
   return (
     <div className="fixed inset-0 z-50 bg-black/35 p-4" onClick={() => onOpenChange(false)}>
       <section className="mx-auto mt-[8vh] flex max-h-[82vh] max-w-2xl flex-col rounded-lg border border-line bg-panel p-4 shadow-2xl" onClick={(event) => event.stopPropagation()}>
         <div className="mb-4 flex items-start justify-between gap-3">
           <div>
-            <h2 className="text-base font-semibold">Attach tmux session</h2>
-            <p className="mt-1 text-sm text-muted">Existing sessions become projects. Their tmux windows become terminal tabs.</p>
+            <h2 className="text-base font-semibold">Connect tmux session</h2>
+            <p className="mt-1 text-sm text-muted">Pick a running tmux session and Termag will add its windows as tabs.</p>
           </div>
-          <button
-            type="button"
-            className="grid h-8 w-8 shrink-0 place-items-center rounded-md text-muted hover:bg-panel2 hover:text-text disabled:opacity-50"
-            onClick={loadSessions}
-            disabled={loading}
-            title="Refresh tmux sessions"
-            aria-label="Refresh tmux sessions"
-          >
-            <RefreshCw className="h-4 w-4" />
-          </button>
+          <div className="flex shrink-0 items-center gap-1">
+            <button
+              type="button"
+              className="inline-flex h-8 items-center gap-1.5 rounded-md border border-line bg-bg px-2 text-xs text-muted hover:bg-panel2 hover:text-text"
+              onClick={() => copyText('adopt', 'termag adopt')}
+              title="Copy shell command to connect the current tmux session"
+            >
+              {copied === 'adopt' ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
+              {copied === 'adopt' ? 'Copied' : 'termag adopt'}
+            </button>
+            <button
+              type="button"
+              className="grid h-8 w-8 place-items-center rounded-md text-muted hover:bg-panel2 hover:text-text disabled:opacity-50"
+              onClick={loadSessions}
+              disabled={loading}
+              title="Refresh tmux sessions"
+              aria-label="Refresh tmux sessions"
+            >
+              <RefreshCw className="h-4 w-4" />
+            </button>
+          </div>
         </div>
 
         <div className="min-h-0 flex-1 overflow-y-auto">
+          <label className="mb-3 flex h-9 items-center gap-2 rounded-md border border-line bg-bg px-2 text-sm">
+            <Search className="h-3.5 w-3.5 shrink-0 text-muted" />
+            <input
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+              placeholder="Filter sessions or windows"
+              className="min-w-0 flex-1 bg-transparent outline-none placeholder:text-muted"
+            />
+          </label>
           {loading && <div className="rounded-md border border-line bg-bg p-3 text-sm text-muted">Loading connected devices...</div>}
           {!loading && groups.length === 0 && (
             <div className="rounded-md border border-line bg-bg p-3 text-sm text-muted">
-              No unattached tmux sessions found on connected devices.
+              {sessions.length === 0 ? 'No unattached tmux sessions found on connected devices.' : 'No tmux sessions match the filter.'}
             </div>
           )}
           <div className="space-y-4">

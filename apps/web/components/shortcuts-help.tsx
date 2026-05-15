@@ -21,13 +21,13 @@ const GROUPS: Group[] = [
   {
     heading: 'Agents',
     items: [
-      { keys: ['mod', 'enter'], label: 'New agent in current project' }
+      { keys: ['mod', 'enter'], label: 'New tab in current session' }
     ]
   },
   {
     heading: 'Projects & app',
     items: [
-      { keys: ['mod', 'shift', 'P'], label: 'New project', note: 'Firefox: collides with print preview' },
+      { keys: ['mod', 'shift', 'P'], label: 'New session', note: 'Firefox: collides with print preview' },
       { keys: ['mod', ';'], label: 'Open devices' }
     ]
   },
