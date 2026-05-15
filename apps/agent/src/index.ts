@@ -1025,6 +1025,11 @@ function connect(validatedUrl: URL, token: string) {
           if (requestId) respond(ws, requestId, { ok: true });
           break;
         }
+        case 'terminal-claim-drive': {
+          claimStreamDrive(String(msg.streamId || ''));
+          if (requestId) respond(ws, requestId, { ok: true });
+          break;
+        }
         case 'tmux-kill': {
           if (!isFake) await killTmuxSession(String(msg.tmuxName || ''));
           if (requestId) respond(ws, requestId, { ok: true });
@@ -1202,10 +1207,11 @@ async function handleAttach(ws: WebSocket, msg: Json) {
   const spawnCommand = String(msg.spawnCommand || '$SHELL');
   const cols = terminalDimension(msg.cols, 80, 20, 500);
   const rows = terminalDimension(msg.rows, 24, 5, 200);
+  const readOnly = msg.readOnly === true;
   const cwd = createMode === 'none' ? process.cwd() : resolveCwd(msg.cwd as Json | undefined);
   if (!tmuxName) throw new Error('tmuxName is required');
 
-  const stream = await attachReal({ ws, streamId, tmuxName, tmuxSessionName, tmuxWindowName, createMode, cwd, spawnCommand, cols, rows });
+  const stream = await attachReal({ ws, streamId, tmuxName, tmuxSessionName, tmuxWindowName, createMode, cwd, spawnCommand, cols, rows, readOnly });
   streams.set(streamId, stream);
   return { tmuxName: stream.tmuxName };
 }
@@ -1332,6 +1338,12 @@ function closeStream(streamId: string) {
   if (!stream) return;
   streams.delete(streamId);
   stream.close();
+}
+
+function claimStreamDrive(streamId: string) {
+  const stream = streams.get(streamId);
+  if (!stream?.claimDrive) return;
+  stream.claimDrive();
 }
 
 function resolveCwd(cwd?: Json) {

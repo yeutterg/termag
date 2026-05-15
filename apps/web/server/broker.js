@@ -95,6 +95,21 @@ function terminalDimension(value, fallback, min, max) {
   return Math.min(max, Math.max(min, Math.floor(parsed)));
 }
 
+const REPLAY_QUEUE_CAP = 256 * 1024;
+const REPLAY_QUEUE_TRIM = 192 * 1024;
+
+function pushReplayQueue(stream, data) {
+  if (typeof data !== 'string' || !data) return;
+  stream.replayQueue.push(data);
+  stream.replayQueueBytes += data.length;
+  if (stream.replayQueueBytes <= REPLAY_QUEUE_CAP) return;
+  stream.replayQueueTruncated = true;
+  while (stream.replayQueueBytes > REPLAY_QUEUE_TRIM && stream.replayQueue.length > 1) {
+    const dropped = stream.replayQueue.shift();
+    stream.replayQueueBytes -= dropped.length;
+  }
+}
+
 function passwordGateEnabled() {
   return trustedNetworkEnabled() && Boolean(process.env.TERMAG_PASSWORD);
 }
@@ -442,7 +457,9 @@ function createBroker({ prisma, wss }) {
 
     // Re-attach any browser streams that were left orphaned by a prior agent disconnect.
     for (const stream of browserStreams.values()) {
-      if (stream.userId === record.userId && stream.deviceName === deviceName && !stream.attached && typeof stream.reattach === 'function') {
+      if (stream.userId === record.userId && stream.deviceName === deviceName && !stream.attached && !stream.replaying && typeof stream.reattach === 'function') {
+        // Skip streams still draining the scrollback snapshot — they'll call
+        // attachToAgent themselves once the snapshot is drained.
         stream.reattach().catch(() => {});
       }
     }
@@ -483,9 +500,31 @@ function createBroker({ prisma, wss }) {
         const stream = browserStreams.get(msg.streamId);
         if (!streamBelongsToAgent(stream, record.userId, deviceName) || typeof msg.data !== 'string') return;
         bufferAndFlush(stream, msg.data);
+        // Replay-queue support: any other stream of the same sessionId that's
+        // still mid-snapshot-replay needs to receive these bytes too, after
+        // it finishes draining its DB snapshot. See registerBrowser comment.
+        for (const other of browserStreams.values()) {
+          if (other === stream || !other.replaying) continue;
+          if (other.sessionId !== stream.sessionId) continue;
+          pushReplayQueue(other, msg.data);
+        }
         if (sessionPrimary.get(stream.sessionId) === msg.streamId) {
           appendScrollback(prisma, stream.sessionId, msg.data).catch((err) => console.error('[scrollback]', err.message));
         }
+        return;
+      }
+
+      if (msg.type === 'driver-changed' && msg.streamId) {
+        // Agent → broker → browser. The agent's SessionStream re-broadcasts on
+        // every driver change so each subscriber knows whether they're the
+        // current driver or read-only.
+        const stream = browserStreams.get(msg.streamId);
+        if (!streamBelongsToAgent(stream, record.userId, deviceName)) return;
+        sendJson(stream.ws, {
+          type: 'driver-changed',
+          driver: Boolean(msg.driver),
+          readOnly: Boolean(msg.readOnly)
+        });
         return;
       }
 
@@ -579,6 +618,7 @@ function createBroker({ prisma, wss }) {
     const sessionId = url.searchParams.get('sessionId');
     const cols = terminalDimension(url.searchParams.get('cols'), 80, 20, 500);
     const rows = terminalDimension(url.searchParams.get('rows'), 24, 5, 200);
+    const readOnly = url.searchParams.get('readonly') === '1';
     // Mobile / save-data hints. Browser appends `&saveData=1` when the user
     // is on a metered connection or iOS Low Data Mode; UA detects phones.
     const ua = req.headers['user-agent'] || '';
@@ -600,6 +640,35 @@ function createBroker({ prisma, wss }) {
     }
 
     await prisma.project.update({ where: { id: session.projectId }, data: { openedAt: new Date() } });
+
+    // Register-and-snapshot: register the stream BEFORE reading scrollback so
+    // any data the primary stream writes during our read lands in this
+    // stream's replayQueue. After the snapshot completes we drain the queue
+    // before claiming primary or attaching to the agent, so the byte order
+    // the browser sees is: historical chunks → bytes written during replay →
+    // live data from our own agent attach. Without this, fast output from
+    // another viewer's primary stream during a slow scrollback read would be
+    // silently missing from this browser's xterm scrollback (the row still
+    // exists in the DB but is invisible until next reconnect).
+    const streamId = `stream_${nextRequestId()}`;
+    const stream = {
+      ws,
+      userId,
+      deviceName: session.project.rootKey,
+      sessionId,
+      attached: false,
+      attachPromise: null,
+      cols,
+      rows,
+      readOnly,
+      // While true, terminal-data handlers also push data to replayQueue.
+      replaying: true,
+      replayQueue: [],
+      replayQueueBytes: 0,
+      replayQueueTruncated: false,
+      reattach: () => attachToAgent()
+    };
+    browserStreams.set(streamId, stream);
 
     // On mobile/saveData: send only the most recent ~500 lines of scrollback.
     // Otherwise replay everything (~10K-line cap from appendScrollback).
@@ -631,19 +700,17 @@ function createBroker({ prisma, wss }) {
       for (const chunk of chunks) sendOutput(ws, chunk.data);
     }
 
-    const streamId = `stream_${nextRequestId()}`;
-    const stream = {
-      ws,
-      userId,
-      deviceName: session.project.rootKey,
-      sessionId,
-      attached: false,
-      attachPromise: null,
-      cols,
-      rows,
-      reattach: () => attachToAgent()
-    };
-    browserStreams.set(streamId, stream);
+    // Drain the replay queue and exit replaying mode. The browser might have
+    // disconnected during the snapshot — bail out if so.
+    if (!browserStreams.has(streamId)) return;
+    stream.replaying = false;
+    if (stream.replayQueueTruncated) {
+      sendOutput(ws, '\r\n\x1b[2m[scrollback continuity gap during attach]\x1b[0m\r\n');
+    }
+    for (const queued of stream.replayQueue) sendOutput(ws, queued);
+    stream.replayQueue = [];
+    stream.replayQueueBytes = 0;
+
     claimPrimary(sessionId, streamId);
 
     async function markSessionStatus(status) {
@@ -678,7 +745,8 @@ function createBroker({ prisma, wss }) {
               ? session.project.ctrlSpawnCommand
               : (session.spawnCommand || session.project.agentSpawnCommand),
             cols: stream.cols,
-            rows: stream.rows
+            rows: stream.rows,
+            readOnly: stream.readOnly === true
           });
           if (attachResult?.tmuxName && attachResult.tmuxName !== session.tmuxName) {
             session.tmuxName = attachResult.tmuxName;
@@ -713,6 +781,7 @@ function createBroker({ prisma, wss }) {
         return;
       }
       if (msg.type === 'input') {
+        if (stream.readOnly) return;  // Read-only viewers never write to the PTY.
         if (!(await attachToAgent())) return;
         sendToAgent(userId, session.project.rootKey, 'terminal-input', { streamId, data: msg.data }, 1000).catch(() => {});
       }
@@ -725,6 +794,9 @@ function createBroker({ prisma, wss }) {
       }
       if (msg.type === 'kill' && session.tmuxManaged !== false && agentForUser(userId, session.project.rootKey)) {
         sendToAgent(userId, session.project.rootKey, 'tmux-kill-window', { tmuxName: session.tmuxName }, 5000).catch(() => {});
+      }
+      if (msg.type === 'claim-drive' && stream.attached && !stream.readOnly) {
+        sendToAgent(userId, session.project.rootKey, 'terminal-claim-drive', { streamId }, 1000).catch(() => {});
       }
       if (msg.type === 'pause') {
         // Browser tab/app is hidden — stop forwarding output. Buffer is

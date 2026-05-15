@@ -1,6 +1,6 @@
 'use client';
 
-import { memo, useEffect, useRef } from 'react';
+import { memo, useEffect, useRef, useState } from 'react';
 import type { ITheme, Terminal as XTerm } from '@xterm/xterm';
 import { cn, statusDot } from '@/lib/utils';
 
@@ -70,6 +70,11 @@ function TerminalPaneImpl({ sessionId, active, title, status, onTitleChange, hid
   const hostRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<XTerm | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
+  // Whether this browser is currently the "driver" (the only one whose
+  // keystrokes reach the PTY). Other readers can click "Take control" to
+  // claim drive. Read-only viewers stay read-only and have no button.
+  const [driver, setDriver] = useState(true);
+  const [readOnly, setReadOnly] = useState(false);
   // Capture latest onTitleChange so the xterm listener (set up once) always
   // invokes the current callback without rebinding the terminal.
   const onTitleChangeRef = useRef(onTitleChange);
@@ -137,6 +142,13 @@ function TerminalPaneImpl({ sessionId, active, title, status, onTitleChange, hid
         if (msg.type === 'output') term!.write(msg.data ?? ''); // legacy/control fallback
         if (msg.type === 'sleeping') term!.write(`\r\n${msg.message ?? 'Agent sleeping'}\r\n`);
         if (msg.type === 'exit') term!.write('\r\n[session ended]\r\n');
+        if (msg.type === 'driver-changed') {
+          // Multi-subscriber model: agent's SessionStream broadcasts on every
+          // driver change so each viewer knows whether they're driving or
+          // riding along. UI just reads two flags out of state.
+          setDriver(Boolean((msg as { driver?: unknown }).driver));
+          setReadOnly(Boolean((msg as { readOnly?: unknown }).readOnly));
+        }
       };
       ws.onclose = (event) => {
         if (disposed) return;
@@ -285,6 +297,13 @@ function TerminalPaneImpl({ sessionId, active, title, status, onTitleChange, hid
     };
   }, [active, sessionId]);
 
+  function claimDrive() {
+    const ws = wsRef.current;
+    if (ws?.readyState === WebSocket.OPEN && !readOnly) {
+      ws.send(JSON.stringify({ type: 'claim-drive' }));
+    }
+  }
+
   return (
     <section className={cn('flex min-h-0 flex-1 flex-col overflow-hidden bg-bg', !hideHeader && 'rounded-lg border border-line')}>
       {!hideHeader && (
@@ -293,7 +312,21 @@ function TerminalPaneImpl({ sessionId, active, title, status, onTitleChange, hid
             <span className={cn('h-1.5 w-1.5 rounded-full', statusDot(status))} />
             <span className="truncate font-medium">{title}</span>
           </div>
-          <span className="font-mono text-[10px] text-muted">{status ?? 'sleeping'}</span>
+          <div className="flex items-center gap-2">
+            {!driver && (
+              <button
+                type="button"
+                onClick={claimDrive}
+                disabled={readOnly}
+                className="inline-flex h-6 items-center gap-1 rounded border border-line bg-panel2 px-2 text-[10px] text-muted hover:text-text disabled:cursor-not-allowed disabled:opacity-60"
+                title={readOnly ? 'Read-only session' : 'Take keyboard control from the current driver'}
+              >
+                <span className="h-1.5 w-1.5 rounded-full bg-muted" />
+                {readOnly ? 'Read-only' : 'Take control'}
+              </button>
+            )}
+            <span className="font-mono text-[10px] text-muted">{status ?? 'sleeping'}</span>
+          </div>
         </header>
       )}
       <div ref={hostRef} className="min-h-0 flex-1 bg-bg" />

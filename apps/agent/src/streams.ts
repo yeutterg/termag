@@ -1,13 +1,9 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { mkdir, unlink } from 'node:fs/promises';
-import { createReadStream, type ReadStream } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { StringDecoder } from 'node:string_decoder';
+import { mkdir } from 'node:fs/promises';
 import WebSocket from 'ws';
-import * as pty from '@lydell/node-pty';
 import { wrapWithBanner } from './banner';
+import { destroyMatchingSessionStreams, SessionStream } from './session-stream';
 
 const execFileAsync = promisify(execFile);
 
@@ -15,6 +11,8 @@ export interface Stream {
   tmuxName: string;
   write(data: string): void;
   resize(cols: number, rows: number): void;
+  /** Promote this stream to driver. No-op for read-only subscribers. */
+  claimDrive?(): void;
   close(): void;
 }
 
@@ -29,6 +27,7 @@ export interface RealAttachOpts {
   spawnCommand: string;
   cols: number;
   rows: number;
+  readOnly?: boolean;
 }
 
 export interface FakeAttachOpts {
@@ -37,51 +36,6 @@ export interface FakeAttachOpts {
   tmuxName: string;
   kind: string;
   cwd: { rootKey?: string; relativePath?: string };
-}
-
-const FIFO_DIR = join(tmpdir(), 'termag-agent');
-
-// Pause the fifo reader when any subscriber's WebSocket has more than 1 MB
-// queued; resume when every subscriber drains below half. Without this, a
-// chatty agent on a saturated uplink would let the WS buffer grow until the
-// agent OOMs.
-const BACKPRESSURE_HIGH = 1024 * 1024;
-const BACKPRESSURE_LOW = BACKPRESSURE_HIGH / 2;
-const BACKPRESSURE_TICK_MS = 50;
-
-// Capture this many lines of pane history when a browser re-attaches to an
-// existing tmux session, so the user sees the agent's current screen state
-// instead of a blank pane while waiting for the next byte of live output.
-const REATTACH_HISTORY_LINES = 2000;
-
-type Subscriber = {
-  streamId: string;
-  ws: WebSocket;
-};
-
-type PipeReader = {
-  tmuxName: string;
-  fifoPath: string;
-  reader: ReadStream;
-  decoder: StringDecoder;
-  subscribers: Map<string, Subscriber>;
-  closed: boolean;
-};
-
-// Keyed by tmuxName, not by streamId — multiple browser tabs viewing the
-// same session share one pipe-pane and one fifo reader. tmux's pipe-pane
-// only allows ONE active pipe per pane, so we have to fan out on our side.
-const pipeReaders = new Map<string, PipeReader>();
-// Concurrent attaches to the same tmuxName share one in-flight startPipeReader
-// promise. Without this two attaches that interleave at an await would both
-// call mkfifo + pipe-pane and clobber each other's fifo path.
-const pendingPipeStarts = new Map<string, Promise<PipeReader>>();
-// Each fifo path includes a monotonic counter so a cleanup of a stale pipe
-// reader can never unlink the fifo of the next pipe reader to start.
-let pipeSeq = 0;
-
-async function ensureFifoDir() {
-  await mkdir(FIFO_DIR, { recursive: true, mode: 0o700 });
 }
 
 async function ensureTmuxSession(tmuxName: string, cwd: string, command: string): Promise<{ wasNew: boolean }> {
@@ -115,8 +69,12 @@ async function ensureTmuxSession(tmuxName: string, cwd: string, command: string)
 
 async function tmuxTargetExists(target: string): Promise<boolean> {
   try {
-    await execFileAsync('tmux', ['display-message', '-p', '-t', target, '#{session_name}']);
-    return true;
+    // display-message with a missing -t exits 0 with empty stdout on some
+    // tmux builds — checking the truthiness of the result is the only
+    // reliable signal. Without this, a fresh project (no tmux session yet)
+    // looks "exists already" and ensureTmuxTarget skips the create step.
+    const { stdout } = await execFileAsync('tmux', ['display-message', '-p', '-t', target, '#{session_name}']);
+    return stdout.trim().length > 0;
   } catch {
     return false;
   }
@@ -203,17 +161,9 @@ async function resolveTmuxSessionName(target: string): Promise<string> {
   return stdout.trim();
 }
 
-async function teardownMatchingPipeReaders(predicate: (tmuxName: string) => boolean) {
-  for (const [tmuxName, pipeReader] of [...pipeReaders.entries()]) {
-    if (!predicate(tmuxName)) continue;
-    pipeReaders.delete(tmuxName);
-    await teardownPipeReader(pipeReader, /* sendExit */ true);
-  }
-}
-
 export async function killTmuxSession(tmuxSessionName: string) {
   if (!tmuxSessionName) return;
-  await teardownMatchingPipeReaders((tmuxName) => tmuxName === tmuxSessionName || tmuxName.startsWith(`${tmuxSessionName}:`));
+  destroyMatchingSessionStreams((tmuxName) => tmuxName === tmuxSessionName || tmuxName.startsWith(`${tmuxSessionName}:`));
   try {
     await execFileAsync('tmux', ['kill-session', '-t', tmuxSessionName]);
   } catch {
@@ -223,7 +173,7 @@ export async function killTmuxSession(tmuxSessionName: string) {
 
 export async function killTmuxWindow(tmuxName: string) {
   if (!tmuxName) return;
-  await teardownMatchingPipeReaders((name) => name === tmuxName);
+  destroyMatchingSessionStreams((name) => name === tmuxName);
   try {
     await execFileAsync('tmux', ['kill-window', '-t', tmuxName]);
   } catch {
@@ -241,139 +191,11 @@ export async function renameTmuxWindow(tmuxName: string, name: string): Promise<
   };
 }
 
-function sendJson(ws: WebSocket, msg: Record<string, unknown>) {
-  if (ws.readyState === WebSocket.OPEN) {
-    ws.send(JSON.stringify(msg));
-  }
-}
-
 function sendData(ws: WebSocket, streamId: string, data: string) {
   if (data.length === 0) return;
-  sendJson(ws, { type: 'terminal-data', streamId, data });
-}
-
-// tmux targets can contain punctuation such as ":" or "@", so fifo filenames
-// use a sanitized display form. The pipe-pane command still gets shell-quoted
-// because tmux invokes it via /bin/sh -c.
-function shellQuoteForPipePane(value: string) {
-  return `'${value.replace(/'/g, "'\\''")}'`;
-}
-
-function safeFifoName(value: string) {
-  return value.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 120) || 'tmux';
-}
-
-async function startPipeReader(tmuxName: string): Promise<PipeReader> {
-  pipeSeq += 1;
-  const fifoPath = join(FIFO_DIR, `${safeFifoName(tmuxName)}-${process.pid}-${pipeSeq}.fifo`);
-  await unlink(fifoPath).catch(() => {});
-  await execFileAsync('mkfifo', ['-m', '600', fifoPath]);
-
-  // -O opens the pipe (replacing any prior one for this pane). The cat
-  // process tmux spawns blocks on opening the fifo for write until our
-  // createReadStream below opens the read side; the kernel rendezvous
-  // handles the order safely.
-  await execFileAsync('tmux', [
-    'pipe-pane', '-t', tmuxName, '-O', `cat > ${shellQuoteForPipePane(fifoPath)}`
-  ]);
-
-  const reader = createReadStream(fifoPath, { highWaterMark: 64 * 1024 });
-  const decoder = new StringDecoder('utf8');
-
-  const pipeReader: PipeReader = {
-    tmuxName,
-    fifoPath,
-    reader,
-    decoder,
-    subscribers: new Map(),
-    closed: false
-  };
-
-  let backpressureWatcher: NodeJS.Timeout | null = null;
-  function clearBackpressureWatcher() {
-    if (backpressureWatcher) {
-      clearInterval(backpressureWatcher);
-      backpressureWatcher = null;
-    }
+  if (ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ type: 'terminal-data', streamId, data }));
   }
-  function shouldPause(): boolean {
-    for (const sub of pipeReader.subscribers.values()) {
-      if (sub.ws.bufferedAmount > BACKPRESSURE_HIGH) return true;
-    }
-    return false;
-  }
-  function allDrained(): boolean {
-    for (const sub of pipeReader.subscribers.values()) {
-      if (sub.ws.bufferedAmount > BACKPRESSURE_LOW) return false;
-    }
-    return true;
-  }
-  function watchBackpressure() {
-    if (backpressureWatcher || pipeReader.closed) return;
-    backpressureWatcher = setInterval(() => {
-      if (pipeReader.closed) {
-        clearBackpressureWatcher();
-        return;
-      }
-      if (allDrained()) {
-        clearBackpressureWatcher();
-        reader.resume();
-      }
-    }, BACKPRESSURE_TICK_MS);
-  }
-
-  reader.on('data', (chunk) => {
-    if (pipeReader.closed) return;
-    const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-    const text = decoder.write(buf);
-    if (!text) return;
-    for (const sub of pipeReader.subscribers.values()) {
-      sendData(sub.ws, sub.streamId, text);
-    }
-    if (shouldPause()) {
-      reader.pause();
-      watchBackpressure();
-    }
-  });
-
-  const handleEnd = () => {
-    if (pipeReader.closed) return;
-    pipeReader.closed = true;
-    clearBackpressureWatcher();
-    // Notify every subscriber that the pane is gone.
-    for (const sub of pipeReader.subscribers.values()) {
-      sendJson(sub.ws, { type: 'terminal-exit', streamId: sub.streamId });
-    }
-    pipeReader.subscribers.clear();
-    pipeReaders.delete(tmuxName);
-    void cleanupPipeArtifacts(pipeReader);
-  };
-
-  reader.on('end', handleEnd);
-  reader.on('error', handleEnd);
-
-  return pipeReader;
-}
-
-async function cleanupPipeArtifacts(pipeReader: PipeReader) {
-  try { pipeReader.reader.destroy(); } catch { /* already destroyed */ }
-  // Toggle pipe-pane off (no -O = stop). Don't kill the tmux session itself
-  // — that's the whole point of using tmux. The session lives on so the
-  // user can re-attach later.
-  try { await execFileAsync('tmux', ['pipe-pane', '-t', pipeReader.tmuxName]); } catch { /* pane gone */ }
-  try { await unlink(pipeReader.fifoPath); } catch { /* already gone */ }
-}
-
-async function teardownPipeReader(pipeReader: PipeReader, sendExit: boolean) {
-  if (pipeReader.closed) return;
-  pipeReader.closed = true;
-  if (sendExit) {
-    for (const sub of pipeReader.subscribers.values()) {
-      sendJson(sub.ws, { type: 'terminal-exit', streamId: sub.streamId });
-    }
-  }
-  pipeReader.subscribers.clear();
-  await cleanupPipeArtifacts(pipeReader);
 }
 
 export async function attachReal(opts: RealAttachOpts): Promise<Stream> {
@@ -388,46 +210,45 @@ export async function attachReal(opts: RealAttachOpts): Promise<Stream> {
     await execFileAsync('tmux', ['rename-window', '-t', tmuxName, opts.tmuxWindowName]).catch(() => {});
   }
 
-  // A real tmux client is the only path that renders the browser exactly like
-  // a local terminal: pane borders, inactive panes, the status line, and tmux
-  // keybindings are all generated by tmux itself inside this PTY.
   if (!wasNew) await execFileAsync('tmux', ['select-window', '-t', tmuxName]).catch(() => {});
   await execFileAsync('tmux', ['set-option', '-t', tmuxSessionName, '-w', 'window-size', 'largest']).catch(() => {});
 
-  const term = pty.spawn('tmux', ['attach-session', '-t', tmuxSessionName], {
-    name: 'xterm-256color',
-    cols: opts.cols > 0 ? opts.cols : 80,
-    rows: opts.rows > 0 ? opts.rows : 24,
+  // SessionStream multiplexes one tmux client (one PTY) across every browser
+  // attached to this tmuxName. The wrapper returned below is just an adapter
+  // that routes per-stream input/resize/close into the shared SessionStream.
+  const sessionStream = SessionStream.getOrCreate(tmuxName, {
+    tmuxSessionName,
     cwd: opts.cwd,
-    env: {
-      ...process.env,
-      TERM: 'xterm-256color'
-    }
+    cols: opts.cols,
+    rows: opts.rows
+  });
+  sessionStream.subscribe({
+    streamId: opts.streamId,
+    ws: opts.ws,
+    cols: opts.cols,
+    rows: opts.rows,
+    readOnly: opts.readOnly === true
   });
 
-  const streamId = opts.streamId;
   let detached = false;
-  term.onData((data) => {
-    if (!detached) sendData(opts.ws, streamId, data);
-  });
-  term.onExit(() => {
-    if (!detached) sendJson(opts.ws, { type: 'terminal-exit', streamId });
-  });
-
   return {
     tmuxName,
     write(data: string) {
       if (detached || !data) return;
-      term.write(data);
+      sessionStream.writeInput(opts.streamId, data);
     },
     resize(cols: number, rows: number) {
       if (detached || cols <= 0 || rows <= 0) return;
-      term.resize(cols, rows);
+      sessionStream.resize(opts.streamId, cols, rows);
+    },
+    claimDrive() {
+      if (detached) return;
+      sessionStream.claimDrive(opts.streamId);
     },
     close() {
       if (detached) return;
       detached = true;
-      term.kill();
+      sessionStream.unsubscribe(opts.streamId);
     }
   };
 }
