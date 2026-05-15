@@ -23,6 +23,16 @@ const isFake = process.env.TERMAG_AGENT_FAKE === 'true';
 const tag = isFake ? 'fake-agent' : 'agent';
 const insecureLocalTls = process.env.TERMAG_TLS_INSECURE_SKIP_VERIFY === 'true';
 
+// tmux's display-message replaces non-printable bytes in format output with
+// '_' when running under a POSIX (non-UTF-8) locale. Our parser splits on
+// 0x1f (Unit Separator), so a missing locale silently corrupts every
+// `#{window_*}` field lookup. This bites agents launched from launchd /
+// cron / containers where LANG isn't inherited. Backfill a sensible default
+// before any child process spawns.
+if (!process.env.LANG && !process.env.LC_ALL && !process.env.LC_CTYPE) {
+  process.env.LANG = 'en_US.UTF-8';
+}
+
 const PING_INTERVAL_MS = 30_000;
 const PONG_TIMEOUT_MS = 60_000;
 // Health interval is configurable so cellular-tethered agents can dial it
@@ -193,6 +203,10 @@ async function runConnect(args: string[]) {
     }];
 
   const publishUrl = publishUrlFromAgentUrl(validatedUrl);
+  // Publish is best-effort: a local tmux session is useful even when the
+  // broker is unreachable (Caddy down, agent token expired, offline laptop).
+  // Logging the failure and continuing lets the user still land in the new
+  // tmux session — they can re-publish later by re-running `termag connect`.
   try {
     const result = await postJson(
       publishUrl,
@@ -221,20 +235,22 @@ async function runConnect(args: string[]) {
     } else {
       console.log(`[${tag}] published ${what} "${tmux.sessionName}" to project "${connectArgs.projectName}" (${added} tab${added === 1 ? '' : 's'}).`);
     }
-    if (tmux.createdFromShell) {
-      const action = tmux.createdSession ? 'created tmux session' : tmux.createdWindow ? 'created tmux window in existing session' : 'using existing tmux window';
-      console.log(`[${tag}] ${action} "${tmux.sessionName}" at ${tmux.currentWindow.path}. Attach locally with: tmux attach -t ${shellArgForLog(tmux.sessionName)}`);
-    }
-    if (connectArgs.startAgent) {
-      startBackgroundAgent();
-    }
-    if (shouldAttachLocal(connectArgs, tmux)) {
-      const code = await attachLocalTmux(tmux);
-      process.exit(code);
-    }
   } catch (err) {
-    console.error(`[${tag}] ${err instanceof Error ? formatConnectionError(err, publishUrl) : String(err)}`);
-    process.exit(1);
+    const msg = err instanceof Error ? formatConnectionError(err, publishUrl) : String(err);
+    console.warn(`[${tag}] could not publish to ${publishUrl.origin}: ${msg}`);
+    console.warn(`[${tag}] tmux session "${tmux.sessionName}" is local-only until the broker is reachable. Re-run termag connect after fixing the URL/token.`);
+  }
+
+  if (tmux.createdFromShell) {
+    const action = tmux.createdSession ? 'created tmux session' : tmux.createdWindow ? 'created tmux window in existing session' : 'using existing tmux window';
+    console.log(`[${tag}] ${action} "${tmux.sessionName}" at ${tmux.currentWindow.path}. Attach locally with: tmux attach -t ${shellArgForLog(tmux.sessionName)}`);
+  }
+  if (connectArgs.startAgent) {
+    startBackgroundAgent();
+  }
+  if (shouldAttachLocal(connectArgs, tmux)) {
+    const code = await attachLocalTmux(tmux);
+    process.exit(code);
   }
 }
 
