@@ -24,7 +24,12 @@ export async function listDirectory(
   options: { includeHidden?: boolean; includeFiles?: boolean } = {}
 ): Promise<DirectoryListing> {
   const root = roots[rootKey];
-  if (!root) throw new Error(`Unknown root ${rootKey}`);
+  if (!root) {
+    if (Object.keys(roots).length === 0) {
+      throw new Error('No agent roots configured. Set TERMAG_AGENT_ROOTS or add agentRoots to ~/.termag/config.json.');
+    }
+    throw new Error(`Unknown root "${rootKey}". Available roots: ${Object.keys(roots).map((k) => `"${k}"`).join(', ')}.`);
+  }
 
   const resolvedRoot = path.resolve(root);
   const normalizedRelative = normalizeRelative(relativePath);

@@ -416,8 +416,19 @@ function createBroker({ prisma, wss }) {
 
     const deviceName = record.name || 'Local device';
     const existing = agentsForUser(record.userId).get(deviceName);
-    if (existing?.ws.readyState === WebSocket.OPEN) {
-      existing.ws.close(1000, WS_REPLACED_REASON);
+    if (existing) {
+      // Eagerly reject any in-flight requests pinned to the outgoing agent.
+      // Without this they would block on their own 15s timeout — long enough
+      // for browser attaches issued during the replacement window to feel
+      // frozen even though the new agent is already up.
+      for (const pending of existing.pending.values()) {
+        clearTimeout(pending.timer);
+        pending.reject(new Error('Agent replaced by a newer connection'));
+      }
+      existing.pending.clear();
+      if (existing.ws.readyState === WebSocket.OPEN) {
+        existing.ws.close(1000, WS_REPLACED_REASON);
+      }
     }
 
     const agent = { ws, userId: record.userId, deviceName, tokenId: record.id, pending: new Map(), lastSeenAt: new Date(), health: null };

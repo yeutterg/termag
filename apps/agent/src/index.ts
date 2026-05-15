@@ -83,8 +83,6 @@ if (subcommand === 'update') {
   void runConnect(argv.slice(1));
 } else if (subcommand === 'new') {
   void runConnect(argv.slice(1), { forceNew: true });
-} else if (subcommand === 'here' || subcommand === 'publish') {
-  void runConnect(argv.slice(1));
 } else if (subcommand === 'adopt') {
   const args = argv.slice(1);
   const hasMode = args.some((arg) => arg === '--session' || arg === '--all' || arg === '-a' || arg === '--window');
@@ -101,6 +99,13 @@ if (subcommand === 'update') {
   void runConnect(argv);
 } else if (subcommand?.startsWith('-')) {
   console.error(`[${tag}] Unknown option: ${subcommand}`);
+  printHelp();
+  process.exit(1);
+} else if (subcommand) {
+  // Unknown positional subcommand. Refuse rather than silently running the
+  // daemon — typos like `termag publish` or `termag run` used to start the
+  // long-running agent and look like a hang.
+  console.error(`[${tag}] Unknown command: ${subcommand}`);
   printHelp();
   process.exit(1);
 } else {
@@ -1044,7 +1049,12 @@ function connect(validatedUrl: URL, token: string) {
           const requestedRootKey = typeof msg.rootKey === 'string' && msg.rootKey ? msg.rootKey : Object.keys(roots)[0] || '';
           const requestedRelative = typeof msg.relativePath === 'string' ? msg.relativePath : '';
           if (!requestedRootKey || !roots[requestedRootKey]) {
-            respond(ws, requestId, { roots, entries: [] }, `Unknown root ${requestedRootKey}`);
+            // Match the wording from fs.ts so users get the same explanation
+            // regardless of which code path rejected them.
+            const message = Object.keys(roots).length === 0
+              ? 'No agent roots configured. Set TERMAG_AGENT_ROOTS or add agentRoots to ~/.termag/config.json.'
+              : `Unknown root "${requestedRootKey}". Available roots: ${Object.keys(roots).map((k) => `"${k}"`).join(', ')}.`;
+            respond(ws, requestId, { roots, entries: [] }, message);
             break;
           }
           const listing = await listDirectory(roots, requestedRootKey, requestedRelative);
@@ -1316,7 +1326,16 @@ function resolveCwd(cwd?: Json) {
   const rootKey = String(cwd?.rootKey || Object.keys(roots)[0] || 'Local device');
   const relativePath = normalizeRelativeCwd(String(cwd?.relativePath || ''));
   const root = roots[rootKey];
-  if (!root) throw new Error(`Unknown root ${rootKey}`);
+  if (!root) {
+    if (Object.keys(roots).length === 0) {
+      throw new Error(
+        'No agent roots configured. Set TERMAG_AGENT_ROOTS (e.g. \'{"laptop":"~/Projects"}\') in env, or add agentRoots to ~/.termag/config.json via `termag config migrate`.'
+      );
+    }
+    throw new Error(
+      `Unknown root "${rootKey}". This agent has these roots configured: ${Object.keys(roots).map((k) => `"${k}"`).join(', ')}.`
+    );
+  }
   const resolvedRoot = path.resolve(root);
   const resolvedPath = path.resolve(resolvedRoot, relativePath);
   if (!pathIsInsidePath(resolvedPath, resolvedRoot)) {

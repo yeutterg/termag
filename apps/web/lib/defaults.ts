@@ -28,7 +28,10 @@ export const AGENT_DEFAULTS = {
 
 export type AgentType = keyof typeof AGENT_DEFAULTS;
 
-export const DEFAULT_AGENT_TYPE: AgentType = 'codex';
+// Keep in sync with NewProjectDialog's defaultChecked agent — direct API
+// callers (e.g. `curl POST /api/projects` without agents) and the dialog
+// both land on the same default so the experience is consistent.
+export const DEFAULT_AGENT_TYPE: AgentType = 'shell';
 const DEFAULT_ROOTS: Record<string, string> = {};
 
 export function agentSpawnCommand(agentType: string): string {
