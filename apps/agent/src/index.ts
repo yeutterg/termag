@@ -1208,10 +1208,11 @@ async function handleAttach(ws: WebSocket, msg: Json) {
   const cols = terminalDimension(msg.cols, 80, 20, 500);
   const rows = terminalDimension(msg.rows, 24, 5, 200);
   const readOnly = msg.readOnly === true;
+  const replayRecent = msg.replayRecent === true;
   const cwd = createMode === 'none' ? process.cwd() : resolveCwd(msg.cwd as Json | undefined);
   if (!tmuxName) throw new Error('tmuxName is required');
 
-  const stream = await attachReal({ ws, streamId, tmuxName, tmuxSessionName, tmuxWindowName, createMode, cwd, spawnCommand, cols, rows, readOnly });
+  const stream = await attachReal({ ws, streamId, tmuxName, tmuxSessionName, tmuxWindowName, createMode, cwd, spawnCommand, cols, rows, readOnly, replayRecent });
   streams.set(streamId, stream);
   return { tmuxName: stream.tmuxName };
 }

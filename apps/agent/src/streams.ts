@@ -28,6 +28,8 @@ export interface RealAttachOpts {
   cols: number;
   rows: number;
   readOnly?: boolean;
+  /** Replay the SessionStream's recent-output ring buffer on subscribe. */
+  replayRecent?: boolean;
 }
 
 export interface FakeAttachOpts {
@@ -227,7 +229,8 @@ export async function attachReal(opts: RealAttachOpts): Promise<Stream> {
     ws: opts.ws,
     cols: opts.cols,
     rows: opts.rows,
-    readOnly: opts.readOnly === true
+    readOnly: opts.readOnly === true,
+    replayRecent: opts.replayRecent === true
   });
 
   let detached = false;

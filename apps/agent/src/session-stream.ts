@@ -27,6 +27,13 @@ export type SubscriberOptions = {
   cols: number;
   rows: number;
   readOnly?: boolean;
+  /**
+   * If true, send the recent-output ring buffer to this subscriber on join.
+   * Use this only when no other subscriber has been attached recently —
+   * otherwise the bytes are already in the broker's DB scrollback and the
+   * subscriber would see them twice (DB chunks + recent buffer overlap).
+   */
+  replayRecent?: boolean;
 };
 
 export type SessionSpawnOptions = {
@@ -97,11 +104,14 @@ export class SessionStream {
       lastInputAt: 0
     };
     this.subscribers.set(sub.streamId, sub);
-    // Catch the late joiner up with whatever output is still in the ring.
-    // Sends one message per chunk to preserve the original write boundaries
-    // (matters for partial-escape-sequence handling on the browser side).
-    for (const chunk of this.recentBuffer) {
-      this.sendDataTo(sub, chunk.toString('utf8'));
+    // Recent-output replay: only fire when the broker says nobody else was
+    // attached, i.e. there's no primary writing the same bytes to the DB.
+    // The default path (broker has another subscriber attached) gets a
+    // clean stream — the broker's DB scrollback already covered history.
+    if (opts.replayRecent) {
+      for (const chunk of this.recentBuffer) {
+        this.sendDataTo(sub, chunk.toString('utf8'));
+      }
     }
     // First non-read-only subscriber becomes driver automatically.
     if (!this.driverId && !sub.readOnly) {
@@ -132,7 +142,6 @@ export class SessionStream {
     const sub = this.subscribers.get(streamId);
     if (!sub || sub.readOnly || !data) return false;
     const now = Date.now();
-    sub.lastInputAt = now;
     if (this.driverId !== streamId) {
       // Grace window: only steal driver if there is no current driver, or the
       // current driver has been idle for DRIVER_GRACE_MS. Stops two people
@@ -144,6 +153,11 @@ export class SessionStream {
       if (!driverIdle) return false;
       this.setDriver(streamId);
     }
+    // Only record the timestamp on accepted input. Recording it on dropped
+    // input would muddy future driver-idle checks if this subscriber later
+    // gets promoted via setDriver (their lastInputAt would predate the
+    // promotion).
+    sub.lastInputAt = now;
     this.pty.write(data);
     return true;
   }
@@ -159,11 +173,34 @@ export class SessionStream {
   claimDrive(streamId: string): void {
     const sub = this.subscribers.get(streamId);
     if (!sub || sub.readOnly) return;
+    // Reset the claimer's input timestamp so they get the full grace window
+    // immediately — otherwise another subscriber could steal the wheel on
+    // their next keystroke (now - lastInputAt would be huge against a
+    // never-typed claimer).
+    sub.lastInputAt = Date.now();
     this.setDriver(streamId);
   }
 
   hasSubscribers(): boolean {
     return this.subscribers.size > 0;
+  }
+
+  /**
+   * External-trigger cleanup — used when the underlying tmux target is
+   * killed by something other than the PTY exiting (e.g. the menu helper or
+   * the cleanup API). Notifies every subscriber, removes the stream from
+   * the registry, and kills the PTY explicitly so we don't burn CPU
+   * processing output for a subscriberless session while we wait for the
+   * upstream tmux death to ripple back to us.
+   */
+  terminate(): void {
+    this.handleExit();
+    try {
+      this.pty.kill();
+    } catch {
+      // Already exited (the normal path — tmux upstream kill caused
+      // pty.onExit which already called handleExit).
+    }
   }
 
   private setDriver(streamId: string | null): void {
@@ -224,7 +261,13 @@ export class SessionStream {
   private sendDataTo(sub: Subscriber, data: string): void {
     if (!data) return;
     if (sub.ws.readyState !== WebSocket.OPEN) return;
-    sub.ws.send(JSON.stringify({ type: 'terminal-data', streamId: sub.streamId, data }));
+    try {
+      sub.ws.send(JSON.stringify({ type: 'terminal-data', streamId: sub.streamId, data }));
+    } catch {
+      // The socket may have transitioned to a non-OPEN state between the
+      // readyState check and the send. Drop the frame; the subscriber will
+      // be removed by closeStream when the WS close finishes propagating.
+    }
   }
 
   private scheduleIdleTeardown(): void {
@@ -264,7 +307,7 @@ export function destroyMatchingSessionStreams(predicate: (tmuxName: string) => b
   for (const [tmuxName, stream] of [...sessionStreams.entries()]) {
     if (!predicate(tmuxName)) continue;
     sessionStreams.delete(tmuxName);
-    stream['handleExit']();
+    stream.terminate();
   }
 }
 

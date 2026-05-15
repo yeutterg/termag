@@ -70,11 +70,11 @@ function TerminalPaneImpl({ sessionId, active, title, status, onTitleChange, hid
   const hostRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<XTerm | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
-  // Whether this browser is currently the "driver" (the only one whose
-  // keystrokes reach the PTY). Other readers can click "Take control" to
-  // claim drive. Read-only viewers stay read-only and have no button.
-  const [driver, setDriver] = useState(true);
-  const [readOnly, setReadOnly] = useState(false);
+  // Driver/read-only state is null until the agent's first driver-changed
+  // message arrives, so we don't render a stale "Take control" badge during
+  // the brief reconnect window. After the first message lands, we trust the
+  // agent and re-render on every update.
+  const [driverState, setDriverState] = useState<{ driver: boolean; readOnly: boolean } | null>(null);
   // Capture latest onTitleChange so the xterm listener (set up once) always
   // invokes the current callback without rebinding the terminal.
   const onTitleChangeRef = useRef(onTitleChange);
@@ -120,8 +120,20 @@ function TerminalPaneImpl({ sessionId, active, title, status, onTitleChange, hid
         }
         const justReconnected = reconnectAttempts > 0;
         reconnectAttempts = 0;
+        // Driver state is unknown until the agent's first driver-changed
+        // message lands. Showing the previous connection's state would be
+        // misleading after a reconnect (drive likely went to someone else).
+        setDriverState(null);
         fitAddon?.fit();
         ws.send(JSON.stringify({ type: 'resize', cols: term!.cols, rows: term!.rows }));
+        // If the tab was hidden when we opened (background tab, page-restore,
+        // visibility flicker mid-handshake), the visibilitychange event
+        // already fired before the WS was open and was dropped. Send the
+        // pause now so the broker isn't burning bandwidth on an offscreen
+        // viewer.
+        if (document.visibilityState === 'hidden') {
+          ws.send(JSON.stringify({ type: 'pause' }));
+        }
         // Only steal focus on the initial connect — yanking focus mid-typing
         // when the broker hiccups would be infuriating.
         if (!justReconnected) term!.focus();
@@ -146,8 +158,10 @@ function TerminalPaneImpl({ sessionId, active, title, status, onTitleChange, hid
           // Multi-subscriber model: agent's SessionStream broadcasts on every
           // driver change so each viewer knows whether they're driving or
           // riding along. UI just reads two flags out of state.
-          setDriver(Boolean((msg as { driver?: unknown }).driver));
-          setReadOnly(Boolean((msg as { readOnly?: unknown }).readOnly));
+          setDriverState({
+            driver: Boolean((msg as { driver?: unknown }).driver),
+            readOnly: Boolean((msg as { readOnly?: unknown }).readOnly)
+          });
         }
       };
       ws.onclose = (event) => {
@@ -299,10 +313,13 @@ function TerminalPaneImpl({ sessionId, active, title, status, onTitleChange, hid
 
   function claimDrive() {
     const ws = wsRef.current;
-    if (ws?.readyState === WebSocket.OPEN && !readOnly) {
+    if (ws?.readyState === WebSocket.OPEN && !driverState?.readOnly) {
       ws.send(JSON.stringify({ type: 'claim-drive' }));
     }
   }
+
+  const showBadge = driverState !== null && !driverState.driver;
+  const isReadOnly = driverState?.readOnly === true;
 
   return (
     <section className={cn('flex min-h-0 flex-1 flex-col overflow-hidden bg-bg', !hideHeader && 'rounded-lg border border-line')}>
@@ -313,16 +330,16 @@ function TerminalPaneImpl({ sessionId, active, title, status, onTitleChange, hid
             <span className="truncate font-medium">{title}</span>
           </div>
           <div className="flex items-center gap-2">
-            {!driver && (
+            {showBadge && (
               <button
                 type="button"
                 onClick={claimDrive}
-                disabled={readOnly}
+                disabled={isReadOnly}
                 className="inline-flex h-6 items-center gap-1 rounded border border-line bg-panel2 px-2 text-[10px] text-muted hover:text-text disabled:cursor-not-allowed disabled:opacity-60"
-                title={readOnly ? 'Read-only session' : 'Take keyboard control from the current driver'}
+                title={isReadOnly ? 'Read-only session' : 'Take keyboard control from the current driver'}
               >
                 <span className="h-1.5 w-1.5 rounded-full bg-muted" />
-                {readOnly ? 'Read-only' : 'Take control'}
+                {isReadOnly ? 'Read-only' : 'Take control'}
               </button>
             )}
             <span className="font-mono text-[10px] text-muted">{status ?? 'sleeping'}</span>

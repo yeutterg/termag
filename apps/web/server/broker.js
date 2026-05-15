@@ -500,15 +500,20 @@ function createBroker({ prisma, wss }) {
         const stream = browserStreams.get(msg.streamId);
         if (!streamBelongsToAgent(stream, record.userId, deviceName) || typeof msg.data !== 'string') return;
         bufferAndFlush(stream, msg.data);
-        // Replay-queue support: any other stream of the same sessionId that's
-        // still mid-snapshot-replay needs to receive these bytes too, after
-        // it finishes draining its DB snapshot. See registerBrowser comment.
-        for (const other of browserStreams.values()) {
-          if (other === stream || !other.replaying) continue;
-          if (other.sessionId !== stream.sessionId) continue;
-          pushReplayQueue(other, msg.data);
-        }
+        // Replay-queue + scrollback writes are gated on the primary check.
+        // With the multi-subscriber model the agent emits one terminal-data
+        // per attached browser for every PTY byte, so N subscribers means N
+        // copies of the same bytes arrive here. Only one of those streamIds
+        // is primary at a time; running the writes for all of them would
+        // (a) write each byte N times to the DB and (b) push N copies into
+        // any same-session replaying stream's queue, giving the late-joiner
+        // N copies of the output.
         if (sessionPrimary.get(stream.sessionId) === msg.streamId) {
+          for (const other of browserStreams.values()) {
+            if (other === stream || !other.replaying) continue;
+            if (other.sessionId !== stream.sessionId) continue;
+            pushReplayQueue(other, msg.data);
+          }
           appendScrollback(prisma, stream.sessionId, msg.data).catch((err) => console.error('[scrollback]', err.message));
         }
         return;
@@ -730,6 +735,20 @@ function createBroker({ prisma, wss }) {
       if (stream.attachPromise) return stream.attachPromise;
       stream.attachPromise = (async () => {
         try {
+          // replayRecent: only true when no other browser is attached or
+          // mid-attach for this session at the moment we send terminal-
+          // attach. If someone else is already there, the DB scrollback we
+          // just replayed already covers the recent bytes, and the agent's
+          // recent-output ring would duplicate them. The valuable case is
+          // the idle-window reattach where no primary was writing during
+          // the gap — the agent's ring is the only place that data lives.
+          // Counting `attachPromise` too catches the post-agent-restart
+          // reattach storm where every stream is mid-flight simultaneously.
+          const anotherAttached = [...browserStreams.values()].some(
+            (other) => other !== stream
+              && other.sessionId === sessionId
+              && (other.attached || other.attachPromise)
+          );
           const attachResult = await sendToAgent(userId, session.project.rootKey, 'terminal-attach', {
             streamId,
             sessionId,
@@ -746,7 +765,8 @@ function createBroker({ prisma, wss }) {
               : (session.spawnCommand || session.project.agentSpawnCommand),
             cols: stream.cols,
             rows: stream.rows,
-            readOnly: stream.readOnly === true
+            readOnly: stream.readOnly === true,
+            replayRecent: !anotherAttached
           });
           if (attachResult?.tmuxName && attachResult.tmuxName !== session.tmuxName) {
             session.tmuxName = attachResult.tmuxName;
@@ -756,11 +776,33 @@ function createBroker({ prisma, wss }) {
             }).catch(() => {});
           }
           stream.attached = true;
+          // Claim primary lazily: covers the case where the previous primary
+          // failed to reattach and cleared the slot. Without this, our
+          // terminal-data would fan out fine but never make it into the DB
+          // scrollback because the primary check would be against a dead
+          // streamId.
+          if (!sessionPrimary.has(sessionId)) {
+            sessionPrimary.set(sessionId, streamId);
+          }
           await markSessionStatus('idle');
           sendJson(ws, { type: 'ready' });
           return true;
         } catch {
           stream.attached = false;
+          // If we were holding the primary slot but failed to attach (e.g.
+          // tmux session was destroyed during agent restart), hand it off
+          // to another already-attached stream — or clear the slot so the
+          // next successful attach can claim it. Otherwise scrollback
+          // writes block forever on a dead primary.
+          if (sessionPrimary.get(sessionId) === streamId) {
+            sessionPrimary.delete(sessionId);
+            for (const [otherId, other] of browserStreams) {
+              if (other.sessionId === sessionId && other.attached) {
+                sessionPrimary.set(sessionId, otherId);
+                break;
+              }
+            }
+          }
           await markSessionStatus('sleeping');
           sendJson(ws, { type: 'sleeping', message: 'Agent offline; open termag on your laptop to reconnect.' });
           return false;
