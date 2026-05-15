@@ -19,7 +19,7 @@ services:
       GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
       GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
       TERMAG_ALLOWED_EMAIL: ${TERMAG_ALLOWED_EMAIL:-}
-      TERMAG_ROOTS: '${TERMAG_ROOTS:-{"Local device":"~/Code"}}'
+      TERMAG_ROOTS: '${TERMAG_ROOTS:-{}}'
     volumes:
       - termag-data:/data
     expose:

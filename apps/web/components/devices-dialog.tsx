@@ -38,6 +38,15 @@ type MissingTarget = {
   tmuxName: string;
 };
 
+function rootHintForDevice(device?: AgentDeviceStatus) {
+  const roots = device?.roots ? Object.values(device.roots).filter((value) => typeof value === 'string' && value.trim().length > 0) : [];
+  return roots[0] || '<project-root>';
+}
+
+function shellSingleQuoteContent(value: string) {
+  return value.replace(/'/g, "'\\''");
+}
+
 export function DevicesDialog({ open, onOpenChange, user, devices, knownDeviceNames = [], projects = [], focusedDevice, onTokenDeleted, onAddDevice, onCleanup }: DevicesDialogProps) {
   const [tokens, setTokens] = useState<Token[]>([]);
   const [copied, setCopied] = useState('');
@@ -181,10 +190,11 @@ export function DevicesDialog({ open, onOpenChange, user, devices, knownDeviceNa
               const missingTargets = device?.connected && device.tmuxSessions
                 ? missingTargetsForDevice(name, tmuxSessions, projects)
                 : [];
+              const rootsJson = JSON.stringify({ [name]: rootHintForDevice(device) });
               const envTemplate = [
                 'export TERMAG_URL=wss://<your-termag-host>/api/ws/agent',
                 'export TERMAG_AGENT_TOKEN=tmag_REPLACE_WITH_DEVICE_TOKEN',
-                `export TERMAG_AGENT_ROOTS='{"${name.replace(/"/g, '\\"')}":"~/Code"}'`
+                `export TERMAG_AGENT_ROOTS='${shellSingleQuoteContent(rootsJson)}'`
               ].join('\n');
               const connectCommand = `termag connect`;
               const sessionCommand = `termag connect --project "My Project" --session`;

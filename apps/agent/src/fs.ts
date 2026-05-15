@@ -1,4 +1,4 @@
-import { readdir, stat } from 'node:fs/promises';
+import { readdir, realpath, stat } from 'node:fs/promises';
 import path from 'node:path';
 
 export type DirectoryEntry = {
@@ -36,6 +36,14 @@ export async function listDirectory(
     throw new Error(`Path escapes root ${rootKey}`);
   }
 
+  const [realRoot, realDirectory] = await Promise.all([
+    realpath(resolvedRoot),
+    realpath(absolutePath)
+  ]);
+  if (!pathIsInside(realDirectory, realRoot)) {
+    throw new Error(`Path escapes root ${rootKey}`);
+  }
+
   const dirents = await readdir(absolutePath, { withFileTypes: true });
   dirents.sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }));
 
@@ -54,8 +62,9 @@ export async function listDirectory(
     let isDir = dirent.isDirectory();
     if (!isDir && dirent.isSymbolicLink()) {
       try {
-        const target = await stat(path.join(absolutePath, dirent.name));
-        if (target.isDirectory()) isDir = true;
+        const entryPath = path.join(absolutePath, dirent.name);
+        const [target, realTarget] = await Promise.all([stat(entryPath), realpath(entryPath)]);
+        if (target.isDirectory() && pathIsInside(realTarget, realRoot)) isDir = true;
       } catch {
         continue;
       }
@@ -80,17 +89,25 @@ export async function listDirectory(
 }
 
 function normalizeRelative(value: string): string {
-  return value
+  const parts = value
     .replace(/\\/g, '/')
     .replace(/\/+/g, '/')
     .replace(/^\/+/, '')
     .replace(/\/+$/, '')
     .split('/')
-    .filter((part) => part && part !== '.' && part !== '..')
-    .join('/');
+    .filter(Boolean);
+  if (parts.some((part) => part === '..')) {
+    throw new Error('Path escapes root');
+  }
+  return parts.filter((part) => part !== '.').join('/');
 }
 
 function parentRelative(value: string): string {
   const idx = value.lastIndexOf('/');
   return idx >= 0 ? value.slice(0, idx) : '';
+}
+
+function pathIsInside(candidate: string, root: string): boolean {
+  const relative = path.relative(root, candidate);
+  return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
 }

@@ -15,7 +15,12 @@ const PREVIEW_EMAIL = (
   || process.env.TERMAG_DEV_AUTH_EMAIL
   || 'trusted@termag.local'
 ).toLowerCase().trim();
-const PREVIEW_TOKEN = process.env.TERMAG_PREVIEW_AGENT_TOKEN || 'tmag_preview_local_agent_token';
+const PREVIEW_DEVICE_NAME = (process.env.TERMAG_PREVIEW_DEVICE_NAME || 'Preview device').trim();
+const PREVIEW_TOKEN = process.env.TERMAG_PREVIEW_AGENT_TOKEN?.trim();
+if (!PREVIEW_TOKEN) {
+  console.error('Set TERMAG_PREVIEW_AGENT_TOKEN before running preview seed, for example: TERMAG_PREVIEW_AGENT_TOKEN="tmag_$(openssl rand -hex 32)" npm run preview:seed -w apps/web');
+  process.exit(1);
+}
 
 const CLAUDE_SPAWN = 'claude --dangerously-skip-permissions';
 const CODEX_SPAWN = 'codex --dangerously-bypass-approvals-and-sandbox';
@@ -78,7 +83,7 @@ async function ensureProject(user, spec, openedAt) {
   const project = await prisma.project.upsert({
     where: { userId_name: { userId: user.id, name: spec.name } },
     update: {
-      rootKey: 'MacBook Pro',
+      rootKey: PREVIEW_DEVICE_NAME,
       relativePath: spec.relativePath,
       agentType: spec.agentType,
       agentSpawnCommand: spec.agentSpawnCommand,
@@ -88,7 +93,7 @@ async function ensureProject(user, spec, openedAt) {
     create: {
       userId: user.id,
       name: spec.name,
-      rootKey: 'MacBook Pro',
+      rootKey: PREVIEW_DEVICE_NAME,
       relativePath: spec.relativePath,
       agentType: spec.agentType,
       agentSpawnCommand: spec.agentSpawnCommand,
@@ -159,8 +164,8 @@ async function main() {
   const tokenPrefix = `${PREVIEW_TOKEN.slice(0, 13)}...`;
   await prisma.agentToken.upsert({
     where: { tokenHash: hashToken(PREVIEW_TOKEN) },
-    update: { userId: user.id, name: 'Preview fake agent', tokenPrefix, revokedAt: null },
-    create: { userId: user.id, name: 'Preview fake agent', tokenHash: hashToken(PREVIEW_TOKEN), tokenPrefix }
+    update: { userId: user.id, name: PREVIEW_DEVICE_NAME, tokenPrefix, revokedAt: null },
+    create: { userId: user.id, name: PREVIEW_DEVICE_NAME, tokenHash: hashToken(PREVIEW_TOKEN), tokenPrefix }
   });
 
   const now = Date.now();
@@ -169,7 +174,8 @@ async function main() {
   }
 
   console.log(`Preview user: ${PREVIEW_EMAIL}`);
-  console.log(`Preview agent token: ${PREVIEW_TOKEN}`);
+  console.log(`Preview device: ${PREVIEW_DEVICE_NAME}`);
+  console.log(`Preview agent token prefix: ${tokenPrefix}`);
 }
 
 main()

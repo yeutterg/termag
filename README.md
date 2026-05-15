@@ -107,7 +107,7 @@ NEXTAUTH_URL=http://localhost
 # NEXTAUTH_URL=https://termag.tailnet
 
 NEXTAUTH_SECRET=<paste output of openssl above>
-TERMAG_ROOTS={"MacBook Pro":"~/Code"}
+TERMAG_ROOTS={"<device-name>":"<project-root>"}
 # leave TERMAG_TRUSTED_NETWORK=true (the default)
 ```
 
@@ -150,7 +150,7 @@ Edit `infra/.env`:
 TERMAG_HOST=termag.example.com
 NEXTAUTH_URL=https://termag.example.com
 NEXTAUTH_SECRET=<paste output of openssl above>
-TERMAG_ROOTS={"MacBook Pro":"~/Code"}
+TERMAG_ROOTS={"<device-name>":"<project-root>"}
 
 TERMAG_TRUSTED_NETWORK=false
 GOOGLE_CLIENT_ID=...
@@ -171,7 +171,7 @@ Put these variables in `infra/.env` for Docker Compose, or in `apps/web/.env.loc
 
 ### 2. Create One Token Per Device
 
-In the web UI, click `+` → **New Device**. Name the physical device, for example `MacBook Pro`, `Mac Mini`, `Hetzner VPS`, or `homelab`, then create the token. The raw token is shown once and includes a copy button.
+In the web UI, click `+` → **New Device**. Name the physical device, for example `laptop`, `workstation`, `vps`, or `homelab`, then create the token. The raw token is shown once and includes a copy button.
 
 ### 3. Install An Agent On Each Device
 
@@ -192,13 +192,13 @@ Configure the agent:
 ```bash
 export TERMAG_URL=wss://termag.example.com/api/ws/agent
 export TERMAG_AGENT_TOKEN=tmag_...
-export TERMAG_AGENT_ROOTS='{"MacBook Pro":"~/Code"}'
+export TERMAG_AGENT_ROOTS='{"<device-name>":"<project-root>"}'
 ```
 
-Use your broker URL for `TERMAG_URL`; examples are below. The key in `TERMAG_AGENT_ROOTS` must match the device name you created in the web UI. If the UI device is `MacBook Pro M1`, use:
+Use your broker URL for `TERMAG_URL`; examples are below. The key in `TERMAG_AGENT_ROOTS` must match the device name you created in the web UI. If the UI device is `workstation`, use:
 
 ```bash
-export TERMAG_AGENT_ROOTS='{"MacBook Pro M1":"~/Code"}'
+export TERMAG_AGENT_ROOTS='{"workstation":"~/Projects"}'
 ```
 
 Run it:
@@ -244,7 +244,7 @@ A complete local Docker agent config looks like:
 ```bash
 export TERMAG_URL=wss://localhost/api/ws/agent
 export TERMAG_AGENT_TOKEN=tmag_...
-export TERMAG_AGENT_ROOTS='{"MacBook Pro M1":"~/Code"}'
+export TERMAG_AGENT_ROOTS='{"workstation":"~/Projects"}'
 export TERMAG_TLS_INSECURE_SKIP_VERIFY=true
 ```
 
@@ -252,7 +252,7 @@ Add more devices by creating one token per device, installing the agent on that 
 
 ### 4. Create Or Attach Projects
 
-Click `+` → **New Project**. Select the device, enter the project directory, for example `~/Code/termag-next`, then choose agents. The built-in checkboxes include **Claude Code**, **Claude Code YOLO**, **Codex**, and **Codex YOLO**. Add any other agent command in the text box, one command per line. Termag-next creates one terminal window per selected or typed agent.
+Click `+` → **New Project**. Select the device, enter the project directory, then choose agents. The built-in checkboxes include **Claude Code**, **Claude Code YOLO**, **Codex**, and **Codex YOLO**. Add any other agent command in the text box, one command per line. Termag-next creates one terminal window per selected or typed agent.
 
 New projects map to tmux sessions. Each terminal tab in that project maps to a tmux window in the same session, so the same workspace can still be inspected or recovered with native tmux.
 
@@ -293,7 +293,7 @@ Configure a local agent in another shell:
 ```bash
 export TERMAG_URL=ws://localhost:3000/api/ws/agent
 export TERMAG_AGENT_TOKEN=tmag_...
-export TERMAG_AGENT_ROOTS='{"Local device":"~/Code"}'
+export TERMAG_AGENT_ROOTS='{"local":"~/Projects"}'
 ```
 
 Run it:
@@ -305,6 +305,7 @@ npm run agent
 Preview the UI without tmux:
 
 ```bash
+export TERMAG_PREVIEW_AGENT_TOKEN="tmag_$(openssl rand -hex 32)"
 DATABASE_URL='file:./dev.db' npm run preview:seed -w apps/web
 npm run dev
 ```
@@ -313,7 +314,7 @@ Then configure the fake agent in another shell:
 
 ```bash
 export TERMAG_URL='ws://localhost:3000/api/ws/agent'
-export TERMAG_AGENT_TOKEN='tmag_preview_local_agent_token'
+export TERMAG_AGENT_TOKEN="$TERMAG_PREVIEW_AGENT_TOKEN"
 ```
 
 Run it:

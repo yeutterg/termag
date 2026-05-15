@@ -4,7 +4,7 @@ import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import os from 'node:os';
 import path from 'node:path';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync, realpathSync } from 'node:fs';
 import http from 'node:http';
 import https from 'node:https';
 import type { RequestOptions as HttpsRequestOptions } from 'node:https';
@@ -121,7 +121,7 @@ per-invocation overrides; the file is read when they are absent.
 Environment overrides:
   TERMAG_URL                wss://… or ws://localhost… of /api/ws/agent
   TERMAG_AGENT_TOKEN        bearer token created in the web New Device dialog
-  TERMAG_AGENT_ROOTS        JSON map of device labels to roots, e.g. {"Mac Mini":"~/Code"}
+  TERMAG_AGENT_ROOTS        JSON map of device labels to roots, e.g. {"laptop":"~/Projects"}
   TERMAG_TLS_INSECURE_SKIP_VERIFY
                             allow self-signed localhost TLS only (default false)
   TERMAG_RECONNECT_MS       initial reconnect delay (default 1000)
@@ -202,6 +202,13 @@ type TmuxWindowInfo = {
   name: string;
   target: string;
   path: string;
+};
+
+type TmuxSessionSnapshot = {
+  name: string;
+  path?: string;
+  windowCount?: number;
+  windows: Array<{ index: number; id: string; name: string; target: string; path?: string }>;
 };
 
 type TmuxContext = {
@@ -615,7 +622,7 @@ function defaultShellTabName() {
 
 function publishPathForCwd(cwd: string): string | undefined {
   const absoluteCwd = path.resolve(expandRoot(cwd));
-  const candidates = Object.entries(parseRoots(process.env.TERMAG_AGENT_ROOTS))
+  const candidates = Object.entries(roots)
     .map(([rootKey, rootPath]) => ({ rootKey, rootPath: path.resolve(expandRoot(rootPath)) }))
     .sort((a, b) => b.rootPath.length - a.rootPath.length);
 
@@ -811,11 +818,15 @@ function postJson(url: URL, token: string, payload: unknown, skipTlsVerify: bool
 async function run() {
   announceMigration();
   const creds = resolveCredentials();
-  const termagUrl = creds.url || (isFake ? 'ws://localhost:3000/api/ws/agent' : undefined);
-  const token = creds.token || (isFake ? 'tmag_preview_local_agent_token' : undefined);
+  const termagUrl = creds.url;
+  const token = creds.token;
 
   if (!termagUrl || !token) {
-    console.error('No termag credentials found. Set TERMAG_URL + TERMAG_AGENT_TOKEN in env, or run `termag config migrate` to seed ~/.termag/config.json.');
+    if (isFake) {
+      console.error('No termag credentials found. For fake mode, set TERMAG_URL and TERMAG_AGENT_TOKEN to a preview token created by the web app or preview seed.');
+    } else {
+      console.error('No termag credentials found. Set TERMAG_URL + TERMAG_AGENT_TOKEN in env, or run `termag config migrate` to seed ~/.termag/config.json.');
+    }
     process.exit(1);
   }
 
@@ -904,12 +915,15 @@ function nextReconnectDelay() {
 
 function connect(validatedUrl: URL, token: string) {
   const url = new URL(validatedUrl.toString());
-  url.searchParams.set('token', token);
+  const wsOptions = {
+    headers: { authorization: `Bearer ${token}` },
+    ...(insecureLocalTls && validatedUrl.protocol === 'wss:' && isLocalHost(validatedUrl.hostname)
+      ? { rejectUnauthorized: false }
+      : {})
+  };
   const ws = new WebSocket(
     url,
-    insecureLocalTls && validatedUrl.protocol === 'wss:' && isLocalHost(validatedUrl.hostname)
-      ? { rejectUnauthorized: false }
-      : undefined
+    wsOptions
   );
 
   // Heartbeat: ping every 30s, expect pong within PONG_TIMEOUT. Silent NAT
@@ -1146,8 +1160,8 @@ async function handleAttach(ws: WebSocket, msg: Json) {
   const rawCreateMode = String(msg.createMode || 'session');
   const createMode = rawCreateMode === 'none' || rawCreateMode === 'window' ? rawCreateMode : 'session';
   const spawnCommand = String(msg.spawnCommand || '$SHELL');
-  const cols = Number(msg.cols || 80);
-  const rows = Number(msg.rows || 24);
+  const cols = terminalDimension(msg.cols, 80, 20, 500);
+  const rows = terminalDimension(msg.rows, 24, 5, 200);
   const cwd = createMode === 'none' ? process.cwd() : resolveCwd(msg.cwd as Json | undefined);
   if (!tmuxName) throw new Error('tmuxName is required');
 
@@ -1156,7 +1170,7 @@ async function handleAttach(ws: WebSocket, msg: Json) {
   return { tmuxName: stream.tmuxName };
 }
 
-async function listTmuxSessions() {
+async function listTmuxSessions(): Promise<TmuxSessionSnapshot[]> {
   let sessionStdout = '';
   try {
     const result = await execFileAsync('tmux', ['list-sessions', '-F', '#{session_name}\t#{session_path}\t#{session_windows}']);
@@ -1219,27 +1233,40 @@ async function listTmuxSessions() {
 }
 
 function fakeTmuxSessions() {
-  return [
-    {
-      name: 'restful-esp32',
-      path: '~/Code/Restful-ESP32',
-      windowCount: 2,
-      windows: [
-        { index: 0, id: '@101', name: 'codex', target: '@101', path: '~/Code/Restful-ESP32' },
-        { index: 1, id: '@102', name: 'gemini', target: '@102', path: '~/Code/Restful-ESP32' }
-      ]
-    },
-    {
-      name: 'home-server',
-      path: '~/Code/home-server',
-      windowCount: 1,
-      windows: [
-        { index: 0, id: '@103', name: 'claude', target: '@103', path: '~/Code/home-server' }
-      ]
-    }
-  ];
+  const raw = process.env.TERMAG_FAKE_TMUX_SESSIONS;
+  if (!raw?.trim()) return [];
+  try {
+    return normalizeFakeTmuxSessions(JSON.parse(raw));
+  } catch {
+    console.warn(`[${tag}] ignoring invalid TERMAG_FAKE_TMUX_SESSIONS JSON`);
+    return [];
+  }
 }
 
+function normalizeFakeTmuxSessions(input: unknown): TmuxSessionSnapshot[] {
+  const sessions = Array.isArray(input) ? input : [];
+  return sessions.map((rawSession) => {
+    const session = rawSession as Record<string, unknown>;
+    const rawWindows = Array.isArray(session.windows) ? session.windows : [];
+    const windows = rawWindows
+      .map((rawWindow) => {
+        const window = rawWindow as Record<string, unknown>;
+        return {
+          index: Number.isFinite(Number(window.index)) ? Number(window.index) : 0,
+          id: typeof window.id === 'string' ? window.id : '',
+          name: typeof window.name === 'string' ? window.name : '',
+          target: typeof window.target === 'string' ? window.target : '',
+          path: typeof window.path === 'string' ? window.path : undefined
+        };
+      }).filter((window) => window.target || window.id || window.name);
+    return {
+      name: typeof session.name === 'string' ? session.name : '',
+      path: typeof session.path === 'string' ? session.path : undefined,
+      windowCount: Number.isFinite(Number(session.windowCount)) ? Number(session.windowCount) : windows.length,
+      windows
+    };
+  }).filter((session) => session.name);
+}
 function writeInput(msg: Json) {
   const stream = streams.get(String(msg.streamId || ''));
   const data = typeof msg.data === 'string' ? msg.data : '';
@@ -1249,9 +1276,15 @@ function writeInput(msg: Json) {
 function resizeStream(msg: Json) {
   const stream = streams.get(String(msg.streamId || ''));
   if (!stream) return;
-  const cols = Number(msg.cols || 0);
-  const rows = Number(msg.rows || 0);
+  const cols = terminalDimension(msg.cols, 0, 20, 500);
+  const rows = terminalDimension(msg.rows, 0, 5, 200);
   stream.resize(cols, rows);
+}
+
+function terminalDimension(value: unknown, fallback: number, min: number, max: number) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.min(max, Math.max(min, Math.floor(parsed)));
 }
 
 function closeStream(streamId: string) {
@@ -1263,19 +1296,56 @@ function closeStream(streamId: string) {
 
 function resolveCwd(cwd?: Json) {
   const rootKey = String(cwd?.rootKey || Object.keys(roots)[0] || 'Local device');
-  const relativePath = String(cwd?.relativePath || '').replace(/^\/+/, '');
+  const relativePath = normalizeRelativeCwd(String(cwd?.relativePath || ''));
   const root = roots[rootKey];
   if (!root) throw new Error(`Unknown root ${rootKey}`);
   const resolvedRoot = path.resolve(root);
   const resolvedPath = path.resolve(resolvedRoot, relativePath);
-  if (resolvedPath !== resolvedRoot && !resolvedPath.startsWith(`${resolvedRoot}${path.sep}`)) {
+  if (!pathIsInsidePath(resolvedPath, resolvedRoot)) {
     throw new Error(`Path escapes root ${rootKey}`);
   }
+  ensureRealPathInsideRoot(resolvedPath, resolvedRoot, rootKey);
   return resolvedPath;
 }
 
+function normalizeRelativeCwd(input: string) {
+  const parts = input
+    .replace(/\\/g, '/')
+    .replace(/^\/+/, '')
+    .split('/')
+    .filter(Boolean);
+  if (parts.some((part) => part === '..')) {
+    throw new Error('Path escapes root');
+  }
+  return parts.filter((part) => part !== '.').join(path.sep);
+}
+
+function ensureRealPathInsideRoot(resolvedPath: string, resolvedRoot: string, rootKey: string) {
+  const realRoot = realpathSync(resolvedRoot);
+  const nearest = nearestExistingPath(resolvedPath);
+  const realNearest = realpathSync(nearest);
+  if (!pathIsInsidePath(realNearest, realRoot)) {
+    throw new Error(`Path escapes root ${rootKey}`);
+  }
+}
+
+function nearestExistingPath(target: string) {
+  let current = target;
+  while (!existsSync(current)) {
+    const parent = path.dirname(current);
+    if (parent === current) return current;
+    current = parent;
+  }
+  return current;
+}
+
+function pathIsInsidePath(child: string, parent: string) {
+  const relative = path.relative(parent, child);
+  return relative === '' || (!!relative && !relative.startsWith('..') && !path.isAbsolute(relative));
+}
+
 function parseRoots(raw?: string): Record<string, string> {
-  const fallback = { 'Local device': path.join(os.homedir(), 'Code') };
+  const fallback = {};
   if (!raw) return fallback;
   try {
     const parsed = JSON.parse(raw) as Record<string, string>;

@@ -22,6 +22,7 @@ const handle = app.getRequestHandler();
 const prisma = new PrismaClient();
 const pidFile = path.join(__dirname, '.termag-server.json');
 let httpServer;
+const AGENT_TOKEN_MAX_LENGTH = 512;
 
 function writePidFile() {
   fs.writeFileSync(
@@ -52,6 +53,44 @@ function shutdown() {
   }
   httpServer.close(() => process.exit(0));
   setTimeout(() => process.exit(0), 5000).unref();
+}
+
+function rejectUpgrade(socket, statusCode, message) {
+  socket.write(`HTTP/1.1 ${statusCode} ${message}\r\nConnection: close\r\n\r\n`);
+  socket.destroy();
+}
+
+function hostFromOrigin(value) {
+  if (!value) return '';
+  const trimmed = value.trim();
+  if (!trimmed) return '';
+  try {
+    return new URL(trimmed).host;
+  } catch {
+    return trimmed.replace(/^https?:\/\//i, '').replace(/\/.*$/, '');
+  }
+}
+
+function allowedBrowserOriginHosts() {
+  const values = [
+    process.env.NEXTAUTH_URL,
+    ...(process.env.TERMAG_ALLOWED_ORIGINS || '').split(',')
+  ];
+  return new Set(values.map(hostFromOrigin).filter(Boolean));
+}
+
+function browserOriginAllowed(req) {
+  const origin = req.headers.origin;
+  if (!origin) return true;
+  const originHost = hostFromOrigin(origin);
+  if (!originHost) return false;
+  if (originHost === req.headers.host) return true;
+  return allowedBrowserOriginHosts().has(originHost);
+}
+
+function agentTokenFromRequest(url, req) {
+  const bearer = req.headers.authorization?.replace(/^Bearer\s+/i, '').trim();
+  return bearer || url.searchParams.get('token') || '';
 }
 
 process.once('exit', removePidFile);
@@ -90,10 +129,14 @@ app.prepare().then(() => {
       });
       return;
     }
+    if (url.pathname !== '/api/ws/agent' && !browserOriginAllowed(req)) {
+      rejectUpgrade(socket, 403, 'Forbidden');
+      return;
+    }
     wss.handleUpgrade(req, socket, head, (ws) => {
       if (url.pathname === '/api/ws/agent') {
-        const token = url.searchParams.get('token') || req.headers.authorization?.replace(/^Bearer\s+/i, '');
-        if (!token) {
+        const token = agentTokenFromRequest(url, req);
+        if (!token || token.length > AGENT_TOKEN_MAX_LENGTH) {
           ws.close(1008, 'token required');
           return;
         }

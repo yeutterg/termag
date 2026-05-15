@@ -24,7 +24,7 @@ export const AGENT_DEFAULTS = {
 export type AgentType = keyof typeof AGENT_DEFAULTS;
 
 export const DEFAULT_AGENT_TYPE: AgentType = 'codex';
-const DEFAULT_ROOTS = { 'Local device': '~/Code' };
+const DEFAULT_ROOTS: Record<string, string> = {};
 
 export function agentSpawnCommand(agentType: string): string {
   return AGENT_DEFAULTS[agentType as AgentType]?.spawn ?? AGENT_DEFAULTS[DEFAULT_AGENT_TYPE].spawn;

@@ -32,7 +32,7 @@ Use WSL. tmux doesn't run on native Windows; the agent assumes a Unix tmux.
 ```bash
 export TERMAG_URL=wss://termag.example.com/api/ws/agent
 export TERMAG_AGENT_TOKEN=tmag_...
-export TERMAG_AGENT_ROOTS='{"MacBook Pro":"~/Code","homelab":"~/homelab"}'
+export TERMAG_AGENT_ROOTS='{"laptop":"~/Projects","homelab":"~/homelab"}'
 ```
 
 Generate `TERMAG_AGENT_TOKEN` in the web app from `+` → **New Device**.
@@ -49,7 +49,7 @@ export TERMAG_TLS_INSECURE_SKIP_VERIFY=true
 | --- | --- | --- |
 | `TERMAG_URL` | Broker WebSocket URL | (required) |
 | `TERMAG_AGENT_TOKEN` | Bearer token from the web New Device dialog | (required) |
-| `TERMAG_AGENT_ROOTS` | JSON map of device labels to root paths | `{"Local device":"~/Code"}` |
+| `TERMAG_AGENT_ROOTS` | JSON map of device labels to root paths | none; configure explicitly |
 | `TERMAG_TLS_INSECURE_SKIP_VERIFY` | Allow self-signed `wss://localhost` certs only | `false` |
 | `TERMAG_RECONNECT_MS` | Initial reconnect delay (ms) | `1000` |
 | `TERMAG_RECONNECT_MAX_MS` | Max reconnect delay (ms) | `30000` |

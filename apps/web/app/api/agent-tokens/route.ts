@@ -31,6 +31,13 @@ export const POST = withAuth(async (user, request: Request) => {
   if (!parsed.success) {
     return NextResponse.json({ error: 'Invalid token payload' }, { status: 400 });
   }
+  const existing = await prisma.agentToken.findFirst({
+    where: { userId: user.id, name: parsed.data.name, revokedAt: null },
+    select: { id: true }
+  });
+  if (existing) {
+    return NextResponse.json({ error: 'A device with that name already has an active token' }, { status: 409 });
+  }
   const raw = createRawToken();
   const token = await prisma.agentToken.create({
     data: {

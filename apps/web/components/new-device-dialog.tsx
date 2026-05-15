@@ -69,7 +69,7 @@ export function NewDeviceDialog({ open, onOpenChange, onCreated }: NewDeviceDial
               type="text"
               autoFocus
               autoComplete="off"
-              placeholder="MacBook Pro, Mac Mini, Hetzner VPS, homelab"
+              placeholder="laptop, workstation, vps, homelab"
               className="h-9 w-full rounded-md border border-line bg-bg px-3 text-sm outline-none focus:border-accent"
             />
           </label>

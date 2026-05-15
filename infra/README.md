@@ -13,7 +13,7 @@ TERMAG_TRUSTED_NETWORK=false
 GOOGLE_CLIENT_ID=...
 GOOGLE_CLIENT_SECRET=...
 TERMAG_ALLOWED_EMAIL=...
-TERMAG_ROOTS={"Mac Mini":"~/Code"}
+TERMAG_ROOTS={"laptop":"~/Projects"}
 ```
 
 3. Start the stack:
@@ -27,7 +27,7 @@ docker compose --env-file .env -f infra/docker-compose.yml up -d --build
 ```bash
 TERMAG_URL=wss://termag.example.com/api/ws/agent \
 TERMAG_AGENT_TOKEN=tmag_... \
-TERMAG_AGENT_ROOTS='{"Mac Mini":"~/Code"}' \
+TERMAG_AGENT_ROOTS='{"laptop":"~/Projects"}' \
 termag
 ```
 

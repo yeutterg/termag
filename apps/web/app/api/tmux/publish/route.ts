@@ -27,7 +27,7 @@ function bearerToken(request: Request) {
 
 export async function POST(request: Request) {
   const rawToken = bearerToken(request);
-  if (!rawToken) {
+  if (!rawToken || rawToken.length > 512) {
     return NextResponse.json({ error: 'Missing agent token' }, { status: 401 });
   }
 

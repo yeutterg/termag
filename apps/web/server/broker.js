@@ -6,6 +6,9 @@ const { appendScrollback } = require('./scrollback');
 // Wire-protocol constant shared with the agent. Keep in sync with
 // apps/agent/src/index.ts → WS_REPLACED_REASON.
 const WS_REPLACED_REASON = 'replaced';
+const AGENT_TOKEN_MIN_LENGTH = 16;
+const AGENT_TOKEN_MAX_LENGTH = 512;
+const VALID_SESSION_STATUSES = new Set(['idle', 'working', 'waiting', 'error', 'sleeping']);
 
 function sendJson(ws, msg) {
   if (ws.readyState === WebSocket.OPEN) {
@@ -84,6 +87,12 @@ function trustedUserEmail() {
     || process.env.TERMAG_ALLOWED_EMAIL?.toLowerCase().trim()
     || 'trusted@termag.local'
   );
+}
+
+function terminalDimension(value, fallback, min, max) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.min(max, Math.max(min, Math.floor(parsed)));
 }
 
 function passwordGateEnabled() {
@@ -174,6 +183,10 @@ function createBroker({ prisma, wss }) {
         })).filter((window) => window.target || window.id || window.name)
         : []
     })).filter((session) => session.name);
+  }
+
+  function streamBelongsToAgent(stream, userId, deviceName) {
+    return stream?.userId === userId && stream.deviceName === deviceName;
   }
 
   function connectedAgents(userId) {
@@ -383,6 +396,10 @@ function createBroker({ prisma, wss }) {
   }
 
   async function registerAgent(ws, token) {
+    if (typeof token !== 'string' || token.length < AGENT_TOKEN_MIN_LENGTH || token.length > AGENT_TOKEN_MAX_LENGTH) {
+      ws.close(1008, 'invalid token');
+      return;
+    }
     const record = await prisma.agentToken.findFirst({
       where: { tokenHash: hashToken(token), revokedAt: null },
       include: { user: true }
@@ -453,7 +470,7 @@ function createBroker({ prisma, wss }) {
 
       if (msg.type === 'terminal-data' && msg.streamId) {
         const stream = browserStreams.get(msg.streamId);
-        if (!stream) return;
+        if (!streamBelongsToAgent(stream, record.userId, deviceName) || typeof msg.data !== 'string') return;
         bufferAndFlush(stream, msg.data);
         if (sessionPrimary.get(stream.sessionId) === msg.streamId) {
           appendScrollback(prisma, stream.sessionId, msg.data).catch((err) => console.error('[scrollback]', err.message));
@@ -463,7 +480,7 @@ function createBroker({ prisma, wss }) {
 
       if (msg.type === 'terminal-exit' && msg.streamId) {
         const stream = browserStreams.get(msg.streamId);
-        if (stream) {
+        if (streamBelongsToAgent(stream, record.userId, deviceName)) {
           stream.attached = false;
           sendJson(stream.ws, { type: 'exit' });
           await prisma.session.update({
@@ -486,16 +503,20 @@ function createBroker({ prisma, wss }) {
       }
 
       if (msg.type === 'status' && msg.sessionId && msg.status) {
-        const updated = await prisma.session.update({
-          where: { id: msg.sessionId },
+        if (!VALID_SESSION_STATUSES.has(msg.status)) return;
+        const session = await prisma.session.findFirst({
+          where: { id: msg.sessionId, project: { userId: record.userId, rootKey: deviceName } },
+          select: { id: true, tabId: true, projectId: true }
+        }).catch(() => null);
+        if (!session) return;
+        await prisma.session.update({
+          where: { id: session.id },
           data: { status: msg.status, lastSeenAt: new Date() }
         }).catch(() => {});
-        if (updated?.tabId) {
-          await prisma.tab.update({ where: { id: updated.tabId }, data: { status: msg.status } }).catch(() => {});
+        if (session.tabId) {
+          await prisma.tab.update({ where: { id: session.tabId }, data: { status: msg.status } }).catch(() => {});
         }
-        if (updated?.projectId) {
-          await updateProjectStatus(updated.projectId);
-        }
+        await updateProjectStatus(session.projectId);
         broadcastStatus(record.userId, true);
       }
     });
@@ -545,8 +566,8 @@ function createBroker({ prisma, wss }) {
     }
 
     const sessionId = url.searchParams.get('sessionId');
-    const cols = Number(url.searchParams.get('cols') || 80);
-    const rows = Number(url.searchParams.get('rows') || 24);
+    const cols = terminalDimension(url.searchParams.get('cols'), 80, 20, 500);
+    const rows = terminalDimension(url.searchParams.get('rows'), 24, 5, 200);
     // Mobile / save-data hints. Browser appends `&saveData=1` when the user
     // is on a metered connection or iOS Low Data Mode; UA detects phones.
     const ua = req.headers['user-agent'] || '';
@@ -685,12 +706,10 @@ function createBroker({ prisma, wss }) {
         sendToAgent(userId, session.project.rootKey, 'terminal-input', { streamId, data: msg.data }, 1000).catch(() => {});
       }
       if (msg.type === 'resize') {
-        if (typeof msg.cols === 'number' && typeof msg.rows === 'number') {
-          stream.cols = msg.cols;
-          stream.rows = msg.rows;
-        }
+        stream.cols = terminalDimension(msg.cols, stream.cols, 20, 500);
+        stream.rows = terminalDimension(msg.rows, stream.rows, 5, 200);
         if (stream.attached) {
-          sendToAgent(userId, session.project.rootKey, 'terminal-resize', { streamId, cols: msg.cols, rows: msg.rows }, 1000).catch(() => {});
+          sendToAgent(userId, session.project.rootKey, 'terminal-resize', { streamId, cols: stream.cols, rows: stream.rows }, 1000).catch(() => {});
         }
       }
       if (msg.type === 'kill' && session.tmuxManaged !== false && agentForUser(userId, session.project.rootKey)) {

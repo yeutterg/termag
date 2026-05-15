@@ -87,15 +87,13 @@ export function migrateEnvToConfig(): { migrated: boolean; path: string; fields:
 
 /**
  * Env wins when set (explicit per-invocation overrides), file is the
- * persistent default, fake-mode preview tokens are filled in at the call
- * site.
+ * persistent default.
  */
 export function resolveCredentials(): ResolvedCredentials {
   const cfg = loadConfig();
   const url = (process.env.TERMAG_URL?.trim() || cfg.url?.trim() || undefined);
   const token = (
     process.env.TERMAG_AGENT_TOKEN?.trim()
-    || process.env.TERMAG_PREVIEW_AGENT_TOKEN?.trim()
     || cfg.agentToken?.trim()
     || undefined
   );
