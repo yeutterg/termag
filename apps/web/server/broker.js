@@ -132,6 +132,27 @@ function passwordCookieValid(cookies) {
 }
 
 async function userIdFromRequest(req, prisma) {
+  // Bearer token (CLI / non-browser clients) — checked first so a session
+  // cookie left behind in a terminal session doesn't take precedence over
+  // the explicit Authorization header that termag attach / list pass.
+  const authHeader = req.headers.authorization || req.headers.Authorization;
+  if (typeof authHeader === 'string') {
+    const match = /^Bearer\s+(.+)$/i.exec(authHeader);
+    const bearer = match?.[1]?.trim();
+    if (bearer && bearer.length >= AGENT_TOKEN_MIN_LENGTH && bearer.length <= AGENT_TOKEN_MAX_LENGTH) {
+      const record = await prisma.agentToken.findFirst({
+        where: { tokenHash: hashToken(bearer), revokedAt: null },
+        select: { id: true, userId: true }
+      });
+      if (record) {
+        prisma.agentToken.update({
+          where: { id: record.id },
+          data: { lastUsedAt: new Date() }
+        }).catch(() => {});
+        return record.userId;
+      }
+    }
+  }
   if (trustedNetworkEnabled()) {
     if (!passwordCookieValid(parseCookieHeader(req.headers.cookie))) return null;
     const user = await prisma.user.upsert({

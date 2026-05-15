@@ -173,6 +173,39 @@ export async function currentUser() {
   return prisma.user.findUnique({ where: { id: userId } });
 }
 
+/**
+ * Bearer-token auth for the CLI / non-browser clients. Caller passes the
+ * raw token from `Authorization: Bearer …`; if it matches an unrevoked
+ * AgentToken row, we return its User. Used by `termag list` and
+ * `termag attach` so a CLI on any device with the agent token can reach
+ * the broker without a session cookie.
+ */
+export async function userFromBearerToken(token: string | undefined) {
+  if (!token) return null;
+  const trimmed = token.trim();
+  if (trimmed.length < 16 || trimmed.length > 512) return null;
+  // Local import to avoid a top-level cycle (tokens.ts imports nothing).
+  const { hashToken } = await import('./tokens');
+  const record = await prisma.agentToken.findFirst({
+    where: { tokenHash: hashToken(trimmed), revokedAt: null },
+    include: { user: true }
+  });
+  if (!record) return null;
+  // Refresh lastUsedAt so the Devices dialog reflects CLI activity too.
+  prisma.agentToken.update({
+    where: { id: record.id },
+    data: { lastUsedAt: new Date() }
+  }).catch(() => {});
+  return record.user;
+}
+
+function extractBearerToken(request: Request | { headers: { get(name: string): string | null } }): string | undefined {
+  const header = request.headers.get('authorization');
+  if (!header) return undefined;
+  const match = /^Bearer\s+(.+)$/i.exec(header);
+  return match?.[1]?.trim();
+}
+
 function unauthorized() {
   return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 }
@@ -187,6 +220,18 @@ export function withAuth<TArgs extends unknown[]>(
   handler: (user: User, ...args: TArgs) => Promise<Response> | Response
 ): (...args: TArgs) => Promise<Response> {
   return async (...args: TArgs) => {
+    // Try Bearer token first when a Request is available — keeps the CLI's
+    // Authorization header from being defeated by a stray session cookie in
+    // some terminal setups. Browser callers don't send Bearer, so they fall
+    // through to currentUser() as before.
+    const maybeRequest = args.find((arg): arg is Request => arg instanceof Request);
+    if (maybeRequest) {
+      const token = extractBearerToken(maybeRequest);
+      if (token) {
+        const tokenUser = await userFromBearerToken(token);
+        if (tokenUser) return handler(tokenUser, ...args);
+      }
+    }
     const user = await currentUser();
     if (!user) return unauthorized();
     return handler(user, ...args);

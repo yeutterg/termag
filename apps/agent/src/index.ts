@@ -87,6 +87,10 @@ if (subcommand === 'update') {
   const args = argv.slice(1);
   const hasMode = args.some((arg) => arg === '--session' || arg === '--all' || arg === '-a' || arg === '--window');
   void runConnect(hasMode ? args : [...args, '--session']);
+} else if (subcommand === 'list' || subcommand === 'ls') {
+  void runList(argv.slice(1));
+} else if (subcommand === 'attach') {
+  void runAttach(argv.slice(1));
 } else if (subcommand === 'config') {
   void runConfig(argv.slice(1));
 } else if (subcommand === '--version' || subcommand === '-v') {
@@ -120,6 +124,8 @@ Usage:
   termag connect      publish current tmux window/session to the web UI
   termag new          start a tmux-backed shell here and publish it
   termag adopt        publish every window in the current tmux session
+  termag list         list devices and projects across the broker
+  termag attach       attach this terminal to a remote tmux session
   termag -p/--project shorthand for "termag connect --project"
   termag config show  print the resolved configuration (token masked)
   termag config migrate
@@ -177,6 +183,320 @@ async function runConfig(args: string[]) {
   console.error(`Unknown config subcommand: ${subcommand}. Try 'show' or 'migrate'.`);
   process.exit(1);
 }
+
+type CliTabEntry = {
+  id: string;
+  name: string;
+  status: string;
+  sessionId: string | null;
+};
+type CliProjectEntry = {
+  id: string;
+  name: string;
+  rootKey: string;
+  relativePath: string;
+  status: string;
+  tabs: CliTabEntry[];
+};
+type CliDeviceEntry = {
+  name: string;
+  connected: boolean;
+  version: string | null;
+  projects: CliProjectEntry[];
+  rawTmuxSessions: Array<{ name: string; windowCount: number; path: string | null }>;
+};
+type CliState = { devices: CliDeviceEntry[] };
+
+async function fetchCliState(): Promise<{ state: CliState; baseUrl: URL }> {
+  announceMigration();
+  const creds = resolveCredentials();
+  if (!creds.url || !creds.token) {
+    throw new Error('No termag credentials found. Set TERMAG_URL + TERMAG_AGENT_TOKEN in env, or run `termag config migrate` to seed ~/.termag/config.json.');
+  }
+  const validated = validateUrl(creds.url);
+  const stateUrl = httpUrlFromAgentUrl(validated, '/api/cli/state');
+  const skipTls = insecureLocalTls && stateUrl.protocol === 'https:' && isLocalHost(stateUrl.hostname);
+  const json = await getJson(stateUrl, creds.token, skipTls);
+  return { state: json as unknown as CliState, baseUrl: validated };
+}
+
+async function runList(_args: string[]) {
+  let state: CliState;
+  try {
+    ({ state } = await fetchCliState());
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    const code = err && typeof err === 'object' && typeof (err as NodeError).code === 'string'
+      ? (err as NodeError).code
+      : '';
+    const display = message?.trim() || code || 'request failed';
+    console.error(`[${tag}] ${display}`);
+    process.exit(1);
+  }
+  if (state.devices.length === 0) {
+    console.log('No devices configured yet. Create one in the web UI Devices dialog.');
+    return;
+  }
+  for (const device of state.devices) {
+    const flag = device.connected ? '\x1b[32m●\x1b[0m' : '\x1b[2m○\x1b[0m';
+    const versionLabel = device.version ? ` v${device.version}` : '';
+    const stateLabel = device.connected ? 'connected' : 'offline';
+    console.log(`${flag} \x1b[1m${device.name}\x1b[0m  \x1b[2m${stateLabel}${versionLabel}\x1b[0m`);
+    if (device.projects.length === 0 && device.rawTmuxSessions.length === 0) {
+      console.log('  \x1b[2m(no projects)\x1b[0m');
+      continue;
+    }
+    for (const project of device.projects) {
+      const statusDot = projectStatusDot(project.status);
+      const tabsLabel = project.tabs.length === 1 ? '1 tab' : `${project.tabs.length} tabs`;
+      console.log(`  ${statusDot} ${project.name.padEnd(28)} \x1b[2m${project.relativePath}  ·  ${tabsLabel}\x1b[0m`);
+      for (const tab of project.tabs) {
+        const tabDot = projectStatusDot(tab.status);
+        const sid = tab.sessionId ? ` \x1b[2m${tab.sessionId}\x1b[0m` : '';
+        console.log(`      ${tabDot} ${tab.name}${sid}`);
+      }
+    }
+    for (const session of device.rawTmuxSessions) {
+      const winLabel = session.windowCount === 1 ? '1 window' : `${session.windowCount} windows`;
+      const pathLabel = session.path ? `  ·  ${session.path}` : '';
+      console.log(`  \x1b[2m○ ${session.name}  (adopted · ${winLabel})${pathLabel}\x1b[0m`);
+    }
+  }
+}
+
+function projectStatusDot(status: string): string {
+  switch (status) {
+    case 'idle': return '\x1b[32m●\x1b[0m';
+    case 'working': return '\x1b[33m●\x1b[0m';
+    case 'waiting': return '\x1b[34m●\x1b[0m';
+    case 'error': return '\x1b[31m●\x1b[0m';
+    default: return '\x1b[2m○\x1b[0m';
+  }
+}
+
+async function runAttach(args: string[]) {
+  let targetArg = '';
+  let deviceFilter = '';
+  for (let i = 0; i < args.length; i += 1) {
+    const arg = args[i];
+    if (arg === '--help' || arg === '-h') {
+      console.log(`termag attach <project | device:project | session-id>\n\n` +
+        `Attach this terminal to a remote tmux pane via the broker.\n` +
+        `\n` +
+        `  --device, -d  Disambiguate by device name when several projects share a name.\n` +
+        `\n` +
+        `Detach with the SSH-style escape:  press Enter, then "~." (tilde, dot).\n`);
+      process.exit(0);
+    }
+    if (arg === '--device' || arg === '-d') {
+      deviceFilter = args[i + 1] || '';
+      i += 1;
+      continue;
+    }
+    if (arg.startsWith('--device=')) {
+      deviceFilter = arg.slice('--device='.length);
+      continue;
+    }
+    if (arg.startsWith('-')) {
+      console.error(`[${tag}] Unknown attach option: ${arg}`);
+      process.exit(1);
+    }
+    targetArg = arg;
+  }
+  if (!targetArg) {
+    console.error(`[${tag}] Usage: termag attach <project | device:project | session-id>`);
+    process.exit(1);
+  }
+
+  let state: CliState;
+  let baseUrl: URL;
+  try {
+    ({ state, baseUrl } = await fetchCliState());
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    const code = err && typeof err === 'object' && typeof (err as NodeError).code === 'string'
+      ? (err as NodeError).code
+      : '';
+    const display = message?.trim() || code || 'request failed';
+    console.error(`[${tag}] ${display}`);
+    process.exit(1);
+  }
+  const resolved = resolveAttachTarget(state, targetArg, deviceFilter);
+  if ('error' in resolved) {
+    console.error(`[${tag}] ${resolved.error}`);
+    process.exit(1);
+  }
+  if (!resolved.sessionId) {
+    console.error(`[${tag}] Project "${resolved.projectName}" on ${resolved.deviceName} has no live session yet. Open it in the web UI once to bootstrap, then retry.`);
+    process.exit(1);
+  }
+  const creds = resolveCredentials();
+  if (!creds.token) {
+    console.error(`[${tag}] No agent token available.`);
+    process.exit(1);
+  }
+  await attachRemote({ baseUrl, token: creds.token, sessionId: resolved.sessionId, label: resolved.label });
+}
+
+type AttachTarget =
+  | { error: string }
+  | { sessionId: string; projectName: string; deviceName: string; label: string };
+
+function resolveAttachTarget(state: CliState, target: string, deviceFilter: string): AttachTarget {
+  // Direct session-id (CUID-like; alphanumeric, 16+ chars). Skip catalog lookup.
+  if (/^[a-z0-9]{16,}$/i.test(target) && !target.includes(':')) {
+    return { sessionId: target, projectName: target, deviceName: deviceFilter || 'unknown', label: target };
+  }
+  const [explicitDevice, projectName] = target.includes(':')
+    ? [target.split(':')[0], target.slice(target.indexOf(':') + 1)]
+    : ['', target];
+  const wantDevice = (explicitDevice || deviceFilter).trim();
+  const candidates: Array<{ device: CliDeviceEntry; project: CliProjectEntry }> = [];
+  for (const device of state.devices) {
+    if (wantDevice && device.name !== wantDevice) continue;
+    for (const project of device.projects) {
+      if (project.name === projectName) candidates.push({ device, project });
+    }
+  }
+  if (candidates.length === 0) {
+    const hint = wantDevice ? ` on device "${wantDevice}"` : '';
+    return { error: `No project named "${projectName}"${hint}. Try \`termag list\`.` };
+  }
+  if (candidates.length > 1) {
+    const list = candidates.map((c) => `${c.device.name}:${c.project.name}`).join(', ');
+    return { error: `Multiple projects match "${projectName}": ${list}. Use --device to disambiguate.` };
+  }
+  const winner = candidates[0];
+  const firstTab = winner.project.tabs.find((tab) => tab.sessionId);
+  return {
+    sessionId: firstTab?.sessionId || null,
+    projectName: winner.project.name,
+    deviceName: winner.device.name,
+    label: `${winner.device.name}:${winner.project.name}`
+  } as AttachTarget;
+}
+
+async function attachRemote(opts: { baseUrl: URL; token: string; sessionId: string; label: string }) {
+  const wsUrl = new URL(opts.baseUrl.toString());
+  wsUrl.pathname = '/api/ws/terminal';
+  const cols = process.stdout.columns || 80;
+  const rows = process.stdout.rows || 24;
+  wsUrl.search = `?sessionId=${encodeURIComponent(opts.sessionId)}&cols=${cols}&rows=${rows}`;
+  const skipTls = insecureLocalTls && wsUrl.protocol === 'wss:' && isLocalHost(wsUrl.hostname);
+  const wsOptions = {
+    headers: { authorization: `Bearer ${opts.token}` },
+    ...(skipTls ? { rejectUnauthorized: false } : {})
+  };
+  const ws = new WebSocket(wsUrl.toString(), wsOptions);
+  ws.binaryType = 'arraybuffer';
+
+  const isRawCapable = Boolean(process.stdin.isTTY && (process.stdin as { setRawMode?: (m: boolean) => void }).setRawMode);
+  let rawModeOn = false;
+  function enableRawMode() {
+    if (!isRawCapable || rawModeOn) return;
+    try {
+      (process.stdin as { setRawMode: (m: boolean) => void }).setRawMode(true);
+      rawModeOn = true;
+    } catch {
+      // Some terminal hosts disallow raw mode (CI runners, etc.).
+    }
+  }
+  function disableRawMode() {
+    if (!rawModeOn) return;
+    try {
+      (process.stdin as { setRawMode: (m: boolean) => void }).setRawMode(false);
+    } catch {
+      // Ignore — process is exiting anyway.
+    }
+    rawModeOn = false;
+  }
+
+  let closing = false;
+  function cleanup(reason: string) {
+    if (closing) return;
+    closing = true;
+    disableRawMode();
+    process.stdin.pause();
+    try { ws.close(); } catch { /* socket already closed */ }
+    if (reason) process.stderr.write(`\r\n[${reason}]\r\n`);
+  }
+
+  // Detach sequence: SSH-style "<newline>~." at the start of a line.
+  // Tracking lastEndedWithNewline across chunks covers both fast-typed "\n~."
+  // and the boundary case where the user pauses between bytes.
+  let lastEndedWithNewline = true;
+  function onStdin(chunk: Buffer) {
+    if (ws.readyState !== WebSocket.OPEN) return;
+    const text = chunk.toString('utf8');
+    // Single-chunk escape: "~." at the start when previous chunk ended in newline.
+    if (lastEndedWithNewline && text.startsWith('~.')) {
+      const rest = text.slice(2);
+      if (rest) ws.send(JSON.stringify({ type: 'input', data: rest }));
+      cleanup('detached');
+      return;
+    }
+    // Escape after a newline within this chunk.
+    const m = /[\r\n]~\./.exec(text);
+    if (m) {
+      const head = text.slice(0, m.index + 1);
+      const tail = text.slice(m.index + 3);
+      if (head) ws.send(JSON.stringify({ type: 'input', data: head }));
+      if (tail) ws.send(JSON.stringify({ type: 'input', data: tail }));
+      cleanup('detached');
+      return;
+    }
+    ws.send(JSON.stringify({ type: 'input', data: text }));
+    lastEndedWithNewline = /[\r\n]$/.test(text);
+  }
+
+  function onResize() {
+    if (ws.readyState !== WebSocket.OPEN) return;
+    ws.send(JSON.stringify({
+      type: 'resize',
+      cols: process.stdout.columns || 80,
+      rows: process.stdout.rows || 24
+    }));
+  }
+
+  ws.on('open', () => {
+    process.stderr.write(`\x1b[2m[termag attach ${opts.label} · detach with Enter then ~.]\x1b[0m\r\n`);
+    enableRawMode();
+    process.stdin.resume();
+    process.stdin.on('data', onStdin);
+    process.stdout.on('resize', onResize);
+    // Swallow SIGINT so Ctrl-C reaches the remote PTY instead of killing
+    // termag attach. Raw mode usually prevents the signal in the first
+    // place, but some terminal hosts still deliver it.
+    process.on('SIGINT', noopSigint);
+  });
+  ws.on('message', (data, isBinary) => {
+    if (isBinary) {
+      process.stdout.write(Buffer.isBuffer(data) ? data : Buffer.from(data as ArrayBuffer));
+      return;
+    }
+    let msg: { type?: string; message?: string };
+    try { msg = JSON.parse(data.toString()); } catch { return; }
+    if (msg.type === 'sleeping') process.stderr.write(`\r\n\x1b[2m[${msg.message || 'agent sleeping'}]\x1b[0m\r\n`);
+    if (msg.type === 'exit') {
+      process.stderr.write('\r\n\x1b[2m[remote session ended]\x1b[0m\r\n');
+      cleanup('');
+    }
+  });
+  ws.on('close', (code, reason) => {
+    const reasonText = Buffer.isBuffer(reason) ? reason.toString() : String(reason || '');
+    if (code === 1008 && reasonText) cleanup(`closed: ${reasonText}`);
+    else cleanup(closing ? '' : 'connection closed');
+  });
+  ws.on('error', (err) => {
+    cleanup(`error: ${err.message || 'connection error'}`);
+  });
+
+  process.on('SIGTERM', () => cleanup('terminated'));
+  process.on('SIGHUP', () => cleanup('hangup'));
+  process.on('exit', () => disableRawMode());
+}
+
+function noopSigint() { /* Forward Ctrl-C to remote PTY instead. */ }
 
 function looksLikeConnectArgs(args: string[]) {
   return args.some((arg) => (
@@ -799,11 +1119,57 @@ async function attachLocalTmux(tmux: TmuxContext) {
 }
 
 function publishUrlFromAgentUrl(agentUrl: URL) {
+  return httpUrlFromAgentUrl(agentUrl, '/api/tmux/publish');
+}
+
+function httpUrlFromAgentUrl(agentUrl: URL, pathname: string) {
   const url = new URL(agentUrl.toString());
   url.protocol = url.protocol === 'wss:' ? 'https:' : 'http:';
-  url.pathname = '/api/tmux/publish';
+  url.pathname = pathname;
   url.search = '';
   return url;
+}
+
+function getJson(url: URL, token: string, skipTlsVerify: boolean): Promise<Record<string, unknown>> {
+  const client = url.protocol === 'https:' ? https : http;
+  return new Promise((resolve, reject) => {
+    const req = client.request(
+      {
+        protocol: url.protocol,
+        hostname: url.hostname,
+        port: url.port,
+        path: `${url.pathname}${url.search}`,
+        method: 'GET',
+        headers: {
+          authorization: `Bearer ${token}`,
+          accept: 'application/json'
+        },
+        rejectUnauthorized: !skipTlsVerify
+      } as HttpsRequestOptions,
+      (res) => {
+        const chunks: Buffer[] = [];
+        res.on('data', (chunk) => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)));
+        res.on('end', () => {
+          const text = Buffer.concat(chunks).toString('utf8');
+          let data: Record<string, unknown> = {};
+          if (text) {
+            try {
+              data = JSON.parse(text) as Record<string, unknown>;
+            } catch {
+              data = { error: text };
+            }
+          }
+          if ((res.statusCode || 500) >= 400) {
+            reject(new Error(String(data.error || `Request failed with HTTP ${res.statusCode}`)));
+            return;
+          }
+          resolve(data);
+        });
+      }
+    );
+    req.on('error', reject);
+    req.end();
+  });
 }
 
 function postJson(url: URL, token: string, payload: unknown, skipTlsVerify: boolean): Promise<Record<string, unknown>> {
