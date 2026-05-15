@@ -13,6 +13,7 @@ import { type Stream, attachReal, attachFake, killTmuxSession, killTmuxWindow, r
 import { startMacMenuBar, stopMacMenuBar } from './menubar';
 import { listDirectory } from './fs';
 import { wrapWithBanner } from './banner';
+import { configPath, loadConfig, maskToken, migrateEnvToConfig, resolveCredentials, saveConfig } from './config';
 
 const execFileAsync = promisify(execFile);
 
@@ -44,6 +45,20 @@ const HEALTH_INTERVAL_MS = (() => {
   return Math.min(300_000, Math.max(1_000, raw));
 })();
 
+let migrationAnnounced = false;
+function announceMigration() {
+  if (migrationAnnounced) return;
+  migrationAnnounced = true;
+  const result = migrateEnvToConfig();
+  if (!result.migrated) return;
+  console.log(`[${tag}] First-run setup: saved credentials to ${result.path} (mode 0600).`);
+  console.log(`[${tag}] Remove these lines from your shell rc (~/.zshrc, ~/.bash_profile, etc.):`);
+  for (const field of result.fields) {
+    console.log(`[${tag}]   export ${field}=…`);
+  }
+  console.log(`[${tag}] Env vars still override the file when present, so no need to restart anything to take effect.`);
+}
+
 // Wire-protocol constant shared with the broker. Keep in sync with
 // apps/web/server/broker.js → WS_REPLACED_REASON.
 const WS_REPLACED_REASON = 'replaced';
@@ -66,6 +81,8 @@ if (subcommand === 'update') {
   void runUpdate();
 } else if (subcommand === 'connect') {
   void runConnect(argv.slice(1));
+} else if (subcommand === 'config') {
+  void runConfig(argv.slice(1));
 } else if (subcommand === '--version' || subcommand === '-v') {
   console.log(pkgVersion);
   process.exit(0);
@@ -89,11 +106,19 @@ Usage:
   termag              connect to the broker and serve sessions (default)
   termag connect      publish current tmux window/session to the web UI
   termag -p/--project shorthand for "termag connect --project"
+  termag config show  print the resolved configuration (token masked)
+  termag config migrate
+                      copy TERMAG_URL/AGENT_TOKEN/AGENT_ROOTS from env into
+                      ~/.termag/config.json so they can be removed from rc files
   termag update       upgrade the agent in place (auto-detects npm vs brew)
   termag --version    print version
   termag --help       show this message
 
-Environment:
+Credentials live in ~/.termag/config.json (mode 0600). The corresponding env
+vars (TERMAG_URL, TERMAG_AGENT_TOKEN, TERMAG_AGENT_ROOTS) still work as
+per-invocation overrides; the file is read when they are absent.
+
+Environment overrides:
   TERMAG_URL                wss://… or ws://localhost… of /api/ws/agent
   TERMAG_AGENT_TOKEN        bearer token created in the web New Device dialog
   TERMAG_AGENT_ROOTS        JSON map of device labels to roots, e.g. {"Mac Mini":"~/Code"}
@@ -105,6 +130,37 @@ Environment:
   TERMAG_TERMINAL_APP       Terminal, iTerm2, Ghostty, or auto for menu actions
   TERMAG_CONFIG             config file path (default ~/.termag/config.json)
 `);
+}
+
+async function runConfig(args: string[]) {
+  const subcommand = args[0] || 'show';
+  if (subcommand === 'show') {
+    const cfg = loadConfig();
+    const resolved = resolveCredentials();
+    console.log(`config file: ${configPath()}`);
+    console.log(`  exists:    ${Object.keys(cfg).length > 0 ? 'yes' : 'no (or empty)'}`);
+    console.log('');
+    console.log('resolved (env > file):');
+    console.log(`  url:       ${resolved.url ?? '(unset)'}`);
+    console.log(`  token:     ${maskToken(resolved.token)}`);
+    console.log(`  roots:     ${Object.keys(resolved.roots).length === 0 ? '(none)' : JSON.stringify(resolved.roots)}`);
+    return;
+  }
+  if (subcommand === 'migrate') {
+    const result = migrateEnvToConfig();
+    if (!result.migrated) {
+      console.log(`Config already exists at ${result.path}; not overwriting. Edit it directly or delete and re-run.`);
+      return;
+    }
+    console.log(`Saved credentials to ${result.path} (mode 0600).`);
+    console.log(`You can now remove these lines from your shell rc:`);
+    for (const field of result.fields) {
+      console.log(`  export ${field}=…`);
+    }
+    return;
+  }
+  console.error(`Unknown config subcommand: ${subcommand}. Try 'show' or 'migrate'.`);
+  process.exit(1);
 }
 
 function looksLikeConnectArgs(args: string[]) {
@@ -168,10 +224,12 @@ async function runConnect(args: string[]) {
     process.exit(1);
   }
 
-  const termagUrl = process.env.TERMAG_URL;
-  const token = process.env.TERMAG_AGENT_TOKEN || process.env.TERMAG_PREVIEW_AGENT_TOKEN;
+  announceMigration();
+  const creds = resolveCredentials();
+  const termagUrl = creds.url;
+  const token = creds.token;
   if (!termagUrl || !token) {
-    console.error('TERMAG_URL and TERMAG_AGENT_TOKEN are required.');
+    console.error('No termag credentials found. Set TERMAG_URL + TERMAG_AGENT_TOKEN in env, or run `termag config migrate` to seed ~/.termag/config.json.');
     process.exit(1);
   }
 
@@ -751,13 +809,13 @@ function postJson(url: URL, token: string, payload: unknown, skipTlsVerify: bool
 }
 
 async function run() {
-  const termagUrl = process.env.TERMAG_URL || (isFake ? 'ws://localhost:3000/api/ws/agent' : undefined);
-  const token = process.env.TERMAG_AGENT_TOKEN
-    || process.env.TERMAG_PREVIEW_AGENT_TOKEN
-    || (isFake ? 'tmag_preview_local_agent_token' : undefined);
+  announceMigration();
+  const creds = resolveCredentials();
+  const termagUrl = creds.url || (isFake ? 'ws://localhost:3000/api/ws/agent' : undefined);
+  const token = creds.token || (isFake ? 'tmag_preview_local_agent_token' : undefined);
 
   if (!termagUrl || !token) {
-    console.error('TERMAG_URL and TERMAG_AGENT_TOKEN are required.');
+    console.error('No termag credentials found. Set TERMAG_URL + TERMAG_AGENT_TOKEN in env, or run `termag config migrate` to seed ~/.termag/config.json.');
     process.exit(1);
   }
 
@@ -828,7 +886,10 @@ async function preflightTmux() {
 
 const baseReconnectMs = positiveNumber(process.env.TERMAG_RECONNECT_MS, 1000);
 const maxReconnectMs = positiveNumber(process.env.TERMAG_RECONNECT_MAX_MS, 30000);
-const roots = parseRoots(process.env.TERMAG_AGENT_ROOTS);
+const roots = (() => {
+  const resolved = resolveCredentials().roots;
+  return Object.keys(resolved).length > 0 ? resolved : parseRoots(undefined);
+})();
 let reconnectAttempts = 0;
 
 function positiveNumber(raw: string | undefined, fallback: number) {

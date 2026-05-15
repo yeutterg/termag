@@ -1,19 +1,11 @@
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, statSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { type AgentConfig, loadConfig } from './config';
 
 type StartMacMenuBarOptions = {
   tag: string;
-};
-
-type AgentConfig = {
-  macMenuBar?: boolean;
-  terminalApp?: string;
-  menuBar?: {
-    enabled?: boolean;
-    terminalApp?: string;
-  };
 };
 
 let activeMenuBar: ChildProcess | null = null;
@@ -31,7 +23,7 @@ const MAC_PATH = [
 export function startMacMenuBar(opts: StartMacMenuBarOptions): ChildProcess | null {
   if (process.platform !== 'darwin') return null;
   if (process.env.TERMAG_AGENT_FAKE === 'true') return null;
-  const config = loadAgentConfig(opts.tag);
+  const config = loadConfig();
   if (!menuBarEnabled(config)) return null;
   if (activeMenuBar && !activeMenuBar.killed) return activeMenuBar;
 
@@ -87,17 +79,6 @@ export function stopMacMenuBar() {
     // Already gone.
   }
   activeMenuBar = null;
-}
-
-function loadAgentConfig(tag: string): AgentConfig {
-  const configPath = path.resolve(expandHome(process.env.TERMAG_CONFIG || path.join(os.homedir(), '.termag', 'config.json')));
-  if (!existsSync(configPath)) return {};
-  try {
-    return JSON.parse(readFileSync(configPath, 'utf8')) as AgentConfig;
-  } catch (err) {
-    console.warn(`[${tag}] ignoring invalid config file ${configPath}: ${err instanceof Error ? err.message : String(err)}`);
-    return {};
-  }
 }
 
 function menuBarEnabled(config: AgentConfig) {
