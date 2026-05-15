@@ -19,6 +19,11 @@ export const PATCH = withAuth(async (user, request: Request, { params }: Params)
   const parsed = updateSchema.safeParse(await request.json().catch(() => null));
   if (!parsed.success) return NextResponse.json({ error: 'Invalid project payload' }, { status: 400 });
   const body = parsed.data;
+  // Reject path traversal before normalization (see the matching guard in
+  // POST /api/projects).
+  if (body.relativePath && body.relativePath.split(/[\\/]+/).some((part) => part === '..')) {
+    return NextResponse.json({ error: 'relativePath must not contain ".." segments' }, { status: 400 });
+  }
   if (body.rootKey && !parseRoots()[body.rootKey]) {
     const tokenRoot = await prisma.agentToken.findFirst({
       where: { userId: user.id, name: body.rootKey, revokedAt: null },

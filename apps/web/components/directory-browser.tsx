@@ -324,7 +324,11 @@ function resolveTypedPath(roots: Record<string, string>, typed: string): { rootK
     if (cleaned === candidate.rootPath) return { rootKey: candidate.rootKey, relativePath: '' };
     const prefix = `${candidate.rootPath}/`;
     if (cleaned.startsWith(prefix)) {
-      return { rootKey: candidate.rootKey, relativePath: cleaned.slice(prefix.length).replace(/^\/+|\/+$/g, '') };
+      const relative = cleaned.slice(prefix.length).replace(/^\/+|\/+$/g, '');
+      // Reject ".." segments so the user sees the error inline instead of
+      // after a server round-trip. Matches the guard in POST /api/projects.
+      if (relative.split('/').some((part) => part === '..')) return null;
+      return { rootKey: candidate.rootKey, relativePath: relative };
     }
   }
   return null;

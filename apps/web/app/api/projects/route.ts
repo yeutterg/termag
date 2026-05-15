@@ -39,6 +39,16 @@ export const POST = withAuth(async (user, request: Request) => {
     return NextResponse.json({ error: 'Invalid project payload' }, { status: 400 });
   }
   const body = parsed.data;
+
+  // Reject path traversal in relativePath BEFORE normalization. The agent's
+  // resolveCwd throws on '..' segments but normalizeRelativePath silently
+  // strips them, so a payload like '../etc' would land the project at 'etc'
+  // under the root — the agent would then refuse to attach and the user is
+  // stuck with a phantom project at a path they didn't ask for.
+  if (body.relativePath && body.relativePath.split(/[\\/]+/).some((part) => part === '..')) {
+    return NextResponse.json({ error: 'relativePath must not contain ".." segments' }, { status: 400 });
+  }
+
   const roots = parseRoots();
   const selectedRoots = body.rootKey && roots[body.rootKey] ? { [body.rootKey]: roots[body.rootKey] } : roots;
 
