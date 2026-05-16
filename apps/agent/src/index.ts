@@ -223,49 +223,100 @@ async function fetchCliState(): Promise<{ state: CliState; baseUrl: URL }> {
 
 async function runList(args: string[]) {
   if (args.includes('--help') || args.includes('-h')) {
-    console.log(`termag list\n\nList devices and projects across the broker. Connected devices have a\ngreen ●; offline ones have a dim ○. Per-project status dots track session\nactivity (idle, working, waiting, error, sleeping).\n`);
+    console.log(`termag list\n\nList devices and projects across the broker, plus tmux sessions on this\nmachine. Connected devices have a green ●; offline ones have a dim ○.\nPer-project status dots track session activity (idle, working, waiting,\nerror, sleeping). Local tmux sessions are appended in a final section\nwhen the local agent isn't already covered by the broker view.\n`);
     process.exit(0);
   }
-  let state: CliState;
-  try {
-    ({ state } = await fetchCliState());
-  } catch (err) {
+
+  // Fetch both views in parallel: the broker (devices + projects) and the
+  // local tmux state. Either can fail without taking the whole command
+  // down — broker-unreachable still shows local sessions, and a missing
+  // tmux still shows the broker view.
+  const [stateResult, localResult] = await Promise.allSettled([
+    fetchCliState(),
+    listLocalTmuxSessions()
+  ]);
+  const state = stateResult.status === 'fulfilled' ? stateResult.value.state : null;
+  const localSessions = localResult.status === 'fulfilled' ? localResult.value : [];
+
+  if (state && state.devices.length > 0) {
+    for (const device of state.devices) {
+      const flag = device.connected ? '\x1b[32m●\x1b[0m' : '\x1b[2m○\x1b[0m';
+      const versionLabel = device.version ? ` v${device.version}` : '';
+      const stateLabel = device.connected ? 'connected' : 'offline';
+      console.log(`${flag} \x1b[1m${device.name}\x1b[0m  \x1b[2m${stateLabel}${versionLabel}\x1b[0m`);
+      if (device.projects.length === 0 && device.rawTmuxSessions.length === 0) {
+        console.log('  \x1b[2m(no projects)\x1b[0m');
+        continue;
+      }
+      for (const project of device.projects) {
+        const statusDot = projectStatusDot(project.status);
+        const tabsLabel = project.tabs.length === 1 ? '1 tab' : `${project.tabs.length} tabs`;
+        console.log(`  ${statusDot} ${project.name.padEnd(28)} \x1b[2m${project.relativePath}  ·  ${tabsLabel}\x1b[0m`);
+        for (const tab of project.tabs) {
+          const tabDot = projectStatusDot(tab.status);
+          const sid = tab.sessionId ? ` \x1b[2m${tab.sessionId}\x1b[0m` : '';
+          console.log(`      ${tabDot} ${tab.name}${sid}`);
+        }
+      }
+      for (const session of device.rawTmuxSessions) {
+        const winLabel = session.windowCount === 1 ? '1 window' : `${session.windowCount} windows`;
+        const pathLabel = session.path ? `  ·  ${session.path}` : '';
+        console.log(`  \x1b[2m○ ${session.name}  (adopted · ${winLabel})${pathLabel}\x1b[0m`);
+      }
+    }
+  } else if (stateResult.status === 'rejected') {
+    const err = stateResult.reason;
     const message = err instanceof Error ? err.message : String(err);
     const code = err && typeof err === 'object' && typeof (err as NodeError).code === 'string'
       ? (err as NodeError).code
       : '';
-    const display = message?.trim() || code || 'request failed';
-    console.error(`[${tag}] ${display}`);
-    process.exit(1);
-  }
-  if (state.devices.length === 0) {
+    const hint = (code === 'ECONNREFUSED' || code === 'ENOTFOUND' || code === 'ETIMEDOUT')
+      ? ' \x1b[2m(broker unreachable — verify TERMAG_URL with `termag config show`)\x1b[0m'
+      : '';
+    console.error(`[${tag}] could not reach broker: ${message?.trim() || code || 'request failed'}${hint}`);
+  } else if (state) {
     console.log('No devices configured yet. Create one in the web UI Devices dialog.');
-    return;
   }
-  for (const device of state.devices) {
-    const flag = device.connected ? '\x1b[32m●\x1b[0m' : '\x1b[2m○\x1b[0m';
-    const versionLabel = device.version ? ` v${device.version}` : '';
-    const stateLabel = device.connected ? 'connected' : 'offline';
-    console.log(`${flag} \x1b[1m${device.name}\x1b[0m  \x1b[2m${stateLabel}${versionLabel}\x1b[0m`);
-    if (device.projects.length === 0 && device.rawTmuxSessions.length === 0) {
-      console.log('  \x1b[2m(no projects)\x1b[0m');
-      continue;
-    }
-    for (const project of device.projects) {
-      const statusDot = projectStatusDot(project.status);
-      const tabsLabel = project.tabs.length === 1 ? '1 tab' : `${project.tabs.length} tabs`;
-      console.log(`  ${statusDot} ${project.name.padEnd(28)} \x1b[2m${project.relativePath}  ·  ${tabsLabel}\x1b[0m`);
-      for (const tab of project.tabs) {
-        const tabDot = projectStatusDot(tab.status);
-        const sid = tab.sessionId ? ` \x1b[2m${tab.sessionId}\x1b[0m` : '';
-        console.log(`      ${tabDot} ${tab.name}${sid}`);
-      }
-    }
-    for (const session of device.rawTmuxSessions) {
-      const winLabel = session.windowCount === 1 ? '1 window' : `${session.windowCount} windows`;
-      const pathLabel = session.path ? `  ·  ${session.path}` : '';
-      console.log(`  \x1b[2m○ ${session.name}  (adopted · ${winLabel})${pathLabel}\x1b[0m`);
-    }
+
+  // Always append local tmux if there's something to show AND it isn't
+  // already covered by the broker view. "Covered" = the local agent's
+  // first root key matches a connected device in the broker state.
+  if (localSessions.length === 0) return;
+  const localDeviceName = Object.keys(roots)[0];
+  const coveredByBroker = Boolean(
+    localDeviceName
+    && state?.devices.some((d) => d.name === localDeviceName && d.connected)
+  );
+  if (coveredByBroker) return;
+  if (state) console.log('');
+  console.log(`\x1b[2m▸ local tmux on this machine\x1b[0m`);
+  for (const session of localSessions) {
+    const winLabel = session.windowCount === 1 ? '1 window' : `${session.windowCount} windows`;
+    const pathLabel = session.path ? `  ·  ${session.path}` : '';
+    console.log(`  \x1b[2m○ ${session.name}  ${winLabel}${pathLabel}\x1b[0m`);
+  }
+}
+
+async function listLocalTmuxSessions(): Promise<Array<{ name: string; windowCount: number; path: string }>> {
+  try {
+    const { stdout } = await execFileAsync('tmux', [
+      'list-sessions', '-F', '#{session_name}\t#{session_windows}\t#{session_path}'
+    ]);
+    return stdout
+      .split('\n')
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .map((line) => {
+        const [name = '', windows = '0', path = ''] = line.split('\t');
+        return {
+          name,
+          windowCount: Number.isFinite(Number(windows)) ? Number(windows) : 0,
+          path
+        };
+      })
+      .filter((session) => session.name);
+  } catch {
+    return [];
   }
 }
 
