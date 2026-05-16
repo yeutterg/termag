@@ -208,17 +208,59 @@ type CliDeviceEntry = {
 };
 type CliState = { devices: CliDeviceEntry[] };
 
-async function fetchCliState(): Promise<{ state: CliState; baseUrl: URL }> {
+async function fetchCliState(): Promise<{ state: CliState; baseUrl: URL; usedFallback: URL | null }> {
   announceMigration();
   const creds = resolveCredentials();
   if (!creds.url || !creds.token) {
     throw new Error('No termag credentials found. Set TERMAG_URL + TERMAG_AGENT_TOKEN in env, or run `termag config migrate` to seed ~/.termag/config.json.');
   }
   const validated = validateUrl(creds.url);
-  const stateUrl = httpUrlFromAgentUrl(validated, '/api/cli/state');
-  const skipTls = insecureLocalTls && stateUrl.protocol === 'https:' && isLocalHost(stateUrl.hostname);
-  const json = await getJson(stateUrl, creds.token, skipTls);
-  return { state: json as unknown as CliState, baseUrl: validated };
+  const candidates = localBrokerCandidates(validated);
+  let lastError: unknown;
+  for (let i = 0; i < candidates.length; i++) {
+    const candidate = candidates[i];
+    try {
+      const stateUrl = httpUrlFromAgentUrl(candidate, '/api/cli/state');
+      const skipTls = insecureLocalTls && stateUrl.protocol === 'https:' && isLocalHost(stateUrl.hostname);
+      const json = await getJson(stateUrl, creds.token, skipTls);
+      return {
+        state: json as unknown as CliState,
+        baseUrl: candidate,
+        usedFallback: i === 0 ? null : candidate
+      };
+    } catch (err) {
+      lastError = err;
+      // Only fall through on connect-time failures — auth errors or stalls
+      // mean the configured broker IS reachable and we shouldn't paper over.
+      const code = (err && typeof err === 'object' ? (err as NodeError).code : undefined) || '';
+      const connectish = code === 'ECONNREFUSED' || code === 'ENOTFOUND' || code === 'EHOSTUNREACH';
+      if (!connectish) break;
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error(String(lastError));
+}
+
+/**
+ * When the configured broker is on localhost, try common alternates after
+ * the configured URL. This makes `termag list` (and other one-shot
+ * commands) work without manual reconfiguration when the user flips
+ * between the Caddy front (wss://localhost:443) and the raw Next.js dev
+ * server (ws://localhost:3000). Order: configured URL first, then the
+ * other common local port.
+ */
+function localBrokerCandidates(url: URL): URL[] {
+  if (!isLocalHost(url.hostname)) return [url];
+  const result: URL[] = [url];
+  const alt = new URL(url.toString());
+  if (url.protocol === 'wss:' || url.protocol === 'https:') {
+    alt.protocol = url.protocol === 'wss:' ? 'ws:' : 'http:';
+    alt.port = '3000';
+  } else {
+    alt.protocol = url.protocol === 'ws:' ? 'wss:' : 'https:';
+    alt.port = '';
+  }
+  if (alt.toString() !== url.toString()) result.push(alt);
+  return result;
 }
 
 async function runList(args: string[]) {
@@ -235,33 +277,58 @@ async function runList(args: string[]) {
     fetchCliState(),
     listLocalTmuxSessions()
   ]);
-  const state = stateResult.status === 'fulfilled' ? stateResult.value.state : null;
+  const fetched = stateResult.status === 'fulfilled' ? stateResult.value : null;
+  const state = fetched?.state ?? null;
   const localSessions = localResult.status === 'fulfilled' ? localResult.value : [];
+  const localDeviceName = Object.keys(roots)[0] ?? null;
+
+  // Local tmux first — that's the "where am I right now" view. We always
+  // print this section when there are local sessions, regardless of broker
+  // status: it's a strict superset of what the broker can know about this
+  // machine and shouldn't be hidden behind the broker being healthy.
+  if (localSessions.length > 0) {
+    const headerSuffix = localDeviceName ? ` \x1b[2m(${localDeviceName})\x1b[0m` : '';
+    console.log(`\x1b[1m▸ local tmux on this machine\x1b[0m${headerSuffix}`);
+    for (const session of localSessions) {
+      const winLabel = session.windowCount === 1 ? '1 window' : `${session.windowCount} windows`;
+      const pathLabel = session.path ? `  ·  ${session.path}` : '';
+      console.log(`  \x1b[2m○ ${session.name}  ${winLabel}${pathLabel}\x1b[0m`);
+    }
+    console.log('');
+  }
+
+  // Then the broker view: all devices + projects + adopted sessions across
+  // the user's account. Either renders normally, or surfaces an actionable
+  // error when the broker can't be reached.
+  console.log(`\x1b[1m▸ remote sessions (broker)\x1b[0m`);
+  if (fetched?.usedFallback) {
+    console.log(`  \x1b[2m… using ${fetched.usedFallback.host} (configured URL didn't respond)\x1b[0m`);
+  }
 
   if (state && state.devices.length > 0) {
     for (const device of state.devices) {
       const flag = device.connected ? '\x1b[32m●\x1b[0m' : '\x1b[2m○\x1b[0m';
       const versionLabel = device.version ? ` v${device.version}` : '';
       const stateLabel = device.connected ? 'connected' : 'offline';
-      console.log(`${flag} \x1b[1m${device.name}\x1b[0m  \x1b[2m${stateLabel}${versionLabel}\x1b[0m`);
+      console.log(`  ${flag} \x1b[1m${device.name}\x1b[0m  \x1b[2m${stateLabel}${versionLabel}\x1b[0m`);
       if (device.projects.length === 0 && device.rawTmuxSessions.length === 0) {
-        console.log('  \x1b[2m(no projects)\x1b[0m');
+        console.log('    \x1b[2m(no projects)\x1b[0m');
         continue;
       }
       for (const project of device.projects) {
         const statusDot = projectStatusDot(project.status);
         const tabsLabel = project.tabs.length === 1 ? '1 tab' : `${project.tabs.length} tabs`;
-        console.log(`  ${statusDot} ${project.name.padEnd(28)} \x1b[2m${project.relativePath}  ·  ${tabsLabel}\x1b[0m`);
+        console.log(`    ${statusDot} ${project.name.padEnd(28)} \x1b[2m${project.relativePath}  ·  ${tabsLabel}\x1b[0m`);
         for (const tab of project.tabs) {
           const tabDot = projectStatusDot(tab.status);
           const sid = tab.sessionId ? ` \x1b[2m${tab.sessionId}\x1b[0m` : '';
-          console.log(`      ${tabDot} ${tab.name}${sid}`);
+          console.log(`        ${tabDot} ${tab.name}${sid}`);
         }
       }
       for (const session of device.rawTmuxSessions) {
         const winLabel = session.windowCount === 1 ? '1 window' : `${session.windowCount} windows`;
         const pathLabel = session.path ? `  ·  ${session.path}` : '';
-        console.log(`  \x1b[2m○ ${session.name}  (adopted · ${winLabel})${pathLabel}\x1b[0m`);
+        console.log(`    \x1b[2m○ ${session.name}  (adopted · ${winLabel})${pathLabel}\x1b[0m`);
       }
     }
   } else if (stateResult.status === 'rejected') {
@@ -271,29 +338,11 @@ async function runList(args: string[]) {
       ? (err as NodeError).code
       : '';
     const hint = (code === 'ECONNREFUSED' || code === 'ENOTFOUND' || code === 'ETIMEDOUT')
-      ? ' \x1b[2m(broker unreachable — verify TERMAG_URL with `termag config show`)\x1b[0m'
+      ? '\n  \x1b[2mverify TERMAG_URL with `termag config show` or start the broker (Next.js / Caddy)\x1b[0m'
       : '';
-    console.error(`[${tag}] could not reach broker: ${message?.trim() || code || 'request failed'}${hint}`);
-  } else if (state) {
-    console.log('No devices configured yet. Create one in the web UI Devices dialog.');
-  }
-
-  // Always append local tmux if there's something to show AND it isn't
-  // already covered by the broker view. "Covered" = the local agent's
-  // first root key matches a connected device in the broker state.
-  if (localSessions.length === 0) return;
-  const localDeviceName = Object.keys(roots)[0];
-  const coveredByBroker = Boolean(
-    localDeviceName
-    && state?.devices.some((d) => d.name === localDeviceName && d.connected)
-  );
-  if (coveredByBroker) return;
-  if (state) console.log('');
-  console.log(`\x1b[2m▸ local tmux on this machine\x1b[0m`);
-  for (const session of localSessions) {
-    const winLabel = session.windowCount === 1 ? '1 window' : `${session.windowCount} windows`;
-    const pathLabel = session.path ? `  ·  ${session.path}` : '';
-    console.log(`  \x1b[2m○ ${session.name}  ${winLabel}${pathLabel}\x1b[0m`);
+    console.log(`  \x1b[31m✗\x1b[0m \x1b[2mbroker unreachable: ${message?.trim() || code || 'request failed'}\x1b[0m${hint}`);
+  } else {
+    console.log('  \x1b[2m(no devices configured yet — create one in the web UI Devices dialog)\x1b[0m');
   }
 }
 
