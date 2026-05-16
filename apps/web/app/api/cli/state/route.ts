@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server';
 import { withAuth } from '@/lib/auth';
 import { prisma } from '@/lib/prisma';
 import { listProjects } from '@/lib/projects';
-import { listTmuxSessions } from '@/lib/broker';
+import { listConnectedDevices, listTmuxSessions } from '@/lib/broker';
 
 // JSON shape consumed by `termag list` and `termag attach` resolution. Keep
 // the per-device structure stable — both CLI subcommands key off it. We use
@@ -38,25 +38,26 @@ export const GET = withAuth(async (user) => {
   });
 
   const tmuxByDevice = new Map<string, Array<{ name: string; windowCount: number; path: string | null }>>();
-  const broker = (globalThis as { termagBroker?: { listTmuxSessions?: (userId: string) => Promise<Array<{ rootKey: string; name: string; windowCount?: number; path?: string }>> } }).termagBroker;
-  if (broker?.listTmuxSessions) {
-    try {
-      const raw = await broker.listTmuxSessions(user.id);
-      for (const session of raw) {
-        const bucket = tmuxByDevice.get(session.rootKey) ?? [];
-        bucket.push({
-          name: session.name,
-          windowCount: typeof session.windowCount === 'number' ? session.windowCount : 0,
-          path: session.path ?? null
-        });
-        tmuxByDevice.set(session.rootKey, bucket);
-      }
-    } catch {
-      // Broker timeouts shouldn't fail the whole listing.
+  try {
+    const raw = await listTmuxSessions(user.id);
+    for (const session of raw) {
+      const bucket = tmuxByDevice.get(session.rootKey) ?? [];
+      bucket.push({
+        name: session.name,
+        windowCount: typeof session.windowCount === 'number' ? session.windowCount : 0,
+        path: session.path ?? null
+      });
+      tmuxByDevice.set(session.rootKey, bucket);
     }
+  } catch {
+    // Broker timeouts shouldn't fail the whole listing.
   }
 
-  const liveDevices = await listLiveDevices(user.id);
+  // Connected-device list comes straight from the broker's agents Map — an
+  // agent that's connected but hasn't reported any tmux sessions yet still
+  // shows up correctly. (Earlier version derived "connected" from listTmux
+  // results and missed this case.)
+  const liveDevices = listConnectedDevices(user.id);
   const deviceNames = new Set<string>([
     ...tokens.map((token) => token.name),
     ...projects.map((project) => project.rootKey),
@@ -95,29 +96,6 @@ export const GET = withAuth(async (user) => {
 
   return NextResponse.json(state);
 });
-
-type LiveDevice = { name: string; connected: boolean; version: string | null };
-
-async function listLiveDevices(userId: string): Promise<LiveDevice[]> {
-  // The broker's status broadcast is the canonical source for connected
-  // device state, but it's a WS push. For HTTP we synthesize from the in-
-  // memory agents Map via the listTmuxSessions side effect plus the broker's
-  // device-status accessor. For now: live devices = anything that has a tmux
-  // listing returned (means an agent answered the tmux-list request).
-  const broker = (globalThis as {
-    termagBroker?: {
-      listTmuxSessions?: (userId: string) => Promise<Array<{ rootKey: string }>>;
-    };
-  }).termagBroker;
-  if (!broker?.listTmuxSessions) return [];
-  try {
-    const sessions = await broker.listTmuxSessions(userId);
-    const names = new Set(sessions.map((s) => s.rootKey));
-    return [...names].map((name) => ({ name, connected: true, version: null }));
-  } catch {
-    return [];
-  }
-}
 
 function filterTermagManagedOut(
   raw: Array<{ name: string; windowCount: number; path: string | null }>,

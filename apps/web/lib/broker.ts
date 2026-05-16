@@ -1,6 +1,7 @@
 type Broker = {
   listTmuxSessions?: (userId: string) => Promise<TmuxDeviceSession[]>;
   listDirectory?: (userId: string, deviceName: string, rootKey: string, relativePath: string) => Promise<DirectoryListing>;
+  connectedDevices?: (userId: string) => ConnectedDevice[];
   refreshUser?: (userId: string) => void;
   requestHealthRefresh?: (userId: string, deviceName: string) => void;
   killTmuxSession?: (userId: string, deviceName: string, tmuxSessionName: string, timeoutMs?: number) => Promise<boolean>;
@@ -8,6 +9,17 @@ type Broker = {
   renameTmuxWindow?: (userId: string, deviceName: string, tmuxName: string, name: string, timeoutMs?: number) => Promise<{ tmuxName?: string; tmuxWindowName?: string } | null>;
   disconnectAgentToken?: (userId: string, tokenId: string) => void;
   killTmux: (userId: string, tmuxName: string, timeoutMs?: number) => Promise<boolean>;
+};
+
+export type ConnectedDevice = {
+  name: string;
+  connected: boolean;
+  lastSeenAt: string | null;
+  version?: string | null;
+  fake?: boolean;
+  streamCount?: number;
+  uptimeSec?: number;
+  memMb?: number;
 };
 
 export type DirectoryListing = {
@@ -42,6 +54,10 @@ export async function listTmuxSessions(userId: string): Promise<TmuxDeviceSessio
   const live = broker();
   if (!live?.listTmuxSessions) return [];
   return live.listTmuxSessions(userId);
+}
+
+export function listConnectedDevices(userId: string): ConnectedDevice[] {
+  return broker()?.connectedDevices?.(userId) ?? [];
 }
 
 export function refreshUserProjects(userId: string) {

@@ -895,6 +895,9 @@ function createBroker({ prisma, wss }) {
     refreshUser(userId) {
       broadcastStatus(userId, true);
     },
+    connectedDevices(userId) {
+      return connectedAgents(userId).map(publicAgentStatus);
+    },
     // Fire-and-forget poke that asks a specific device's agent to send a
     // fresh health ping right now. Used by the publish API so the UI sees
     // the new tmux state without waiting for the next scheduled health

@@ -5,6 +5,7 @@ import { promisify } from 'node:util';
 import os from 'node:os';
 import path from 'node:path';
 import { existsSync, readFileSync, realpathSync } from 'node:fs';
+import { StringDecoder } from 'node:string_decoder';
 import http from 'node:http';
 import https from 'node:https';
 import type { RequestOptions as HttpsRequestOptions } from 'node:https';
@@ -220,7 +221,11 @@ async function fetchCliState(): Promise<{ state: CliState; baseUrl: URL }> {
   return { state: json as unknown as CliState, baseUrl: validated };
 }
 
-async function runList(_args: string[]) {
+async function runList(args: string[]) {
+  if (args.includes('--help') || args.includes('-h')) {
+    console.log(`termag list\n\nList devices and projects across the broker. Connected devices have a\ngreen ●; offline ones have a dim ○. Per-project status dots track session\nactivity (idle, working, waiting, error, sleeping).\n`);
+    process.exit(0);
+  }
   let state: CliState;
   try {
     ({ state } = await fetchCliState());
@@ -289,12 +294,22 @@ async function runAttach(args: string[]) {
       process.exit(0);
     }
     if (arg === '--device' || arg === '-d') {
-      deviceFilter = args[i + 1] || '';
+      const value = args[i + 1];
+      if (!value || value.startsWith('-')) {
+        console.error(`[${tag}] --device requires a value`);
+        process.exit(1);
+      }
+      deviceFilter = value;
       i += 1;
       continue;
     }
     if (arg.startsWith('--device=')) {
-      deviceFilter = arg.slice('--device='.length);
+      const value = arg.slice('--device='.length).trim();
+      if (!value) {
+        console.error(`[${tag}] --device requires a value`);
+        process.exit(1);
+      }
+      deviceFilter = value;
       continue;
     }
     if (arg.startsWith('-')) {
@@ -343,10 +358,9 @@ type AttachTarget =
   | { sessionId: string; projectName: string; deviceName: string; label: string };
 
 function resolveAttachTarget(state: CliState, target: string, deviceFilter: string): AttachTarget {
-  // Direct session-id (CUID-like; alphanumeric, 16+ chars). Skip catalog lookup.
-  if (/^[a-z0-9]{16,}$/i.test(target) && !target.includes(':')) {
-    return { sessionId: target, projectName: target, deviceName: deviceFilter || 'unknown', label: target };
-  }
+  // Try project-name lookup first so a CUID-shaped project name doesn't get
+  // misclassified as a session-id. Fall back to session-id only when no
+  // project matches.
   const [explicitDevice, projectName] = target.includes(':')
     ? [target.split(':')[0], target.slice(target.indexOf(':') + 1)]
     : ['', target];
@@ -358,22 +372,31 @@ function resolveAttachTarget(state: CliState, target: string, deviceFilter: stri
       if (project.name === projectName) candidates.push({ device, project });
     }
   }
-  if (candidates.length === 0) {
-    const hint = wantDevice ? ` on device "${wantDevice}"` : '';
-    return { error: `No project named "${projectName}"${hint}. Try \`termag list\`.` };
-  }
   if (candidates.length > 1) {
     const list = candidates.map((c) => `${c.device.name}:${c.project.name}`).join(', ');
     return { error: `Multiple projects match "${projectName}": ${list}. Use --device to disambiguate.` };
   }
-  const winner = candidates[0];
-  const firstTab = winner.project.tabs.find((tab) => tab.sessionId);
-  return {
-    sessionId: firstTab?.sessionId || null,
-    projectName: winner.project.name,
-    deviceName: winner.device.name,
-    label: `${winner.device.name}:${winner.project.name}`
-  } as AttachTarget;
+  if (candidates.length === 1) {
+    const winner = candidates[0];
+    const firstTab = winner.project.tabs.find((tab) => tab.sessionId);
+    return {
+      sessionId: firstTab?.sessionId || null,
+      projectName: winner.project.name,
+      deviceName: winner.device.name,
+      label: `${winner.device.name}:${winner.project.name}`
+    } as AttachTarget;
+  }
+  // No project matched — see if it looks like a raw session-id (CUID-shaped).
+  if (!target.includes(':') && /^[a-z0-9]{16,}$/i.test(target)) {
+    return {
+      sessionId: target,
+      projectName: target.slice(0, 8) + '…',
+      deviceName: deviceFilter || 'unknown',
+      label: `session ${target.slice(0, 8)}…`
+    };
+  }
+  const hint = wantDevice ? ` on device "${wantDevice}"` : '';
+  return { error: `No project named "${projectName}"${hint}. Try \`termag list\`.` };
 }
 
 async function attachRemote(opts: { baseUrl: URL; token: string; sessionId: string; label: string }) {
@@ -385,6 +408,10 @@ async function attachRemote(opts: { baseUrl: URL; token: string; sessionId: stri
   const skipTls = insecureLocalTls && wsUrl.protocol === 'wss:' && isLocalHost(wsUrl.hostname);
   const wsOptions = {
     headers: { authorization: `Bearer ${opts.token}` },
+    // Cap the time we'll wait for the broker to complete the WebSocket
+    // handshake. Without this the CLI hangs forever if the broker accepts
+    // the TCP connection but never upgrades.
+    handshakeTimeout: 15_000,
     ...(skipTls ? { rejectUnauthorized: false } : {})
   };
   const ws = new WebSocket(wsUrl.toString(), wsOptions);
@@ -422,31 +449,42 @@ async function attachRemote(opts: { baseUrl: URL; token: string; sessionId: stri
   }
 
   // Detach sequence: SSH-style "<newline>~." at the start of a line.
-  // Tracking lastEndedWithNewline across chunks covers both fast-typed "\n~."
-  // and the boundary case where the user pauses between bytes.
-  let lastEndedWithNewline = true;
+  // Tracking is char-by-char with a single hold-buffer for the pending "~"
+  // so cross-chunk escapes (`\n~` in chunk N, `.` in chunk N+1) work too.
+  // StringDecoder buffers partial UTF-8 sequences across chunk boundaries so
+  // a pasted multibyte char never gets mangled into replacement characters.
+  // The escape characters (~ . \n \r) are all single-byte ASCII so working
+  // at the string level is safe.
+  const decoder = new StringDecoder('utf8');
+  let atLineStart = true;
+  let pendingTilde = false;
   function onStdin(chunk: Buffer) {
     if (ws.readyState !== WebSocket.OPEN) return;
-    const text = chunk.toString('utf8');
-    // Single-chunk escape: "~." at the start when previous chunk ended in newline.
-    if (lastEndedWithNewline && text.startsWith('~.')) {
-      const rest = text.slice(2);
-      if (rest) ws.send(JSON.stringify({ type: 'input', data: rest }));
-      cleanup('detached');
-      return;
+    const text = decoder.write(chunk);
+    if (!text) return;
+    let out = '';
+    for (let i = 0; i < text.length; i += 1) {
+      const ch = text[i];
+      if (pendingTilde) {
+        if (ch === '.') {
+          if (out) ws.send(JSON.stringify({ type: 'input', data: out }));
+          cleanup('detached');
+          return;
+        }
+        // Not the escape — flush the held "~" first, then fall through to
+        // process the current char.
+        out += '~';
+        pendingTilde = false;
+      }
+      if (atLineStart && ch === '~') {
+        pendingTilde = true;
+        atLineStart = false;
+        continue;
+      }
+      out += ch;
+      atLineStart = ch === '\n' || ch === '\r';
     }
-    // Escape after a newline within this chunk.
-    const m = /[\r\n]~\./.exec(text);
-    if (m) {
-      const head = text.slice(0, m.index + 1);
-      const tail = text.slice(m.index + 3);
-      if (head) ws.send(JSON.stringify({ type: 'input', data: head }));
-      if (tail) ws.send(JSON.stringify({ type: 'input', data: tail }));
-      cleanup('detached');
-      return;
-    }
-    ws.send(JSON.stringify({ type: 'input', data: text }));
-    lastEndedWithNewline = /[\r\n]$/.test(text);
+    if (out) ws.send(JSON.stringify({ type: 'input', data: out }));
   }
 
   function onResize() {
@@ -463,6 +501,10 @@ async function attachRemote(opts: { baseUrl: URL; token: string; sessionId: stri
     enableRawMode();
     process.stdin.resume();
     process.stdin.on('data', onStdin);
+    // Treat stdin EOF (heredoc, piped script, parent closing the fd) as a
+    // detach. Without this the WS stays open after the script ends and the
+    // local termag process hangs forever.
+    process.stdin.on('end', () => cleanup('stdin closed'));
     process.stdout.on('resize', onResize);
     // Swallow SIGINT so Ctrl-C reaches the remote PTY instead of killing
     // termag attach. Raw mode usually prevents the signal in the first
@@ -1159,14 +1201,28 @@ function getJson(url: URL, token: string, skipTlsVerify: boolean): Promise<Recor
               data = { error: text };
             }
           }
-          if ((res.statusCode || 500) >= 400) {
-            reject(new Error(String(data.error || `Request failed with HTTP ${res.statusCode}`)));
+          const status = res.statusCode || 500;
+          if (status >= 400) {
+            // Surface actionable hints for the common credential failures
+            // instead of the bare HTTP status. 401 + revoked tokens are the
+            // most-common user-tripping case for a fresh CLI session.
+            if (status === 401 || status === 403) {
+              reject(new Error('authentication failed — verify your token with `termag config show`, or rotate it in the web UI Devices dialog'));
+            } else {
+              reject(new Error(String(data.error || `Request failed with HTTP ${status}`)));
+            }
             return;
           }
           resolve(data);
         });
       }
     );
+    // Without an explicit timeout the CLI hangs indefinitely on a broker
+    // that accepts the TCP connection but never answers (proxy stall, app
+    // hang). 15s is generous for any reasonable broker response.
+    req.setTimeout(15_000, () => {
+      req.destroy(new Error('request timed out after 15s'));
+    });
     req.on('error', reject);
     req.end();
   });
