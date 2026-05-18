@@ -1,6 +1,13 @@
 'use client';
 
-import { type FormEvent, useState } from 'react';
+import { type FormEvent, useEffect, useRef, useState } from 'react';
+
+type SshConfigEntry = {
+  name: string;
+  hostname: string;
+  user?: string;
+  port?: number;
+};
 
 export type SshHost = {
   id: string;
@@ -40,6 +47,43 @@ export function NewSshHostDialog({ open, onOpenChange, onCreated }: NewSshHostDi
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState('');
   const [color, setColor] = useState<string>('');
+  const [configEntries, setConfigEntries] = useState<SshConfigEntry[]>([]);
+  const [configNote, setConfigNote] = useState<string>('');
+  const formRef = useRef<HTMLFormElement>(null);
+
+  // Pre-load the broker's ~/.ssh/config so the picker has options ready
+  // when the user opens the dialog. Failures (no config, permissions)
+  // just fall back to manual entry — `configNote` surfaces the reason.
+  useEffect(() => {
+    if (!open) return;
+    let cancelled = false;
+    fetch('/api/ssh-config')
+      .then((res) => res.json().catch(() => ({})))
+      .then((body) => {
+        if (cancelled) return;
+        if (Array.isArray(body?.entries)) setConfigEntries(body.entries);
+        if (typeof body?.note === 'string') setConfigNote(body.note);
+        else setConfigNote('');
+      })
+      .catch(() => {
+        if (!cancelled) setConfigEntries([]);
+      });
+    return () => { cancelled = true; };
+  }, [open]);
+
+  function applyConfigEntry(entry: SshConfigEntry) {
+    const form = formRef.current;
+    if (!form) return;
+    (form.elements.namedItem('name') as HTMLInputElement | null)?.setAttribute('value', '');
+    const set = (name: string, value: string) => {
+      const el = form.elements.namedItem(name) as HTMLInputElement | null;
+      if (el) el.value = value;
+    };
+    set('name', entry.name);
+    set('host', entry.hostname);
+    set('user', entry.user || '');
+    set('port', String(entry.port ?? 22));
+  }
 
   async function createHost(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -90,7 +134,35 @@ export function NewSshHostDialog({ open, onOpenChange, onCreated }: NewSshHostDi
             Make sure you can run <code className="font-mono text-xs">ssh user@host</code> from the broker non-interactively first.
           </p>
         </div>
-        <form onSubmit={createHost} className="space-y-3">
+        {configEntries.length > 0 && (
+          <div className="mb-3 rounded-md border border-line bg-bg p-2">
+            <label className="block text-xs font-medium text-muted">
+              Import from broker&apos;s ~/.ssh/config
+              <select
+                className="mt-1 h-8 w-full rounded-md border border-line bg-panel px-2 text-sm outline-none focus:border-accent"
+                defaultValue=""
+                onChange={(event) => {
+                  const entry = configEntries.find((e) => e.name === event.target.value);
+                  if (entry) applyConfigEntry(entry);
+                  // Reset back to placeholder so the same entry can be
+                  // re-selected after manual edits.
+                  event.target.value = '';
+                }}
+              >
+                <option value="" disabled>Choose a host to pre-fill…</option>
+                {configEntries.map((entry) => (
+                  <option key={entry.name} value={entry.name}>
+                    {entry.name} {entry.hostname && entry.hostname !== entry.name ? `→ ${entry.hostname}` : ''}{entry.user ? ` as ${entry.user}` : ''}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+        )}
+        {configEntries.length === 0 && configNote && (
+          <div className="mb-3 rounded-md border border-line bg-bg p-2 text-xs text-muted">{configNote}</div>
+        )}
+        <form ref={formRef} onSubmit={createHost} className="space-y-3">
           <label className="block">
             <span className="mb-1 block text-xs font-medium text-muted">Display name</span>
             <input

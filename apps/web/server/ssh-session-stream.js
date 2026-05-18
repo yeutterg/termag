@@ -310,6 +310,7 @@ class SshSessionStream {
 
     // Initial control frame so the pane drops out of "connecting" state.
     sendJson(ws, { type: 'driver-changed', driver: true, readOnly: false });
+    this.broadcastSubscriberCount();
   }
 
   handleSubscriberMessage(subscriberId, msg) {
@@ -331,6 +332,18 @@ class SshSessionStream {
     // able to tear down a stream that other browsers (or a CLI attach)
     // are sharing. Detach by closing the WS; the stream tears itself
     // down via idle teardown when the last subscriber leaves.
+  }
+
+  /**
+   * Tell every subscriber the new subscriber count. Fires on subscribe /
+   * unsubscribe so each browser can show a "👁 N" chip when more than one
+   * client is attached. Lightweight — one int per change event.
+   */
+  broadcastSubscriberCount() {
+    const count = this.subscribers.size;
+    for (const sub of this.subscribers.values()) {
+      try { sub.ws.send(JSON.stringify({ type: 'subscribers', count })); } catch {}
+    }
   }
 
   /**
@@ -362,6 +375,8 @@ class SshSessionStream {
     // A leaving subscriber may have been the smallest dimension cap. Let
     // the remaining subscribers reclaim their full window.
     this.recomputePtySize();
+    // Tell remaining viewers the count dropped.
+    this.broadcastSubscriberCount();
     if (this.subscribers.size === 0 && this.alive) {
       // Start the idle teardown timer. If another subscriber joins
       // before it fires, the timer is cancelled. Without idle teardown

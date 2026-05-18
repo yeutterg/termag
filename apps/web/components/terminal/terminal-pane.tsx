@@ -72,9 +72,16 @@ interface TerminalPaneProps {
    * title-change identifier) but ignored for routing.
    */
   ssh?: { hostId: string; tmuxName: string };
+  /**
+   * Optional callback fired with the latest subscriber count for the
+   * session. Parents (e.g., the SSH attach shell) use this to render a
+   * "👁 N" chip when more than one client is attached. Only the SSH path
+   * sends these messages today; agent attaches will follow.
+   */
+  onSubscriberCount?: (count: number) => void;
 }
 
-function TerminalPaneImpl({ sessionId, active, title, status, onTitleChange, hideHeader, ssh }: TerminalPaneProps) {
+function TerminalPaneImpl({ sessionId, active, title, status, onTitleChange, hideHeader, ssh, onSubscriberCount }: TerminalPaneProps) {
   const hostRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<XTerm | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
@@ -87,6 +94,10 @@ function TerminalPaneImpl({ sessionId, active, title, status, onTitleChange, hid
   // invokes the current callback without rebinding the terminal.
   const onTitleChangeRef = useRef(onTitleChange);
   onTitleChangeRef.current = onTitleChange;
+  // Same trick for the subscriber-count callback so the WS message
+  // handler (set up once) always sees the latest callback.
+  const onSubscriberCountRef = useRef(onSubscriberCount);
+  onSubscriberCountRef.current = onSubscriberCount;
 
   useEffect(() => {
     if (!active || !hostRef.current) return;
@@ -174,6 +185,9 @@ function TerminalPaneImpl({ sessionId, active, title, status, onTitleChange, hid
           fatalMessage = msg.message || 'terminal unavailable';
           term!.write(`\r\n\x1b[31m[${fatalMessage}]\x1b[0m\r\n`);
           try { ws.close(1008, 'terminal unavailable'); } catch {}
+        }
+        if (msg.type === 'subscribers' && typeof (msg as { count?: unknown }).count === 'number') {
+          onSubscriberCountRef.current?.((msg as { count: number }).count);
         }
         if (msg.type === 'driver-changed') {
           // Multi-subscriber model: agent's SessionStream broadcasts on every

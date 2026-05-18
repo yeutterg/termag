@@ -22,6 +22,8 @@ import {
 } from 'lucide-react';
 import { TerminalPane } from './terminal/terminal-pane';
 import { HealthBanner } from './health-banner';
+import { useSessionNotifications } from './use-session-notifications';
+import { Bell, BellOff } from 'lucide-react';
 import { PlatformProvider, Shortcut, shortcutSuffix } from './shortcut';
 import { TabLabel } from './tab-label';
 import { useTabHistory } from './use-tab-history';
@@ -611,6 +613,23 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
   // Keep the keyboard ref pointed at the latest values without re-binding.
   handlersRef.current = { activeProject, activeTab, projects, createTab, closeTab, cycleTheme, selectTab };
 
+  // Flatten projects → tab snapshots so the notifications hook can detect
+  // status transitions. Memoize so a no-op render doesn't reset the
+  // hook's transition memory (which is keyed by tabId, so resets would
+  // cause spurious double-notifications).
+  const tabSnapshots = useMemo(
+    () => projects.flatMap((project) =>
+      project.tabs.map((tab) => ({
+        projectName: project.name,
+        tabName: tab.name,
+        tabId: tab.id,
+        status: tab.status as string
+      }))
+    ),
+    [projects]
+  );
+  const notify = useSessionNotifications({ tabSnapshots });
+
   // Tab swipe handler: two-finger horizontal swipe inside any terminal
   // pane dispatches a `termag:tab-swipe` CustomEvent with `direction:
   // 'next' | 'prev'`. We resolve that against the active project's tab
@@ -954,6 +973,31 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
                                     className="min-w-0 flex-1 truncate"
                                     onRename={(next) => renameTab(project.id, tab.id, next)}
                                   />
+                                  {/* Per-tab notification toggle. First
+                                      click on any tab requests Notification
+                                      permission (cached after that). The
+                                      hook then watches for working/waiting
+                                      → idle/error transitions and fires a
+                                      browser notification for subscribed
+                                      tabs only. */}
+                                  {notify.permission !== 'unsupported' && (
+                                    <span
+                                      className={cn(
+                                        'grid h-4 w-4 shrink-0 place-items-center rounded text-muted hover:bg-bg hover:text-text',
+                                        notify.subscribed.has(tab.id) ? 'opacity-100 text-accent' : 'opacity-0 group-hover/tab:opacity-100'
+                                      )}
+                                      title={notify.subscribed.has(tab.id) ? 'Stop notifying when this session goes idle/errors' : 'Notify me when this session goes idle or errors'}
+                                      onClick={async (event) => {
+                                        event.stopPropagation();
+                                        if (notify.permission === 'default') {
+                                          await notify.requestPermission();
+                                        }
+                                        notify.toggle(tab.id);
+                                      }}
+                                    >
+                                      {notify.subscribed.has(tab.id) ? <Bell className="h-3 w-3" /> : <BellOff className="h-3 w-3" />}
+                                    </span>
+                                  )}
                                   {project.tabs.length > 1 && (
                                     <span
                                       className="grid h-4 w-4 shrink-0 place-items-center rounded text-muted opacity-0 hover:bg-bg hover:text-text group-hover/tab:opacity-100"
