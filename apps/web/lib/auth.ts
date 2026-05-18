@@ -19,14 +19,16 @@ function devAuthEnabled() {
 }
 
 /**
- * "Trusted network" mode is on by default: termag assumes it sits behind a
- * private-network ACL (Tailscale, WireGuard, ssh tunnel, etc.) and every
- * request resolves to a single configured user. Set TERMAG_TRUSTED_NETWORK
- * to "false" to opt into OAuth instead. The laptop-agent token path is
- * unaffected either way.
+ * "Trusted network" mode is opt-in: when enabled, termag assumes it sits
+ * behind a private-network ACL (Tailscale, WireGuard, ssh tunnel, etc.)
+ * and every request resolves to a single configured user. Set
+ * TERMAG_TRUSTED_NETWORK="true" to enable. The default is OAuth — that
+ * way a fresh deployment can't accidentally be world-readable.
+ *
+ * The laptop-agent token path is unaffected either way.
  */
 export function trustedNetworkEnabled(): boolean {
-  return process.env.TERMAG_TRUSTED_NETWORK !== 'false';
+  return process.env.TERMAG_TRUSTED_NETWORK === 'true';
 }
 
 export function trustedUserEmail(): string {
@@ -210,11 +212,68 @@ function unauthorized() {
   return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 }
 
+function forbidden(reason: string) {
+  return NextResponse.json({ error: reason }, { status: 403 });
+}
+
+/**
+ * Origin-header CSRF check. Mutating methods (POST/PATCH/PUT/DELETE) on a
+ * cookie-authenticated request must originate from the same host as the
+ * request (or an explicitly allowlisted origin). This shuts the door on
+ * cross-site form / fetch attacks even when SameSite=lax cookies are
+ * present. Bearer-authenticated calls (CLI) are exempt — they don't ride
+ * on cookies so CSRF isn't the threat model.
+ *
+ * We also honor Sec-Fetch-Site when present (Chromium/Firefox always send
+ * it): "same-origin" / "same-site" / "none" (top-level nav) are accepted;
+ * "cross-site" is rejected before we even look at Origin.
+ */
+const MUTATING_METHODS = new Set(['POST', 'PATCH', 'PUT', 'DELETE']);
+
+export function isOriginSafe(request: Request): boolean {
+  if (!MUTATING_METHODS.has(request.method.toUpperCase())) return true;
+
+  const fetchSite = request.headers.get('sec-fetch-site');
+  if (fetchSite === 'cross-site') return false;
+  // Chrome sends "same-origin" for fetch(), "same-site" for subdomains.
+  // Both are acceptable — same site implies same auth realm here.
+  if (fetchSite === 'same-origin' || fetchSite === 'same-site') return true;
+
+  const origin = request.headers.get('origin');
+  if (!origin) {
+    // No Origin AND no Sec-Fetch-Site means a very old client or a non-browser
+    // (curl). Without a Bearer token, we don't trust it for a mutation.
+    return false;
+  }
+  let originHost: string;
+  try {
+    originHost = new URL(origin).host;
+  } catch {
+    return false;
+  }
+  const requestHost = request.headers.get('host');
+  if (requestHost && originHost === requestHost) return true;
+
+  // Allowlist via TERMAG_ALLOWED_ORIGINS (comma-separated). Same env knob
+  // the WS layer uses, so the two stay in sync.
+  const allowed = (process.env.TERMAG_ALLOWED_ORIGINS || '')
+    .split(',')
+    .map((entry) => entry.trim())
+    .filter(Boolean)
+    .map((entry) => {
+      try { return new URL(entry).host; } catch { return entry.replace(/\/.*/, ''); }
+    });
+  return allowed.includes(originHost);
+}
+
 /**
  * Wraps a route handler with auth: short-circuits to 401 when the user isn't
  * signed in, otherwise calls the inner handler with the resolved User as the
  * first argument. Throwing a Response from a Next.js route handler is treated
  * as a 500, so this wrapper keeps auth flow declarative without throwing.
+ *
+ * Cookie-authenticated mutations also get a CSRF Origin check before the
+ * handler runs. Bearer-authenticated mutations skip it.
  */
 export function withAuth<TArgs extends unknown[]>(
   handler: (user: User, ...args: TArgs) => Promise<Response> | Response
@@ -234,6 +293,9 @@ export function withAuth<TArgs extends unknown[]>(
     }
     const user = await currentUser();
     if (!user) return unauthorized();
+    if (maybeRequest && !isOriginSafe(maybeRequest)) {
+      return forbidden('CSRF check failed: cross-site request blocked');
+    }
     return handler(user, ...args);
   };
 }

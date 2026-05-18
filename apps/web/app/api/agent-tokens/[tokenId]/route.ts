@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { z } from 'zod';
 import { withAuth } from '@/lib/auth';
 import { prisma } from '@/lib/prisma';
+import { logAudit } from '@/lib/audit';
 import { disconnectAgentToken } from '@/lib/broker';
 
 const tokenView = {
@@ -32,7 +33,7 @@ function normalizeRelative(value: string | null | undefined): string | null {
   return cleaned;
 }
 
-export const DELETE = withAuth(async (user, _request: Request, { params }: { params: Promise<{ tokenId: string }> }) => {
+export const DELETE = withAuth(async (user, request: Request, { params }: { params: Promise<{ tokenId: string }> }) => {
   const { tokenId } = await params;
   const existing = await prisma.agentToken.findFirst({ where: { id: tokenId, userId: user.id } });
   if (!existing) return NextResponse.json({ error: 'Not found' }, { status: 404 });
@@ -41,6 +42,15 @@ export const DELETE = withAuth(async (user, _request: Request, { params }: { par
     data: { revokedAt: new Date() }
   });
   disconnectAgentToken(user.id, tokenId);
+  logAudit({
+    userId: user.id,
+    action: 'revoke-token',
+    subjectType: 'token',
+    subjectId: tokenId,
+    deviceName: existing.name,
+    request,
+    payload: { name: existing.name, prefix: existing.tokenPrefix }
+  });
   return NextResponse.json({ ok: true });
 });
 
@@ -64,6 +74,15 @@ export const PATCH = withAuth(async (user, request: Request, { params }: { param
     where: { id: tokenId },
     data,
     select: tokenView
+  });
+  logAudit({
+    userId: user.id,
+    action: 'update-token',
+    subjectType: 'token',
+    subjectId: tokenId,
+    deviceName: updated.name,
+    request,
+    payload: { changed: Object.keys(data) }
   });
   return NextResponse.json(updated);
 });

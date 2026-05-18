@@ -79,7 +79,7 @@ Pick the path that matches how the broker will be reached. Both use Docker Compo
 
 #### Path A — Private network (Tailscale, WireGuard, ssh tunnel, LAN)
 
-The default. Auth-less: no login screen, no OAuth setup. Anyone who can reach the URL gets a session, which is exactly what you want when the URL is already gated by your VPN.
+Opt-in mode. Set `TERMAG_TRUSTED_NETWORK=true` to skip the login screen entirely — anyone who can reach the URL gets a session, which is exactly what you want when the URL is already gated by your VPN. The broker refuses to boot in trusted-network mode with a non-loopback bind unless you also set `TERMAG_PASSWORD` (or front it behind a tunnel that binds to `127.0.0.1`).
 
 Clone, then prep your env file:
 
@@ -108,7 +108,9 @@ NEXTAUTH_URL=http://localhost
 
 NEXTAUTH_SECRET=<paste output of openssl above>
 TERMAG_ROOTS={"<device-name>":"<project-root>"}
-# leave TERMAG_TRUSTED_NETWORK=true (the default)
+TERMAG_TRUSTED_NETWORK=true
+# If the broker is bound to anything other than 127.0.0.1, also set:
+# TERMAG_PASSWORD=pick-a-long-random-string
 ```
 
 `NEXTAUTH_URL` must be exactly what the browser types — same scheme, host, and port. A mismatch breaks OAuth callbacks and session cookies.

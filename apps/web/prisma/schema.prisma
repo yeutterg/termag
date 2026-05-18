@@ -23,6 +23,7 @@ model User {
 
   projects    Project[]
   agentTokens AgentToken[]
+  auditEvents AuditEvent[]
 }
 
 model AgentToken {
@@ -127,4 +128,33 @@ model ScrollbackChunk {
   session   Session @relation(fields: [sessionId], references: [id], onDelete: Cascade)
 
   @@index([sessionId, createdAt])
+  // Standalone createdAt index supports the daily TTL prune. Without it,
+  // pruning would full-scan the table once it grows past a few thousand
+  // chunks. Cheap on insert (one extra B-tree write) for a big speedup on
+  // delete-by-age.
+  @@index([createdAt])
+}
+
+// Append-only security/activity log. Used for the audit dashboard and for
+// post-incident forensics. Never updated — every action is a new entry.
+// `payload` is a free-form JSON blob for action-specific data (e.g., a
+// killed session's tmuxName, a project's spawnCommand). Retention is
+// unbounded for now — rows are tiny and incidents may surface weeks later.
+model AuditEvent {
+  id          String   @id @default(cuid())
+  action      String   // "attach", "kill-session", "create-project", "rotate-token", etc.
+  subjectType String?  // "session", "project", "token", "device" — null when global
+  subjectId   String?  // entity touched
+  deviceName  String?  // device involved (rootKey), if applicable
+  ip          String?
+  userAgent   String?
+  payload     String?  // JSON; keep small — full bodies belong elsewhere
+  createdAt   DateTime @default(now())
+
+  userId String?
+  user   User?   @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([userId, createdAt])
+  @@index([action, createdAt])
+  @@index([createdAt])
 }

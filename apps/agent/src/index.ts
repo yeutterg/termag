@@ -219,14 +219,26 @@ async function fetchCliState(): Promise<{ state: CliState; baseUrl: URL; usedFal
   let lastError: unknown;
   for (let i = 0; i < candidates.length; i++) {
     const candidate = candidates[i];
+    const isFallback = i > 0;
     try {
+      // Probe-before-token: when we're about to send the Bearer to a URL the
+      // user did NOT explicitly configure (auto-fallback only), confirm the
+      // target identifies itself as a termag broker first. Otherwise an
+      // unrelated dev server happening to listen on the alt port would
+      // receive (and possibly log) the agent token in its Authorization
+      // header. The configured URL is trusted as-is — that's the user's
+      // explicit choice.
+      if (isFallback && !(await probeBrokerIdentity(candidate))) {
+        lastError = new Error(`alt host ${candidate.host} did not identify as a termag broker — refusing to send token`);
+        continue;
+      }
       const stateUrl = httpUrlFromAgentUrl(candidate, '/api/cli/state');
       const skipTls = insecureLocalTls && stateUrl.protocol === 'https:' && isLocalHost(stateUrl.hostname);
       const json = await getJson(stateUrl, creds.token, skipTls);
       return {
         state: json as unknown as CliState,
         baseUrl: candidate,
-        usedFallback: i === 0 ? null : candidate
+        usedFallback: isFallback ? candidate : null
       };
     } catch (err) {
       lastError = err;
@@ -238,6 +250,59 @@ async function fetchCliState(): Promise<{ state: CliState; baseUrl: URL; usedFal
     }
   }
   throw lastError instanceof Error ? lastError : new Error(String(lastError));
+}
+
+/**
+ * Unauthenticated probe against /api/cli/ping. Returns true only if the
+ * endpoint responds 200 with the marker payload. Used before sending the
+ * Bearer to any auto-fallback URL. Failures (404, wrong shape, connection
+ * error, parse error) return false rather than throwing so the caller
+ * cleanly drops the fallback and surfaces a single error.
+ */
+async function probeBrokerIdentity(url: URL): Promise<boolean> {
+  try {
+    const pingUrl = httpUrlFromAgentUrl(url, '/api/cli/ping');
+    const skipTls = insecureLocalTls && pingUrl.protocol === 'https:' && isLocalHost(pingUrl.hostname);
+    const client = pingUrl.protocol === 'https:' ? https : http;
+    return await new Promise<boolean>((resolve) => {
+      const req = client.request(
+        {
+          protocol: pingUrl.protocol,
+          hostname: pingUrl.hostname,
+          port: pingUrl.port,
+          path: pingUrl.pathname,
+          method: 'GET',
+          headers: { accept: 'application/json' },
+          rejectUnauthorized: !skipTls
+        } as HttpsRequestOptions,
+        (res) => {
+          if (res.statusCode !== 200) { res.resume(); resolve(false); return; }
+          const chunks: Buffer[] = [];
+          // Cap probe body at 1KB — anything bigger isn't us.
+          let bytes = 0;
+          res.on('data', (chunk) => {
+            const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+            bytes += buf.length;
+            if (bytes > 1024) { req.destroy(); resolve(false); return; }
+            chunks.push(buf);
+          });
+          res.on('end', () => {
+            try {
+              const data = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+              resolve(data && data.service === 'termag');
+            } catch {
+              resolve(false);
+            }
+          });
+        }
+      );
+      req.setTimeout(5_000, () => { req.destroy(); resolve(false); });
+      req.on('error', () => resolve(false));
+      req.end();
+    });
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -287,12 +352,12 @@ async function runList(args: string[]) {
   // status: it's a strict superset of what the broker can know about this
   // machine and shouldn't be hidden behind the broker being healthy.
   if (localSessions.length > 0) {
-    const headerSuffix = localDeviceName ? ` \x1b[2m(${localDeviceName})\x1b[0m` : '';
+    const headerSuffix = localDeviceName ? ` \x1b[2m(${sanitizeForTerminal(localDeviceName)})\x1b[0m` : '';
     console.log(`\x1b[1m▸ local tmux on this machine\x1b[0m${headerSuffix}`);
     for (const session of localSessions) {
       const winLabel = session.windowCount === 1 ? '1 window' : `${session.windowCount} windows`;
-      const pathLabel = session.path ? `  ·  ${session.path}` : '';
-      console.log(`  \x1b[2m○ ${session.name}  ${winLabel}${pathLabel}\x1b[0m`);
+      const pathLabel = session.path ? `  ·  ${sanitizeForTerminal(session.path)}` : '';
+      console.log(`  \x1b[2m○ ${sanitizeForTerminal(session.name)}  ${winLabel}${pathLabel}\x1b[0m`);
     }
     console.log('');
   }
@@ -308,9 +373,9 @@ async function runList(args: string[]) {
   if (state && state.devices.length > 0) {
     for (const device of state.devices) {
       const flag = device.connected ? '\x1b[32m●\x1b[0m' : '\x1b[2m○\x1b[0m';
-      const versionLabel = device.version ? ` v${device.version}` : '';
+      const versionLabel = device.version ? ` v${sanitizeForTerminal(device.version)}` : '';
       const stateLabel = device.connected ? 'connected' : 'offline';
-      console.log(`  ${flag} \x1b[1m${device.name}\x1b[0m  \x1b[2m${stateLabel}${versionLabel}\x1b[0m`);
+      console.log(`  ${flag} \x1b[1m${sanitizeForTerminal(device.name)}\x1b[0m  \x1b[2m${stateLabel}${versionLabel}\x1b[0m`);
       if (device.projects.length === 0 && device.rawTmuxSessions.length === 0) {
         console.log('    \x1b[2m(no projects)\x1b[0m');
         continue;
@@ -318,17 +383,17 @@ async function runList(args: string[]) {
       for (const project of device.projects) {
         const statusDot = projectStatusDot(project.status);
         const tabsLabel = project.tabs.length === 1 ? '1 tab' : `${project.tabs.length} tabs`;
-        console.log(`    ${statusDot} ${project.name.padEnd(28)} \x1b[2m${project.relativePath}  ·  ${tabsLabel}\x1b[0m`);
+        console.log(`    ${statusDot} ${sanitizeForTerminal(project.name).padEnd(28)} \x1b[2m${sanitizeForTerminal(project.relativePath)}  ·  ${tabsLabel}\x1b[0m`);
         for (const tab of project.tabs) {
           const tabDot = projectStatusDot(tab.status);
-          const sid = tab.sessionId ? ` \x1b[2m${tab.sessionId}\x1b[0m` : '';
-          console.log(`        ${tabDot} ${tab.name}${sid}`);
+          const sid = tab.sessionId ? ` \x1b[2m${sanitizeForTerminal(tab.sessionId)}\x1b[0m` : '';
+          console.log(`        ${tabDot} ${sanitizeForTerminal(tab.name)}${sid}`);
         }
       }
       for (const session of device.rawTmuxSessions) {
         const winLabel = session.windowCount === 1 ? '1 window' : `${session.windowCount} windows`;
-        const pathLabel = session.path ? `  ·  ${session.path}` : '';
-        console.log(`    \x1b[2m○ ${session.name}  (adopted · ${winLabel})${pathLabel}\x1b[0m`);
+        const pathLabel = session.path ? `  ·  ${sanitizeForTerminal(session.path)}` : '';
+        console.log(`    \x1b[2m○ ${sanitizeForTerminal(session.name)}  (adopted · ${winLabel})${pathLabel}\x1b[0m`);
       }
     }
   } else if (stateResult.status === 'rejected') {
@@ -377,6 +442,19 @@ function projectStatusDot(status: string): string {
     case 'error': return '\x1b[31m●\x1b[0m';
     default: return '\x1b[2m○\x1b[0m';
   }
+}
+
+/**
+ * Strip C0 (0x00–0x1F incl. ESC) and C1 (0x7F–0x9F) control bytes from any
+ * untrusted string before we splice it into a console.log surrounded by our
+ * own ANSI codes. Without this, a tmux session name or broker-supplied
+ * project name containing ESC could inject arbitrary terminal-control
+ * sequences into the CLI user's terminal (move cursor, set title, even
+ * issue keystrokes via DECRQM responses on some terminals).
+ */
+function sanitizeForTerminal(s: string): string {
+  // eslint-disable-next-line no-control-regex
+  return s.replace(/[\x00-\x1F\x7F-\x9F]/g, '?');
 }
 
 async function runAttach(args: string[]) {

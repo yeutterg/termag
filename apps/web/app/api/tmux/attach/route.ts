@@ -4,6 +4,7 @@ import { withAuth } from '@/lib/auth';
 import { listTmuxSessions } from '@/lib/broker';
 import { createAttachedTmuxProject } from '@/lib/projects';
 import { prisma } from '@/lib/prisma';
+import { logAudit } from '@/lib/audit';
 
 const attachSchema = z.object({
   rootKey: z.string().trim().min(1),
@@ -62,6 +63,17 @@ export const POST = withAuth(async (user, request: Request) => {
         ordinal: window.index + 1
       }))
     });
+    if (project) {
+      logAudit({
+        userId: user.id,
+        action: 'attach',
+        subjectType: 'project',
+        subjectId: project.id,
+        deviceName: rootKey,
+        request,
+        payload: { tmuxSessionName: sessionName, windowCount: windows.length }
+      });
+    }
     return NextResponse.json(project, { status: 201 });
   } catch (error) {
     if (typeof error === 'object' && error && 'code' in error && error.code === 'P2002') {

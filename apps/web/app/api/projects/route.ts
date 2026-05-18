@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { z } from 'zod';
 import { withAuth } from '@/lib/auth';
 import { prisma } from '@/lib/prisma';
+import { logAudit } from '@/lib/audit';
 import { createProject, listProjects } from '@/lib/projects';
 import { AGENT_DEFAULTS, DEFAULT_AGENT_TYPE, normalizeRelativePath, parseRoots, resolveProjectDirectory } from '@/lib/defaults';
 
@@ -109,6 +110,27 @@ export const POST = withAuth(async (user, request: Request) => {
         agentSpawnCommand: agent.spawnCommand || agent.agentSpawnCommand
       }))
     });
+    // Audit: project creation can wire a custom spawnCommand that runs on
+    // the agent, so the parameters matter for forensics. Record the full
+    // shape (truncated by logAudit if needed).
+    if (project) {
+      logAudit({
+        userId: user.id,
+        action: 'create-project',
+        subjectType: 'project',
+        subjectId: project.id,
+        deviceName: resolved.rootKey,
+        request,
+        payload: {
+          name: project.name,
+          relativePath: resolved.relativePath,
+          agents: agents.map((agent) => ({
+            agentType: agent.agentType,
+            hasSpawnCommand: Boolean(agent.spawnCommand || agent.agentSpawnCommand)
+          }))
+        }
+      });
+    }
     return NextResponse.json(project, { status: 201 });
   } catch (error) {
     if (typeof error === 'object' && error && 'code' in error && error.code === 'P2002') {

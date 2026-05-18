@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { z } from 'zod';
 import { withAuth } from '@/lib/auth';
 import { prisma } from '@/lib/prisma';
+import { logAudit } from '@/lib/audit';
 import { normalizeRelativePath, parseRoots } from '@/lib/defaults';
 import { killTmuxProjectSessions, killTmuxWindows } from '@/lib/broker';
 
@@ -49,6 +50,15 @@ export const PATCH = withAuth(async (user, request: Request, { params }: Params)
       data,
       include: { tabs: { orderBy: { ordinal: 'asc' }, include: { session: true } }, sessions: true }
     });
+    logAudit({
+      userId: user.id,
+      action: 'update-project',
+      subjectType: 'project',
+      subjectId: project.id,
+      deviceName: project.rootKey,
+      request,
+      payload: { changed: Object.keys(data) }
+    });
     return NextResponse.json(project);
   } catch (error) {
     if (typeof error === 'object' && error && 'code' in error && error.code === 'P2002') {
@@ -58,12 +68,13 @@ export const PATCH = withAuth(async (user, request: Request, { params }: Params)
   }
 });
 
-export const DELETE = withAuth(async (user, _request: Request, { params }: Params) => {
+export const DELETE = withAuth(async (user, request: Request, { params }: Params) => {
   const { projectId } = await params;
   const existing = await prisma.project.findFirst({
     where: { id: projectId, userId: user.id },
     select: {
       id: true,
+      name: true,
       rootKey: true,
       tmuxSessionName: true,
       tmuxManaged: true,
@@ -82,5 +93,14 @@ export const DELETE = withAuth(async (user, _request: Request, { params }: Param
         .map((session) => ({ rootKey: existing.rootKey, tmuxName: session.tmuxName }))
     );
   }
+  logAudit({
+    userId: user.id,
+    action: 'delete-project',
+    subjectType: 'project',
+    subjectId: existing.id,
+    deviceName: existing.rootKey,
+    request,
+    payload: { name: existing.name, tmuxSessionName: existing.tmuxSessionName }
+  });
   return NextResponse.json({ ok: true });
 });

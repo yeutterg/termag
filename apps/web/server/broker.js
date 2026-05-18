@@ -1,7 +1,7 @@
 const crypto = require('node:crypto');
 const { WebSocket } = require('ws');
 const { getToken } = require('next-auth/jwt');
-const { appendScrollback } = require('./scrollback');
+const { appendScrollback, startScrollbackPrune } = require('./scrollback');
 
 // Wire-protocol constant shared with the agent. Keep in sync with
 // apps/agent/src/index.ts → WS_REPLACED_REASON.
@@ -77,8 +77,10 @@ function parseCookieHeader(header) {
 }
 
 function trustedNetworkEnabled() {
-  // On by default. Opt out with TERMAG_TRUSTED_NETWORK=false to require OAuth.
-  return process.env.TERMAG_TRUSTED_NETWORK !== 'false';
+  // Opt-in. Set TERMAG_TRUSTED_NETWORK=true to bypass OAuth when behind a
+  // private-network ACL. Default is OAuth — secure-by-default for fresh
+  // deployments. Must stay in sync with apps/web/lib/auth.ts.
+  return process.env.TERMAG_TRUSTED_NETWORK === 'true';
 }
 
 function trustedUserEmail() {
@@ -184,6 +186,12 @@ function createBroker({ prisma, wss }) {
   const browserStreams = new Map();
   const sessionPrimary = new Map();
   let seq = 0;
+
+  // Schedule the scrollback TTL prune as part of broker boot. Runs once
+  // immediately so a freshly-started broker that's been off for a while
+  // catches up; afterwards it ticks every 6h. The handle is .unref()'d
+  // inside startScrollbackPrune so it doesn't keep the process alive.
+  startScrollbackPrune(prisma);
 
   function nextRequestId() {
     seq += 1;

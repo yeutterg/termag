@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { z } from 'zod';
 import { withAuth } from '@/lib/auth';
 import { prisma } from '@/lib/prisma';
+import { logAudit } from '@/lib/audit';
 import { createRawToken, hashToken, tokenPrefix } from '@/lib/tokens';
 
 const createSchema = z.object({ name: z.string().trim().min(1).max(80) });
@@ -47,6 +48,18 @@ export const POST = withAuth(async (user, request: Request) => {
       tokenPrefix: tokenPrefix(raw)
     },
     select: tokenView
+  });
+  // Token creation is a high-trust event: this token is full access to the
+  // user's account for whichever device gets it. Record name + prefix so a
+  // future audit can match the token back to its row without revealing it.
+  logAudit({
+    userId: user.id,
+    action: 'create-token',
+    subjectType: 'token',
+    subjectId: token.id,
+    deviceName: token.name,
+    request,
+    payload: { name: token.name, prefix: token.tokenPrefix }
   });
   return NextResponse.json({ ...token, token: raw }, { status: 201 });
 });

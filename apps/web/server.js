@@ -9,13 +9,41 @@ const { createBroker } = require('./server/broker');
 const dev = process.env.NODE_ENV !== 'production';
 const hostname = process.env.HOSTNAME || '0.0.0.0';
 const port = Number(process.env.PORT || 3000);
+const trustedNetwork = process.env.TERMAG_TRUSTED_NETWORK === 'true';
 
-// In trusted-network mode (default) NextAuth is bypassed entirely, but its
-// module still complains at boot if no secret is set. Provide a stable
-// throwaway so the log is clean. OAuth users (TERMAG_TRUSTED_NETWORK=false)
-// must set their own NEXTAUTH_SECRET — they'll see the warning if missing.
-if (process.env.TERMAG_TRUSTED_NETWORK !== 'false' && !process.env.NEXTAUTH_SECRET) {
+// In trusted-network mode NextAuth is bypassed entirely, but its module
+// still complains at boot if no secret is set. Provide a stable throwaway
+// so the log is clean. OAuth users must set their own NEXTAUTH_SECRET —
+// they'll see the warning from NextAuth itself if missing.
+if (trustedNetwork && !process.env.NEXTAUTH_SECRET) {
   process.env.NEXTAUTH_SECRET = 'termag-trusted-mode-unused';
+}
+
+// Misconfiguration check. "trusted-network on + non-loopback bind + no
+// password gate" = broker wide-open to anyone who can route to the host.
+// Hard-error in production (saves you from a real incident); loud warn in
+// dev (lets you bind 0.0.0.0 for LAN testing without being locked out).
+function isLoopbackBind(host) {
+  return host === '127.0.0.1' || host === '::1' || host === 'localhost';
+}
+const exposedTrustedMode = trustedNetwork && !isLoopbackBind(hostname) && !process.env.TERMAG_PASSWORD;
+if (exposedTrustedMode) {
+  const msg =
+    `TERMAG_TRUSTED_NETWORK=true bound to non-loopback (${hostname}) with no TERMAG_PASSWORD. ` +
+    'Anyone who can reach this host can attach to your sessions. Pick one:\n' +
+    '  - set TERMAG_PASSWORD to a long random string (shared-password gate), or\n' +
+    '  - set HOSTNAME=127.0.0.1 (loopback only — front it with Tailscale/Caddy/etc.), or\n' +
+    '  - set TERMAG_TRUSTED_NETWORK=false and configure OAuth (see .env.example).';
+  if (dev) {
+    console.warn(`\n\x1b[33m[termag] WARNING:\x1b[0m ${msg}\n`);
+  } else {
+    console.error(`[termag] refusing to start: ${msg}`);
+    process.exit(1);
+  }
+}
+if (!trustedNetwork && !process.env.NEXTAUTH_SECRET) {
+  console.error('[termag] refusing to start: TERMAG_TRUSTED_NETWORK is not "true" and NEXTAUTH_SECRET is missing. Generate one with `openssl rand -hex 32`.');
+  process.exit(1);
 }
 const app = next({ dev, hostname, port, dir: path.resolve(__dirname) });
 const handle = app.getRequestHandler();
@@ -80,17 +108,25 @@ function allowedBrowserOriginHosts() {
 }
 
 function browserOriginAllowed(req) {
+  // Missing Origin used to be allowed (browsers always send it, so the only
+  // callers without one were thought to be benign). That gave any non-browser
+  // client a free pass past the Origin gate — combined with trusted-network
+  // mode, an attacker could attach to live sessions from curl. Require Origin
+  // to be present AND match the request host or an explicit allowlist entry.
   const origin = req.headers.origin;
-  if (!origin) return true;
+  if (!origin) return false;
   const originHost = hostFromOrigin(origin);
   if (!originHost) return false;
   if (originHost === req.headers.host) return true;
   return allowedBrowserOriginHosts().has(originHost);
 }
 
-function agentTokenFromRequest(url, req) {
-  const bearer = req.headers.authorization?.replace(/^Bearer\s+/i, '').trim();
-  return bearer || url.searchParams.get('token') || '';
+function agentTokenFromRequest(req) {
+  // Authorization header only. We used to accept ?token= in the query string,
+  // but query strings end up in reverse-proxy access logs, browser history,
+  // and APM traces — that's a long-lived agent-token leak vector. Bearer-only
+  // closes it. (Both agent code paths already send the header.)
+  return req.headers.authorization?.replace(/^Bearer\s+/i, '').trim() || '';
 }
 
 process.once('exit', removePidFile);
@@ -135,7 +171,7 @@ app.prepare().then(() => {
     }
     wss.handleUpgrade(req, socket, head, (ws) => {
       if (url.pathname === '/api/ws/agent') {
-        const token = agentTokenFromRequest(url, req);
+        const token = agentTokenFromRequest(req);
         if (!token || token.length > AGENT_TOKEN_MAX_LENGTH) {
           ws.close(1008, 'token required');
           return;
