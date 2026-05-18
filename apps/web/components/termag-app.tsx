@@ -611,6 +611,29 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
   // Keep the keyboard ref pointed at the latest values without re-binding.
   handlersRef.current = { activeProject, activeTab, projects, createTab, closeTab, cycleTheme, selectTab };
 
+  // Tab swipe handler: two-finger horizontal swipe inside any terminal
+  // pane dispatches a `termag:tab-swipe` CustomEvent with `direction:
+  // 'next' | 'prev'`. We resolve that against the active project's tab
+  // order and jump there. Designed for iPad — keyboard users have ⌃1-9.
+  useEffect(() => {
+    function onSwipe(event: Event) {
+      const detail = (event as CustomEvent<{ direction: 'next' | 'prev' }>).detail;
+      if (!detail) return;
+      const project = activeProject;
+      const tab = activeTab;
+      if (!project || !tab) return;
+      const idx = project.tabs.findIndex((t) => t.id === tab.id);
+      if (idx < 0) return;
+      const nextIdx = detail.direction === 'next'
+        ? Math.min(project.tabs.length - 1, idx + 1)
+        : Math.max(0, idx - 1);
+      const nextTab = project.tabs[nextIdx];
+      if (nextTab && nextTab.id !== tab.id) selectTab(project.id, nextTab.id);
+    }
+    window.addEventListener('termag:tab-swipe', onSwipe as EventListener);
+    return () => window.removeEventListener('termag:tab-swipe', onSwipe as EventListener);
+  }, [activeProject, activeTab, selectTab]);
+
   const devices = useMemo(() => {
     const next = new Set(tokenDevices);
     for (const project of projects) next.add(project.rootKey);

@@ -1,6 +1,7 @@
 'use client';
 
-import { memo, useEffect, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useRef, useState } from 'react';
+import type { TouchEvent as ReactTouchEvent } from 'react';
 import type { ITheme, Terminal as XTerm } from '@xterm/xterm';
 import { cn, statusDot } from '@/lib/utils';
 
@@ -341,6 +342,35 @@ function TerminalPaneImpl({ sessionId, active, title, status, onTitleChange, hid
   const showBadge = driverState !== null && !driverState.driver;
   const isReadOnly = driverState?.readOnly === true;
 
+  // Two-finger horizontal swipe → tab switch. Tracked here so the
+  // gesture is local to the pane and doesn't intercept other touches.
+  // Resolves to a CustomEvent so termag-app stays the authority on tab
+  // ordering and on which project is active.
+  const swipeStartRef = useRef<{ x: number; y: number } | null>(null);
+  const onTabSwipeStart = useCallback((event: ReactTouchEvent<HTMLDivElement>) => {
+    if (event.touches.length !== 2) {
+      swipeStartRef.current = null;
+      return;
+    }
+    const [a, b] = [event.touches[0], event.touches[1]];
+    swipeStartRef.current = { x: (a.clientX + b.clientX) / 2, y: (a.clientY + b.clientY) / 2 };
+  }, []);
+  const onTabSwipeEnd = useCallback((event: ReactTouchEvent<HTMLDivElement>) => {
+    const start = swipeStartRef.current;
+    swipeStartRef.current = null;
+    if (!start) return;
+    const touch = event.changedTouches[0];
+    if (!touch) return;
+    const dx = touch.clientX - start.x;
+    const dy = touch.clientY - start.y;
+    // 80px threshold + dominant horizontal axis (3:1) keeps accidental
+    // vertical scrolls / pinches from firing tab switches.
+    if (Math.abs(dx) < 80 || Math.abs(dx) < Math.abs(dy) * 3) return;
+    window.dispatchEvent(new CustomEvent('termag:tab-swipe', {
+      detail: { direction: dx < 0 ? 'next' : 'prev' }
+    }));
+  }, []);
+
   return (
     <section className={cn('flex min-h-0 flex-1 flex-col overflow-hidden bg-bg', !hideHeader && 'rounded-lg border border-line')}>
       {!hideHeader && (
@@ -366,34 +396,126 @@ function TerminalPaneImpl({ sessionId, active, title, status, onTitleChange, hid
           </div>
         </header>
       )}
-      <div ref={hostRef} className="min-h-0 flex-1 bg-bg" />
-      <div className="flex h-10 shrink-0 items-center gap-1 border-t border-line bg-panel2 px-2 md:hidden">
-        {[
-          ['Esc', '\u001b'],
-          ['Tab', '\t'],
-          ['←', '\u001b[D'],
-          ['↓', '\u001b[B'],
-          ['↑', '\u001b[A'],
-          ['→', '\u001b[C'],
-          ['C-c', '\u0003'],
-          ['C-d', '\u0004']
-        ].map(([label, data]) => (
-          <button
-            key={label}
-            className="h-7 min-w-8 rounded-md border border-line bg-bg px-2 text-xs"
-            onClick={() => {
-              const ws = wsRef.current;
-              if (ws?.readyState === WebSocket.OPEN) {
-                ws.send(JSON.stringify({ type: 'input', data }));
-              }
-              termRef.current?.focus();
-            }}
-          >
-            {label}
-          </button>
-        ))}
-      </div>
+      <div
+        ref={hostRef}
+        className="min-h-0 flex-1 bg-bg"
+        // iPad-first: two-finger horizontal swipe switches tabs. The
+        // gesture dispatches a window-level CustomEvent ('termag:tab-swipe')
+        // that termag-app resolves against the active project's tab order.
+        // Single-finger gestures pass through to xterm for selection.
+        onTouchStart={onTabSwipeStart}
+        onTouchEnd={onTabSwipeEnd}
+      />
+      <MobileSoftKeys
+        onInput={(data) => {
+          const ws = wsRef.current;
+          if (ws?.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: 'input', data }));
+          }
+          termRef.current?.focus();
+        }}
+      />
     </section>
+  );
+}
+
+// Mobile-only soft-modifier bar. Phones and iPads have no physical Esc,
+// Tab, Ctrl, F-keys, or arrow keys — without these the terminal is
+// nearly unusable for vim/tmux/emacs muscle memory. The main row covers
+// the always-needed essentials; the ⋯ button reveals readline + paging
+// shortcuts; Fn toggles F1-F12.
+const ESC = '\u001b';
+
+const MOBILE_PRIMARY_KEYS: Array<[string, string]> = [
+  ['Esc', ESC],
+  ['Tab', '\t'],
+  ['←', `${ESC}[D`],
+  ['↓', `${ESC}[B`],
+  ['↑', `${ESC}[A`],
+  ['→', `${ESC}[C`],
+  ['C-c', '\u0003'],
+  ['C-d', '\u0004']
+];
+
+const MOBILE_SECONDARY_KEYS: Array<[string, string, string?]> = [
+  ['C-a', '\u0001', 'start of line'],
+  ['C-e', '\u0005', 'end of line'],
+  ['C-w', '\u0017', 'delete word back'],
+  ['C-u', '\u0015', 'delete line back'],
+  ['C-k', '\u000b', 'delete line forward'],
+  ['C-r', '\u0012', 'reverse search'],
+  ['C-l', '\u000c', 'clear'],
+  ['C-z', '\u001a', 'suspend'],
+  ['PgUp', `${ESC}[5~`],
+  ['PgDn', `${ESC}[6~`],
+  ['Home', `${ESC}[H`],
+  ['End', `${ESC}[F`],
+  ['Del', `${ESC}[3~`],
+  ['Ins', `${ESC}[2~`]
+];
+
+// F1-F4 use xterm SS3 (ESC O P..S); F5-F12 use CSI (ESC [ NN ~).
+const MOBILE_FN_KEYS: Array<[string, string]> = [
+  ['F1', `${ESC}OP`], ['F2', `${ESC}OQ`], ['F3', `${ESC}OR`], ['F4', `${ESC}OS`],
+  ['F5', `${ESC}[15~`], ['F6', `${ESC}[17~`], ['F7', `${ESC}[18~`], ['F8', `${ESC}[19~`],
+  ['F9', `${ESC}[20~`], ['F10', `${ESC}[21~`], ['F11', `${ESC}[23~`], ['F12', `${ESC}[24~`]
+];
+
+function MobileSoftKeys({ onInput }: { onInput: (data: string) => void }) {
+  const [expanded, setExpanded] = useState<'none' | 'extras' | 'fn'>('none');
+  return (
+    <div className="md:hidden">
+      {expanded === 'fn' && (
+        <div className="flex shrink-0 flex-wrap items-center gap-1 border-t border-line bg-panel2 px-2 py-1">
+          {MOBILE_FN_KEYS.map(([label, data]) => (
+            <SoftKeyButton key={label} label={label} onClick={() => onInput(data)} />
+          ))}
+        </div>
+      )}
+      {expanded === 'extras' && (
+        <div className="flex shrink-0 flex-wrap items-center gap-1 border-t border-line bg-panel2 px-2 py-1">
+          {MOBILE_SECONDARY_KEYS.map(([label, data, title]) => (
+            <SoftKeyButton key={label} label={label} title={title} onClick={() => onInput(data)} />
+          ))}
+        </div>
+      )}
+      <div className="flex h-10 shrink-0 items-center gap-1 border-t border-line bg-panel2 px-2">
+        {MOBILE_PRIMARY_KEYS.map(([label, data]) => (
+          <SoftKeyButton key={label} label={label} onClick={() => onInput(data)} />
+        ))}
+        <button
+          type="button"
+          className="ml-auto h-7 min-w-8 rounded-md border border-line bg-bg px-2 text-xs"
+          onClick={() => setExpanded((current) => (current === 'extras' ? 'none' : 'extras'))}
+          aria-pressed={expanded === 'extras'}
+          title="More keys"
+        >
+          {expanded === 'extras' ? '×' : '⋯'}
+        </button>
+        <button
+          type="button"
+          className="h-7 min-w-8 rounded-md border border-line bg-bg px-2 text-xs"
+          onClick={() => setExpanded((current) => (current === 'fn' ? 'none' : 'fn'))}
+          aria-pressed={expanded === 'fn'}
+          title="Function keys"
+        >
+          Fn
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function SoftKeyButton({ label, title, onClick }: { label: string; title?: string; onClick: () => void }) {
+  return (
+    <button
+      type="button"
+      className="h-7 min-w-8 rounded-md border border-line bg-bg px-2 text-xs"
+      onClick={onClick}
+      title={title}
+    >
+      {label}
+    </button>
   );
 }
 
