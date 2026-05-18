@@ -115,9 +115,13 @@ async function updateProjectStatus(projectId: string) {
   await prisma.project.update({ where: { id: projectId }, data: { status } }).catch(() => {});
 }
 
-async function deleteSessionRecords(sessions: Array<{ id: string; projectId: string; tabId: string | null }>) {
+async function deleteSessionRecords(sessions: Array<{ id: string; projectId: string | null; tabId: string | null }>) {
+  // SSH-anchored sessions have projectId null; cleanup goes through the
+  // SshHost delete path, not here. Skip them so we don't try to group
+  // them under a non-existent project.
+  const projectSessions = sessions.filter((session): session is { id: string; projectId: string; tabId: string | null } => session.projectId !== null);
   const byProject = new Map<string, Array<{ id: string; tabId: string | null }>>();
-  for (const session of sessions) {
+  for (const session of projectSessions) {
     byProject.set(session.projectId, [...(byProject.get(session.projectId) ?? []), { id: session.id, tabId: session.tabId }]);
   }
 

@@ -18,6 +18,9 @@ type CliState = {
     // brokers (and vice versa).
     kind?: 'agent' | 'ssh';
     lastError?: string | null;
+    // SshHost.id for ssh devices; needed by the CLI to construct the WS
+    // attach URL. Null for agent-backed devices (those route by name).
+    deviceId?: string | null;
     projects: Array<{
       id: string;
       name: string;
@@ -78,6 +81,7 @@ export const GET = withAuth(async (user) => {
         version: live?.version ?? null,
         kind: live?.kind || 'agent',
         lastError: live?.lastError ?? null,
+        deviceId: live?.deviceId ?? null,
         projects: projects
           .filter((project) => project.rootKey === name)
           .map((project) => ({

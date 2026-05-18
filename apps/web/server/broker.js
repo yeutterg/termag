@@ -2,6 +2,7 @@ const crypto = require('node:crypto');
 const { WebSocket } = require('ws');
 const { getToken } = require('next-auth/jwt');
 const { appendScrollback, startScrollbackPrune } = require('./scrollback');
+const { createSshStreamRegistry } = require('./ssh-session-stream');
 
 // Wire-protocol constant shared with the agent. Keep in sync with
 // apps/agent/src/index.ts → WS_REPLACED_REASON.
@@ -237,12 +238,13 @@ function createBroker({ prisma, wss }) {
   const agents = new Map();
   const browserStreams = new Map();
   const sessionPrimary = new Map();
-  // SSH state. sshHosts is userId → Map(hostId → { spec, status, sessions,
-  // pollHandle }). sshStreams is the per-attach map: streamId → pty + ws +
-  // userId so disconnect can find it. SSH attaches are ephemeral; no DB
-  // session row, no scrollback.
+  // SSH host state. sshHosts is userId → Map(hostId → { spec, status,
+  // sessions, pollHandle }) — the in-memory mirror of the SshHost rows
+  // and their last probe result. The shared pty per (host, tmuxName) lives
+  // in the SshSessionStream registry below, which handles multi-subscriber
+  // fan-out and scrollback persistence.
   const sshHosts = new Map();
-  const sshStreams = new Map();
+  const sshStreamRegistry = createSshStreamRegistry({ prisma });
   const SSH_POLL_INTERVAL_MS = 30_000;
   let seq = 0;
 
@@ -1020,7 +1022,8 @@ function createBroker({ prisma, wss }) {
       lastSeenAt: record.lastSeenAt?.toISOString?.() || null,
       kind: 'ssh',
       version: 'ssh',
-      lastError: record.lastError || null
+      lastError: record.lastError || null,
+      deviceId: record.spec.id
     };
   }
 
@@ -1114,15 +1117,9 @@ function createBroker({ prisma, wss }) {
     if (!record) return;
     if (record.pollHandle) clearInterval(record.pollHandle);
     map.delete(hostId);
-    // Kill any live attaches to this host so we don't keep stale ssh
-    // subprocesses around after a delete.
-    for (const [streamId, stream] of sshStreams) {
-      if (stream.userId === userId && stream.hostId === hostId) {
-        try { stream.pty.kill(); } catch {}
-        try { stream.ws.close(1000, 'host removed'); } catch {}
-        sshStreams.delete(streamId);
-      }
-    }
+    // Tear down any shared streams pointing at this host. The registry
+    // closes each subscriber's ws and kills the pty in one shot.
+    sshStreamRegistry.forgetHost(userId, hostId);
     if (map.size === 0) sshHosts.delete(userId);
     broadcastStatus(userId, true);
   }
@@ -1145,73 +1142,38 @@ function createBroker({ prisma, wss }) {
       ws.close(1008, 'ssh host not registered');
       return;
     }
-    // Allowlist-check the tmux name against the cached session list so a
-    // browser can't smuggle in an arbitrary remote-shell payload. (The ssh
-    // helper itself also re-validates with the strict-token regex; this is
-    // a friendlier UX layer above it.)
+    // Friendly allowlist: the user has to have seen this session in the
+    // broker's last probe. Catches typos and prevents a hostile browser
+    // from blind-firing tmux names. The strict-token regex inside the
+    // pty spawn is the hard guard.
     const known = record.tmuxSessions.some((session) => session.name === tmuxName);
     if (!known) {
       ws.close(1008, 'unknown tmux session — refresh device status');
       return;
     }
-    let proc;
+    let stream;
     try {
-      const { spawnSshTmuxAttach } = require('./ssh');
-      proc = spawnSshTmuxAttach({ host: record.spec, tmuxName, cols, rows });
+      stream = sshStreamRegistry.getOrCreate({
+        userId,
+        hostSpec: record.spec,
+        tmuxName,
+        cols,
+        rows
+      });
     } catch (err) {
       sendJson(ws, { type: 'fatal', message: sanitizeAgentText(err?.message || 'ssh spawn failed', 200) });
       ws.close(1011, 'ssh spawn failed');
       return;
     }
-    const streamId = `ssh_${nextRequestId()}`;
-    const stream = { ws, userId, hostId, pty: proc };
-    sshStreams.set(streamId, stream);
-
-    // SSH pty bytes go to the browser as raw binary frames, exactly like
-    // the agent-attach flow. The existing terminal-pane.tsx already writes
-    // any non-string WS frame straight into xterm.js, so no client changes
-    // are required.
-    proc.onData((data) => sendOutput(ws, data));
-    proc.onExit(() => {
-      sendJson(ws, { type: 'exit' });
-      try { ws.close(1000, 'ssh exited'); } catch {}
-      sshStreams.delete(streamId);
-    });
-
-    ws.on('message', (raw) => {
-      let msg;
-      try { msg = JSON.parse(raw.toString()); } catch { return; }
-      // Match the message shapes the existing terminal-pane.tsx sends so
-      // the SSH attach can use the same component unchanged. `input` is
-      // keystrokes; `resize` is xterm.js fit; `kill` ends the session.
-      // `pause`/`resume`/`claim-drive` are no-ops in SSH mode (no
-      // server-side coalescing, single subscriber, always driver).
-      if (msg.type === 'input' && typeof msg.data === 'string') {
-        if (msg.data.length > 64 * 1024) return;
-        try { proc.write(msg.data); } catch {}
-        return;
-      }
-      if (msg.type === 'resize') {
-        const w = terminalDimension(msg.cols, 80, 20, 500);
-        const h = terminalDimension(msg.rows, 24, 5, 200);
-        try { proc.resize(w, h); } catch {}
-        return;
-      }
-      if (msg.type === 'kill') {
-        try { proc.kill(); } catch {}
-        return;
-      }
-    });
-
-    ws.on('close', () => {
-      sshStreams.delete(streamId);
-      try { proc.kill(); } catch {}
-    });
-
-    // Drive state: SSH attaches are single-subscriber. Tell the pane it's
-    // the driver and not read-only so the "Take control" badge stays hidden
-    // and input flows immediately.
-    sendJson(ws, { type: 'driver-changed', driver: true, readOnly: false });
+    let unsubscribe;
+    try {
+      unsubscribe = await stream.subscribe(ws);
+    } catch (err) {
+      sendJson(ws, { type: 'fatal', message: sanitizeAgentText(err?.message || 'subscribe failed', 200) });
+      ws.close(1011, 'subscribe failed');
+      return;
+    }
+    ws.on('close', () => unsubscribe());
   }
 
   return {

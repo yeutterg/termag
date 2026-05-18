@@ -207,6 +207,9 @@ type CliDeviceEntry = {
   // brokers that don't surface it.
   kind?: 'agent' | 'ssh';
   lastError?: string | null;
+  // SshHost.id for ssh-kind devices — needed to build the WS attach URL.
+  // Null/absent for agent-backed devices.
+  deviceId?: string | null;
   projects: CliProjectEntry[];
   rawTmuxSessions: Array<{ name: string; windowCount: number; path: string | null }>;
 };
@@ -475,10 +478,15 @@ async function runAttach(args: string[]) {
   for (let i = 0; i < args.length; i += 1) {
     const arg = args[i];
     if (arg === '--help' || arg === '-h') {
-      console.log(`termag attach <project | device:project | session-id>\n\n` +
+      console.log(`termag attach <project | device:project | ssh-host:tmux-session | session-id>\n\n` +
         `Attach this terminal to a remote tmux pane via the broker.\n` +
         `\n` +
         `  --device, -d  Disambiguate by device name when several projects share a name.\n` +
+        `\n` +
+        `Examples:\n` +
+        `  termag attach my-project              # agent-managed project\n` +
+        `  termag attach laptop:my-project        # disambiguate by device\n` +
+        `  termag attach prod-vps:main            # SSH host + tmux session\n` +
         `\n` +
         `Detach with the SSH-style escape:  press Enter, then "~." (tilde, dot).\n`);
       process.exit(0);
@@ -531,21 +539,26 @@ async function runAttach(args: string[]) {
     console.error(`[${tag}] ${resolved.error}`);
     process.exit(1);
   }
-  if (!resolved.sessionId) {
-    console.error(`[${tag}] Project "${resolved.projectName}" on ${resolved.deviceName} has no live session yet. Open it in the web UI once to bootstrap, then retry.`);
-    process.exit(1);
-  }
   const creds = resolveCredentials();
   if (!creds.token) {
     console.error(`[${tag}] No agent token available.`);
     process.exit(1);
   }
-  await attachRemote({ baseUrl, token: creds.token, sessionId: resolved.sessionId, label: resolved.label });
+  if (resolved.kind === 'ssh') {
+    await attachRemote({ baseUrl, token: creds.token, label: resolved.label, target: { kind: 'ssh', hostId: resolved.hostId, tmuxName: resolved.tmuxName } });
+    return;
+  }
+  if (!resolved.sessionId) {
+    console.error(`[${tag}] Project "${resolved.projectName}" on ${resolved.deviceName} has no live session yet. Open it in the web UI once to bootstrap, then retry.`);
+    process.exit(1);
+  }
+  await attachRemote({ baseUrl, token: creds.token, label: resolved.label, target: { kind: 'agent', sessionId: resolved.sessionId } });
 }
 
 type AttachTarget =
   | { error: string }
-  | { sessionId: string; projectName: string; deviceName: string; label: string };
+  | { kind: 'agent'; sessionId: string; projectName: string; deviceName: string; label: string }
+  | { kind: 'ssh'; hostId: string; tmuxName: string; deviceName: string; label: string };
 
 function resolveAttachTarget(state: CliState, target: string, deviceFilter: string): AttachTarget {
   // Try project-name lookup first so a CUID-shaped project name doesn't get
@@ -555,6 +568,36 @@ function resolveAttachTarget(state: CliState, target: string, deviceFilter: stri
     ? [target.split(':')[0], target.slice(target.indexOf(':') + 1)]
     : ['', target];
   const wantDevice = (explicitDevice || deviceFilter).trim();
+
+  // SSH host attach: <ssh-host-name>:<tmux-session-name>. We only resolve
+  // this when an explicit device is given (the second arg before `:`) and
+  // it matches a kind=ssh device — otherwise an ambiguous "myproj" lookup
+  // could collide with a tmux session of the same name on an ssh host.
+  if (explicitDevice) {
+    const sshDevice = state.devices.find(
+      (device) => device.kind === 'ssh' && device.name === explicitDevice
+    );
+    if (sshDevice) {
+      if (!sshDevice.deviceId) {
+        return { error: `SSH host "${explicitDevice}" is registered but missing a deviceId — restart the broker.` };
+      }
+      const session = sshDevice.rawTmuxSessions.find((s) => s.name === projectName);
+      if (!session) {
+        return { error: `SSH host "${explicitDevice}" has no tmux session "${projectName}". Try \`termag list\`.` };
+      }
+      if (!sshDevice.connected) {
+        return { error: `SSH host "${explicitDevice}" is offline (${sshDevice.lastError || 'no probe yet'}).` };
+      }
+      return {
+        kind: 'ssh',
+        hostId: sshDevice.deviceId,
+        tmuxName: session.name,
+        deviceName: sshDevice.name,
+        label: `${sshDevice.name}:${session.name}`
+      };
+    }
+  }
+
   const candidates: Array<{ device: CliDeviceEntry; project: CliProjectEntry }> = [];
   for (const device of state.devices) {
     if (wantDevice && device.name !== wantDevice) continue;
@@ -570,15 +613,17 @@ function resolveAttachTarget(state: CliState, target: string, deviceFilter: stri
     const winner = candidates[0];
     const firstTab = winner.project.tabs.find((tab) => tab.sessionId);
     return {
-      sessionId: firstTab?.sessionId || null,
+      kind: 'agent',
+      sessionId: firstTab?.sessionId || '',
       projectName: winner.project.name,
       deviceName: winner.device.name,
       label: `${winner.device.name}:${winner.project.name}`
-    } as AttachTarget;
+    };
   }
   // No project matched — see if it looks like a raw session-id (CUID-shaped).
   if (!target.includes(':') && /^[a-z0-9]{16,}$/i.test(target)) {
     return {
+      kind: 'agent',
       sessionId: target,
       projectName: target.slice(0, 8) + '…',
       deviceName: deviceFilter || 'unknown',
@@ -589,12 +634,24 @@ function resolveAttachTarget(state: CliState, target: string, deviceFilter: stri
   return { error: `No project named "${projectName}"${hint}. Try \`termag list\`.` };
 }
 
-async function attachRemote(opts: { baseUrl: URL; token: string; sessionId: string; label: string }) {
+type AttachKind =
+  | { kind: 'agent'; sessionId: string }
+  | { kind: 'ssh'; hostId: string; tmuxName: string };
+
+async function attachRemote(opts: { baseUrl: URL; token: string; label: string; target: AttachKind }) {
   const wsUrl = new URL(opts.baseUrl.toString());
-  wsUrl.pathname = '/api/ws/terminal';
   const cols = process.stdout.columns || 80;
   const rows = process.stdout.rows || 24;
-  wsUrl.search = `?sessionId=${encodeURIComponent(opts.sessionId)}&cols=${cols}&rows=${rows}`;
+  if (opts.target.kind === 'ssh') {
+    // Broker-side SSH attach. Goes through SshSessionStream so we share
+    // the underlying ssh subprocess (and scrollback) with any browser
+    // viewers attached to the same host:session.
+    wsUrl.pathname = '/api/ws/ssh-terminal';
+    wsUrl.search = `?hostId=${encodeURIComponent(opts.target.hostId)}&tmuxName=${encodeURIComponent(opts.target.tmuxName)}&cols=${cols}&rows=${rows}`;
+  } else {
+    wsUrl.pathname = '/api/ws/terminal';
+    wsUrl.search = `?sessionId=${encodeURIComponent(opts.target.sessionId)}&cols=${cols}&rows=${rows}`;
+  }
   const skipTls = insecureLocalTls && wsUrl.protocol === 'wss:' && isLocalHost(wsUrl.hostname);
   const wsOptions = {
     headers: { authorization: `Bearer ${opts.token}` },

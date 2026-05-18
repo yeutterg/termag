@@ -27,6 +27,10 @@ export type ConnectedDevice = {
   // an SSH-host badge and the CLI label hosts in `termag list`.
   kind?: 'agent' | 'ssh';
   lastError?: string | null;
+  // Stable id for the device — AgentToken.id for agents, SshHost.id for
+  // ssh hosts. The CLI uses this to construct the WS attach URL without
+  // having to re-resolve the name on the server.
+  deviceId?: string | null;
 };
 
 export type DirectoryListing = {

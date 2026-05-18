@@ -94,6 +94,12 @@ model Tab {
   @@index([projectId])
 }
 
+// A Session is "a tmux thing termag tracks": its lifecycle in the broker,
+// its tab binding, and its scrollback. Anchored to *either* a Project
+// (agent-managed flow) *or* an SshHost (ssh-attach flow). Exactly one of
+// projectId / sshHostId is set; the application enforces this since SQLite
+// can't express XOR constraints. Both onDelete cascades, so removing the
+// parent cleans up the session + chunks.
 model Session {
   id             String    @id @default(cuid())
   kind           String
@@ -107,15 +113,20 @@ model Session {
   createdAt      DateTime  @default(now())
   updatedAt      DateTime  @updatedAt
 
-  projectId String
-  project   Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  projectId String?
+  project   Project? @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  sshHostId String?
+  sshHost   SshHost? @relation(fields: [sshHostId], references: [id], onDelete: Cascade)
 
   tabId String? @unique
   tab   Tab?    @relation(fields: [tabId], references: [id], onDelete: Cascade)
 
   scrollback ScrollbackChunk[]
 
+  @@unique([sshHostId, tmuxName])
   @@index([projectId, kind])
+  @@index([sshHostId])
   @@index([tmuxName])
 }
 
@@ -154,6 +165,10 @@ model SshHost {
 
   userId    String
   ownedBy   User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // Sessions opened against this host. Cascades on delete so removing a
+  // host wipes its tracking rows and scrollback automatically.
+  sessions  Session[]
 
   @@unique([userId, name])
   @@index([userId])
