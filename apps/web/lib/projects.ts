@@ -19,6 +19,22 @@ function isUniqueConstraintError(error: unknown): boolean {
   return typeof error === 'object' && error !== null && 'code' in error && error.code === 'P2002';
 }
 
+/**
+ * Throws if the given path contains a '..' segment or NUL byte. Use this
+ * BEFORE calling normalizeRelativePath — the normalizer silently strips
+ * '..', which lets a path that looked like a traversal attempt land in
+ * the DB as a seemingly-innocent value (and round-trip back to the agent
+ * later). Same intent as the explicit guard on POST /api/projects.
+ */
+function rejectPathTraversal(value: string | undefined | null): void {
+  if (!value) return;
+  if (value.includes('\x00')) throw new Error('Path contains NUL byte');
+  const parts = value.split(/[\\/]+/);
+  if (parts.some((part) => part === '..')) {
+    throw new Error('Path must not contain ".." segments');
+  }
+}
+
 export async function listProjects(userId: string) {
   // Manual order (position) wins; alphabetical (name asc) is the default
   // fallback for any project the user hasn't dragged yet.
@@ -183,6 +199,13 @@ export async function createAttachedTmuxProject(input: {
   const windows = input.windows.filter((window) => window.target.trim());
   if (windows.length === 0) throw new Error('No tmux windows to attach');
   const name = await uniqueProjectName(input.userId, input.sessionName.trim() || 'tmux session');
+  // Reject path traversal before normalization. normalizeRelativePath
+  // silently strips '..' segments, which would let a compromised agent
+  // publish a project whose stored relativePath looks plausible after
+  // strip but encodes a traversal attempt on its way through. The
+  // matching POST /api/projects has the same guard.
+  rejectPathTraversal(input.path);
+  rejectPathTraversal(input.sessionName);
   const relativePath = normalizeRelativePath(input.path || input.sessionName) || normalizeRelativePath(input.sessionName) || 'tmux-session';
 
   return prisma.$transaction(async (tx) => {
@@ -259,6 +282,8 @@ export async function publishTmuxProject(input: {
         throw new Error(`Project "${project.name}" is already bound to tmux session "${project.tmuxSessionName}"`);
       }
 
+      rejectPathTraversal(input.path);
+      rejectPathTraversal(sessionName);
       const relativePath = normalizeRelativePath(input.path || sessionName) || normalizeRelativePath(sessionName) || 'tmux-session';
       const targetProject = project ?? await tx.project.create({
         data: {

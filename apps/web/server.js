@@ -108,17 +108,41 @@ function allowedBrowserOriginHosts() {
 }
 
 function browserOriginAllowed(req) {
-  // Missing Origin used to be allowed (browsers always send it, so the only
-  // callers without one were thought to be benign). That gave any non-browser
-  // client a free pass past the Origin gate — combined with trusted-network
-  // mode, an attacker could attach to live sessions from curl. Require Origin
-  // to be present AND match the request host or an explicit allowlist entry.
+  // Reject anything that isn't a properly-formed Origin. "null" (sandboxed
+  // iframes, data: URLs, etc.) fails the URL parse below and falls through
+  // to rejection — defense in depth is to short-circuit it explicitly.
   const origin = req.headers.origin;
-  if (!origin) return false;
+  if (!origin || origin === 'null') return false;
   const originHost = hostFromOrigin(origin);
   if (!originHost) return false;
-  if (originHost === req.headers.host) return true;
-  return allowedBrowserOriginHosts().has(originHost);
+  // Prefer an explicit allowlist (NEXTAUTH_URL + TERMAG_ALLOWED_ORIGINS).
+  // If allowlist matches we're done — trust the deployment config over any
+  // header the client sent.
+  const allowed = allowedBrowserOriginHosts();
+  if (allowed.has(originHost)) return true;
+  // Only fall back to comparing Origin against the Host header when no
+  // allowlist is configured. The fallback trusts that req.headers.host is
+  // accurate, which is true behind a reverse proxy that normalizes Host
+  // (Caddy, nginx) but NOT for a direct attacker hitting the bare port.
+  // Logging the fallback once per process keeps it visible so deployments
+  // notice they're missing config.
+  if (allowed.size === 0) {
+    if (originHost === req.headers.host) {
+      warnOriginFallbackOnce();
+      return true;
+    }
+  }
+  return false;
+}
+
+let originFallbackWarned = false;
+function warnOriginFallbackOnce() {
+  if (originFallbackWarned) return;
+  originFallbackWarned = true;
+  console.warn(
+    '[termag] WS Origin allowlist is empty — falling back to Host-header comparison. ' +
+    'Set NEXTAUTH_URL or TERMAG_ALLOWED_ORIGINS to a known-good host to close this gap.'
+  );
 }
 
 function agentTokenFromRequest(req) {
@@ -144,6 +168,11 @@ app.prepare().then(() => {
   // for them, no context-takeover memory hit). level 3 balances CPU and ratio.
   const wss = new WebSocketServer({
     noServer: true,
+    // 1 MB is generous for terminal protocol frames (keystrokes are bytes,
+    // even resize + control messages are tiny). Default is unlimited, which
+    // means a single malicious or compromised peer can send a multi-GB
+    // frame and OOM the broker before any handler runs.
+    maxPayload: 1024 * 1024,
     perMessageDeflate: {
       threshold: 1024,
       zlibDeflateOptions: { level: 3 },

@@ -41,9 +41,22 @@ export type AuditInput = {
 
 export function extractAuditContext(request: Request | undefined | null): { ip: string | null; userAgent: string | null } {
   if (!request) return { ip: null, userAgent: null };
-  const xff = request.headers.get('x-forwarded-for');
-  const ip = (xff ? xff.split(',')[0]!.trim() : request.headers.get('x-real-ip')?.trim()) || null;
-  const userAgent = request.headers.get('user-agent') || null;
+  // Trust XFF/X-Real-IP only when explicitly told we're behind a known
+  // proxy. Otherwise these headers are attacker-controlled — recording
+  // them as "the IP" would let an attacker pollute audit logs with
+  // arbitrary attribution. See clientIp() in /api/auth/password/route.ts
+  // for the matching policy on the rate limiter.
+  let ip: string | null = null;
+  if (process.env.TERMAG_TRUSTED_PROXY === 'true') {
+    const xff = request.headers.get('x-forwarded-for');
+    if (xff) ip = xff.split(',')[0]!.trim().slice(0, 64);
+    else ip = request.headers.get('x-real-ip')?.trim().slice(0, 64) || null;
+  }
+  // Cap User-Agent so a 4KB-UA client can't bloat audit rows. Node's HTTP
+  // parser caps total headers at ~8KB, but a single header can still be
+  // huge.
+  const rawUa = request.headers.get('user-agent');
+  const userAgent = rawUa ? rawUa.slice(0, 512) : null;
   return { ip, userAgent };
 }
 

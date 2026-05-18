@@ -185,7 +185,11 @@ export async function currentUser() {
 export async function userFromBearerToken(token: string | undefined) {
   if (!token) return null;
   const trimmed = token.trim();
-  if (trimmed.length < 16 || trimmed.length > 512) return null;
+  // Real tokens are `tmag_` + 43-char base64url(32 bytes) = 48 chars total.
+  // Reject anything well outside that band before a DB round-trip so blind
+  // probing can't enumerate tokens via timing of the hash + index lookup.
+  if (trimmed.length < 32 || trimmed.length > 256) return null;
+  if (!trimmed.startsWith('tmag_')) return null;
   // Local import to avoid a top-level cycle (tokens.ts imports nothing).
   const { hashToken } = await import('./tokens');
   const record = await prisma.agentToken.findFirst({
@@ -217,6 +221,67 @@ function forbidden(reason: string) {
 }
 
 /**
+ * Hard cap on request body size for JSON API endpoints. Next.js Route
+ * Handlers don't honor experimental.serverActions.bodySizeLimit, and
+ * request.json() will buffer indefinitely. Without this, an attacker can
+ * POST a multi-GB payload to any endpoint and OOM the broker before any
+ * validation runs.
+ *
+ * Default ceiling is 256 KB — enough for the largest legitimate payload
+ * (publish, with arrays of windows) but well below what would matter for
+ * resource exhaustion. Routes that genuinely need more can override.
+ */
+const DEFAULT_BODY_LIMIT = 256 * 1024;
+
+export async function readJsonBody<T = unknown>(
+  request: Request,
+  limit = DEFAULT_BODY_LIMIT
+): Promise<{ ok: true; data: T } | { ok: false; response: Response }> {
+  const declared = request.headers.get('content-length');
+  if (declared) {
+    const parsed = Number(declared);
+    if (Number.isFinite(parsed) && parsed > limit) {
+      return { ok: false, response: NextResponse.json({ error: 'Request body too large' }, { status: 413 }) };
+    }
+  }
+  // Even when Content-Length lies or is absent, stream the body and abort
+  // once we exceed the cap. clone() so a caller could re-read on success.
+  let total = 0;
+  const chunks: Uint8Array[] = [];
+  const reader = request.body?.getReader();
+  if (!reader) return { ok: true, data: undefined as unknown as T };
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      if (value) {
+        total += value.byteLength;
+        if (total > limit) {
+          reader.cancel().catch(() => {});
+          return { ok: false, response: NextResponse.json({ error: 'Request body too large' }, { status: 413 }) };
+        }
+        chunks.push(value);
+      }
+    }
+  } finally {
+    reader.releaseLock?.();
+  }
+  if (total === 0) return { ok: true, data: undefined as unknown as T };
+  const joined = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    joined.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  try {
+    const text = new TextDecoder().decode(joined);
+    return { ok: true, data: JSON.parse(text) as T };
+  } catch {
+    return { ok: false, response: NextResponse.json({ error: 'Invalid JSON body' }, { status: 400 }) };
+  }
+}
+
+/**
  * Origin-header CSRF check. Mutating methods (POST/PATCH/PUT/DELETE) on a
  * cookie-authenticated request must originate from the same host as the
  * request (or an explicitly allowlisted origin). This shuts the door on
@@ -234,10 +299,14 @@ export function isOriginSafe(request: Request): boolean {
   if (!MUTATING_METHODS.has(request.method.toUpperCase())) return true;
 
   const fetchSite = request.headers.get('sec-fetch-site');
-  if (fetchSite === 'cross-site') return false;
-  // Chrome sends "same-origin" for fetch(), "same-site" for subdomains.
-  // Both are acceptable — same site implies same auth realm here.
-  if (fetchSite === 'same-origin' || fetchSite === 'same-site') return true;
+  // Reject cross-site (different eTLD+1) and same-site (subdomain) outright.
+  // Same-site looks safe but isn't: if termag runs at termag.example.com
+  // alongside any other content at *.example.com, an XSS on a sibling host
+  // could mount CSRF against us. Only same-origin is acceptable.
+  if (fetchSite === 'cross-site' || fetchSite === 'same-site') return false;
+  if (fetchSite === 'same-origin') return true;
+  // Top-level navigations send Sec-Fetch-Site: none. For a mutating method
+  // we still require the explicit Origin check below.
 
   const origin = request.headers.get('origin');
   if (!origin) {

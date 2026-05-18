@@ -6,8 +6,11 @@ const { appendScrollback, startScrollbackPrune } = require('./scrollback');
 // Wire-protocol constant shared with the agent. Keep in sync with
 // apps/agent/src/index.ts → WS_REPLACED_REASON.
 const WS_REPLACED_REASON = 'replaced';
-const AGENT_TOKEN_MIN_LENGTH = 16;
-const AGENT_TOKEN_MAX_LENGTH = 512;
+// Real agent tokens are `tmag_` + 43-char base64url(32) = 48 chars. Floor
+// of 32 / cap of 256 keeps a generous band while preventing blind probes
+// of arbitrary-shaped strings from reaching the DB-backed hash lookup.
+const AGENT_TOKEN_MIN_LENGTH = 32;
+const AGENT_TOKEN_MAX_LENGTH = 256;
 const VALID_SESSION_STATUSES = new Set(['idle', 'working', 'waiting', 'error', 'sleeping']);
 
 function sendJson(ws, msg) {
@@ -89,6 +92,55 @@ function trustedUserEmail() {
     || process.env.TERMAG_ALLOWED_EMAIL?.toLowerCase().trim()
     || 'trusted@termag.local'
   );
+}
+
+/**
+ * Cleans an untrusted string we received from an agent before re-emitting
+ * it (typically as the .message of an Error that will surface in a JSON
+ * response, or in a status broadcast). Strips C0/C1 control bytes that
+ * could inject ANSI sequences or line breaks into the UI, and caps length
+ * so a runaway agent can't bloat browser responses.
+ */
+// Bounded cache of recently-rejected token hashes. A short-lived (5 min)
+// memory of "this hash isn't in our DB" lets us short-circuit a repeat
+// guess from the same attacker before a Prisma round-trip. Capped so a
+// rotating-token attacker can't pump it to OOM. Values are the expiration
+// timestamp; we check it lazily on read.
+const REJECTED_TOKEN_TTL_MS = 5 * 60 * 1000;
+const REJECTED_TOKEN_CAP = 5000;
+const rejectedTokenExpiry = new Map();
+
+function tokenRecentlyRejected(hash) {
+  const exp = rejectedTokenExpiry.get(hash);
+  if (!exp) return false;
+  if (exp < Date.now()) {
+    rejectedTokenExpiry.delete(hash);
+    return false;
+  }
+  return true;
+}
+
+function rememberRejectedToken(hash) {
+  const now = Date.now();
+  rejectedTokenExpiry.set(hash, now + REJECTED_TOKEN_TTL_MS);
+  if (rejectedTokenExpiry.size <= REJECTED_TOKEN_CAP) return;
+  // Sweep expired first; if we're still over the cap, drop oldest by
+  // insertion order (Map iteration order is insertion order).
+  for (const [h, exp] of rejectedTokenExpiry) {
+    if (exp < now) rejectedTokenExpiry.delete(h);
+  }
+  while (rejectedTokenExpiry.size > REJECTED_TOKEN_CAP) {
+    const firstKey = rejectedTokenExpiry.keys().next().value;
+    if (firstKey === undefined) break;
+    rejectedTokenExpiry.delete(firstKey);
+  }
+}
+
+function sanitizeAgentText(value, maxLen = 1024) {
+  if (typeof value !== 'string') return '';
+  // eslint-disable-next-line no-control-regex
+  const stripped = value.replace(/[\x00-\x1F\x7F-\x9F]/g, ' ');
+  return stripped.length > maxLen ? stripped.slice(0, maxLen - 1) + '…' : stripped;
 }
 
 function terminalDimension(value, fallback, min, max) {
@@ -440,15 +492,24 @@ function createBroker({ prisma, wss }) {
   }
 
   async function registerAgent(ws, token) {
-    if (typeof token !== 'string' || token.length < AGENT_TOKEN_MIN_LENGTH || token.length > AGENT_TOKEN_MAX_LENGTH) {
+    if (typeof token !== 'string' || token.length < AGENT_TOKEN_MIN_LENGTH || token.length > AGENT_TOKEN_MAX_LENGTH || !token.startsWith('tmag_')) {
+      ws.close(1008, 'invalid token');
+      return;
+    }
+    // Suppress the DB lookup when we've recently rejected this exact token
+    // hash. Stops a probing attacker from forcing one indexed Prisma read
+    // per guess (each is ~1 ms but adds up at thousands/sec).
+    const tokenHash = hashToken(token);
+    if (tokenRecentlyRejected(tokenHash)) {
       ws.close(1008, 'invalid token');
       return;
     }
     const record = await prisma.agentToken.findFirst({
-      where: { tokenHash: hashToken(token), revokedAt: null },
+      where: { tokenHash, revokedAt: null },
       include: { user: true }
     });
     if (!record) {
+      rememberRejectedToken(tokenHash);
       ws.close(1008, 'invalid token');
       return;
     }
@@ -505,7 +566,15 @@ function createBroker({ prisma, wss }) {
         const pending = agent.pending.get(msg.requestId);
         clearTimeout(pending.timer);
         agent.pending.delete(msg.requestId);
-        msg.error ? pending.reject(new Error(msg.error)) : pending.resolve(msg.data ?? {});
+        if (msg.error) {
+          // Sanitize agent-supplied error strings before raising them as
+          // Errors that may be surfaced to browser JSON responses. A
+          // compromised agent could otherwise inject ANSI codes, line
+          // breaks, or arbitrary-length payloads into the web UI.
+          pending.reject(new Error(sanitizeAgentText(msg.error, 512)));
+        } else {
+          pending.resolve(msg.data ?? {});
+        }
         return;
       }
 
@@ -528,6 +597,11 @@ function createBroker({ prisma, wss }) {
       if (msg.type === 'terminal-data' && msg.streamId) {
         const stream = browserStreams.get(msg.streamId);
         if (!streamBelongsToAgent(stream, record.userId, deviceName) || typeof msg.data !== 'string') return;
+        // Per-message cap. WebSocketServer.maxPayload already bounds the
+        // outer frame at 1 MB, but defense in depth — a malicious agent
+        // can otherwise pipe gigabytes through appendScrollback over
+        // many small frames. Anything legitimate is well under 64 KB.
+        if (msg.data.length > 256 * 1024) return;
         bufferAndFlush(stream, msg.data);
         // Replay-queue + scrollback writes are gated on the primary check.
         // With the multi-subscriber model the agent emits one terminal-data

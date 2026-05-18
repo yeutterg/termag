@@ -4,6 +4,20 @@ import { prisma } from '@/lib/prisma';
 import { publishTmuxProject } from '@/lib/projects';
 import { refreshUserProjects, requestAgentHealthRefresh } from '@/lib/broker';
 import { hashToken } from '@/lib/tokens';
+import { clientIpFromRequest, createRateLimiter } from '@/lib/rate-limit';
+
+// Rate-limit bad-token attempts. Without this, an attacker can hammer
+// publish with a guessed bearer per request — each one costs a SHA-256 +
+// indexed DB lookup, and timing differences could potentially leak token
+// validity. 60 attempts / 5 min per IP is generous for legitimate agents
+// (which rarely retry-storm) and tight against enumeration.
+const limiter = createRateLimiter({
+  perIpWindowMs: 5 * 60 * 1000,
+  perIpBurst: 60,
+  perIpLockoutMs: 10 * 60 * 1000,
+  globalWindowMs: 60 * 1000,
+  globalBurst: 300
+});
 
 const windowSchema = z.object({
   name: z.string().trim().min(1).max(120),
@@ -26,9 +40,20 @@ function bearerToken(request: Request) {
 }
 
 export async function POST(request: Request) {
+  // Cheap rejects first: shape + length checks before any DB work, so a
+  // probing attacker can't burn DB cycles by sending malformed tokens.
   const rawToken = bearerToken(request);
-  if (!rawToken || rawToken.length > 512) {
-    return NextResponse.json({ error: 'Missing agent token' }, { status: 401 });
+  if (!rawToken || rawToken.length < 32 || rawToken.length > 256 || !rawToken.startsWith('tmag_')) {
+    return NextResponse.json({ error: 'Missing or malformed agent token' }, { status: 401 });
+  }
+
+  const ip = clientIpFromRequest(request);
+  const limit = limiter.check(ip);
+  if (!limit.ok) {
+    return NextResponse.json(
+      { error: 'Too many attempts. Try again later.' },
+      { status: 429, headers: { 'Retry-After': String(limit.retryAfterSec) } }
+    );
   }
 
   const token = await prisma.agentToken.findFirst({
@@ -36,8 +61,10 @@ export async function POST(request: Request) {
     select: { id: true, userId: true, name: true }
   });
   if (!token) {
+    limiter.record(ip, false);
     return NextResponse.json({ error: 'Invalid agent token' }, { status: 401 });
   }
+  limiter.record(ip, true);
 
   const parsed = publishSchema.safeParse(await request.json().catch(() => null));
   if (!parsed.success) {

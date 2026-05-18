@@ -94,6 +94,15 @@ export async function listDirectory(
 }
 
 function normalizeRelative(value: string): string {
+  // Reject NUL bytes outright — Node's path API throws on them, but
+  // catching early gives a clean error instead of a "EINVAL" deep in the
+  // stack. Same for the rest of the C0 control range (\x01-\x1F) which
+  // has no business inside a file path and would surprise tmux targets
+  // or shell wrappers downstream.
+  // eslint-disable-next-line no-control-regex
+  if (/[\x00-\x1F]/.test(value)) {
+    throw new Error('Path contains illegal control characters');
+  }
   const parts = value
     .replace(/\\/g, '/')
     .replace(/\/+/g, '/')
