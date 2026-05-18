@@ -64,9 +64,16 @@ interface TerminalPaneProps {
   onTitleChange?: (sessionId: string, title: string) => void;
   /** Suppress the pane's own header — used when tabs above provide it. */
   hideHeader?: boolean;
+  /**
+   * When set, the pane connects to the SSH-attach WebSocket endpoint
+   * (`/api/ws/ssh-terminal`) instead of the per-session endpoint. The
+   * `sessionId` prop is still required (used as the local React key /
+   * title-change identifier) but ignored for routing.
+   */
+  ssh?: { hostId: string; tmuxName: string };
 }
 
-function TerminalPaneImpl({ sessionId, active, title, status, onTitleChange, hideHeader }: TerminalPaneProps) {
+function TerminalPaneImpl({ sessionId, active, title, status, onTitleChange, hideHeader, ssh }: TerminalPaneProps) {
   const hostRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<XTerm | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
@@ -110,7 +117,14 @@ function TerminalPaneImpl({ sessionId, active, title, status, onTitleChange, hid
       type ConnectionLike = { saveData?: boolean; effectiveType?: string };
       const conn = (navigator as Navigator & { connection?: ConnectionLike }).connection;
       const saveDataHint = conn?.saveData || /^(slow-2g|2g|3g)$/.test(conn?.effectiveType ?? '') ? '&saveData=1' : '';
-      const ws = new WebSocket(`${protocol}//${window.location.host}/api/ws/terminal?sessionId=${sessionId}&cols=${term.cols}&rows=${term.rows}${saveDataHint}`);
+      // SSH attaches use a separate endpoint with hostId+tmuxName instead
+      // of sessionId. The broker's protocol from this point on is the
+      // same (binary frames for output, JSON for control), so nothing
+      // else in this component needs to branch.
+      const wsUrl = ssh
+        ? `${protocol}//${window.location.host}/api/ws/ssh-terminal?hostId=${encodeURIComponent(ssh.hostId)}&tmuxName=${encodeURIComponent(ssh.tmuxName)}&cols=${term.cols}&rows=${term.rows}`
+        : `${protocol}//${window.location.host}/api/ws/terminal?sessionId=${sessionId}&cols=${term.cols}&rows=${term.rows}${saveDataHint}`;
+      const ws = new WebSocket(wsUrl);
       ws.binaryType = 'arraybuffer';
       wsRef.current = ws;
 
@@ -309,7 +323,7 @@ function TerminalPaneImpl({ sessionId, active, title, status, onTitleChange, hid
       term?.dispose();
       termRef.current = null;
     };
-  }, [active, sessionId]);
+  }, [active, sessionId, ssh?.hostId, ssh?.tmuxName]);
 
   function claimDrive() {
     const ws = wsRef.current;

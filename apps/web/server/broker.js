@@ -237,6 +237,13 @@ function createBroker({ prisma, wss }) {
   const agents = new Map();
   const browserStreams = new Map();
   const sessionPrimary = new Map();
+  // SSH state. sshHosts is userId → Map(hostId → { spec, status, sessions,
+  // pollHandle }). sshStreams is the per-attach map: streamId → pty + ws +
+  // userId so disconnect can find it. SSH attaches are ephemeral; no DB
+  // session row, no scrollback.
+  const sshHosts = new Map();
+  const sshStreams = new Map();
+  const SSH_POLL_INTERVAL_MS = 30_000;
   let seq = 0;
 
   // Schedule the scrollback TTL prune as part of broker boot. Runs once
@@ -718,8 +725,32 @@ function createBroker({ prisma, wss }) {
 
     if (url.pathname === '/api/ws/status') {
       ws._termagStatusUserId = userId;
-      const devices = connectedAgents(userId).map(publicAgentStatus);
+      // Make sure SSH host state is loaded before we send the initial
+      // snapshot — otherwise a freshly-restarted broker would tell the
+      // first connecting browser that SSH hosts are missing.
+      await refreshSshHosts(userId);
+      const devices = [
+        ...connectedAgents(userId).map(publicAgentStatus),
+        ...[...sshHostsForUser(userId).values()].map(publicSshHostStatus)
+      ];
       sendJson(ws, { type: 'agent', connected: devices.length > 0, devices });
+      return;
+    }
+
+    if (url.pathname === '/api/ws/ssh-terminal') {
+      const hostId = url.searchParams.get('hostId');
+      const tmuxName = url.searchParams.get('tmuxName');
+      const cols = terminalDimension(url.searchParams.get('cols'), 80, 20, 500);
+      const rows = terminalDimension(url.searchParams.get('rows'), 24, 5, 200);
+      if (!hostId || !tmuxName) {
+        ws.close(1008, 'hostId and tmuxName required');
+        return;
+      }
+      // Always refresh first so a brand-new browser session sees the same
+      // host inventory the server knows about; refreshSshHosts is cheap
+      // when nothing changed.
+      await refreshSshHosts(userId);
+      await handleSshAttach(ws, userId, hostId, tmuxName, cols, rows);
       return;
     }
 
@@ -971,6 +1002,218 @@ function createBroker({ prisma, wss }) {
     });
   }
 
+  // ─── SSH host state machinery ──────────────────────────────────────────
+  //
+  // Each SshHost row becomes an in-memory record with a 30s poller that
+  // refreshes reachability + tmux session list. The records back the
+  // connectedDevices() + listTmuxSessions() responses so SSH hosts appear
+  // in the web UI's device list and in `termag list` alongside agents.
+
+  function sshHostsForUser(userId) {
+    return sshHosts.get(userId) || new Map();
+  }
+
+  function publicSshHostStatus(record) {
+    return {
+      name: record.spec.name,
+      connected: Boolean(record.connected),
+      lastSeenAt: record.lastSeenAt?.toISOString?.() || null,
+      kind: 'ssh',
+      version: 'ssh',
+      lastError: record.lastError || null
+    };
+  }
+
+  // Idempotent: reload SshHost rows from the DB, start polling new ones,
+  // stop polling removed ones, leave still-present rows alone.
+  async function refreshSshHosts(userId) {
+    let rows;
+    try {
+      rows = await prisma.sshHost.findMany({
+        where: { userId },
+        select: { id: true, name: true, host: true, port: true, user: true, lastSeenAt: true, lastError: true }
+      });
+    } catch (err) {
+      console.error('[ssh] could not load hosts for user', userId, err.message);
+      return;
+    }
+    if (!sshHosts.has(userId)) sshHosts.set(userId, new Map());
+    const current = sshHosts.get(userId);
+    const wantIds = new Set(rows.map((row) => row.id));
+
+    // Stop polling removed hosts.
+    for (const [hostId, record] of current) {
+      if (!wantIds.has(hostId)) {
+        if (record.pollHandle) clearInterval(record.pollHandle);
+        current.delete(hostId);
+      }
+    }
+
+    for (const row of rows) {
+      const spec = { id: row.id, name: row.name, host: row.host, port: row.port, user: row.user };
+      const existing = current.get(row.id);
+      if (existing) {
+        // Update spec in case the host/user/port changed in the DB.
+        existing.spec = spec;
+        continue;
+      }
+      const record = {
+        spec,
+        connected: false,
+        lastSeenAt: row.lastSeenAt || null,
+        lastError: row.lastError || null,
+        tmuxSessions: [],
+        pollHandle: null
+      };
+      current.set(row.id, record);
+      // Kick off an immediate probe so newly-added hosts feel responsive,
+      // then schedule the recurring poll.
+      probeAndStoreSshHost(userId, row.id).catch(() => {});
+      const handle = setInterval(() => {
+        probeAndStoreSshHost(userId, row.id).catch(() => {});
+      }, SSH_POLL_INTERVAL_MS);
+      handle.unref();
+      record.pollHandle = handle;
+    }
+    if (current.size === 0) sshHosts.delete(userId);
+    broadcastStatus(userId, true);
+  }
+
+  async function probeAndStoreSshHost(userId, hostId) {
+    const record = sshHostsForUser(userId).get(hostId);
+    if (!record) return { ok: false, error: 'host not registered' };
+    // Lazy require so the ssh helper (and its node-pty dep) only loads when
+    // SSH features are actually exercised.
+    const { probeSshHost, listSshTmuxSessions } = require('./ssh');
+    const probe = await probeSshHost(record.spec);
+    if (probe.ok) {
+      record.connected = true;
+      record.lastSeenAt = new Date();
+      record.lastError = null;
+      record.tmuxSessions = await listSshTmuxSessions(record.spec);
+    } else {
+      record.connected = false;
+      record.lastError = probe.error || 'probe failed';
+      record.tmuxSessions = [];
+    }
+    // Persist the lastSeenAt / lastError so the UI can render them even
+    // after a broker restart (state survives the in-memory record).
+    prisma.sshHost
+      .update({
+        where: { id: hostId },
+        data: { lastSeenAt: record.lastSeenAt, lastError: record.lastError }
+      })
+      .catch(() => {});
+    broadcastStatus(userId, true);
+    return { ok: probe.ok, error: probe.error || null, sessions: record.tmuxSessions };
+  }
+
+  function forgetSshHost(userId, hostId) {
+    const map = sshHostsForUser(userId);
+    const record = map.get(hostId);
+    if (!record) return;
+    if (record.pollHandle) clearInterval(record.pollHandle);
+    map.delete(hostId);
+    // Kill any live attaches to this host so we don't keep stale ssh
+    // subprocesses around after a delete.
+    for (const [streamId, stream] of sshStreams) {
+      if (stream.userId === userId && stream.hostId === hostId) {
+        try { stream.pty.kill(); } catch {}
+        try { stream.ws.close(1000, 'host removed'); } catch {}
+        sshStreams.delete(streamId);
+      }
+    }
+    if (map.size === 0) sshHosts.delete(userId);
+    broadcastStatus(userId, true);
+  }
+
+  function sshDeviceSnapshots(userId) {
+    return [...sshHostsForUser(userId).values()].map((record) => ({
+      rootKey: record.spec.name,
+      sessions: record.tmuxSessions.map((session) => ({
+        name: session.name,
+        path: session.path || '',
+        windowCount: session.windowCount || 0,
+        windows: []
+      }))
+    }));
+  }
+
+  async function handleSshAttach(ws, userId, hostId, tmuxName, cols, rows) {
+    const record = sshHostsForUser(userId).get(hostId);
+    if (!record) {
+      ws.close(1008, 'ssh host not registered');
+      return;
+    }
+    // Allowlist-check the tmux name against the cached session list so a
+    // browser can't smuggle in an arbitrary remote-shell payload. (The ssh
+    // helper itself also re-validates with the strict-token regex; this is
+    // a friendlier UX layer above it.)
+    const known = record.tmuxSessions.some((session) => session.name === tmuxName);
+    if (!known) {
+      ws.close(1008, 'unknown tmux session — refresh device status');
+      return;
+    }
+    let proc;
+    try {
+      const { spawnSshTmuxAttach } = require('./ssh');
+      proc = spawnSshTmuxAttach({ host: record.spec, tmuxName, cols, rows });
+    } catch (err) {
+      sendJson(ws, { type: 'fatal', message: sanitizeAgentText(err?.message || 'ssh spawn failed', 200) });
+      ws.close(1011, 'ssh spawn failed');
+      return;
+    }
+    const streamId = `ssh_${nextRequestId()}`;
+    const stream = { ws, userId, hostId, pty: proc };
+    sshStreams.set(streamId, stream);
+
+    // SSH pty bytes go to the browser as raw binary frames, exactly like
+    // the agent-attach flow. The existing terminal-pane.tsx already writes
+    // any non-string WS frame straight into xterm.js, so no client changes
+    // are required.
+    proc.onData((data) => sendOutput(ws, data));
+    proc.onExit(() => {
+      sendJson(ws, { type: 'exit' });
+      try { ws.close(1000, 'ssh exited'); } catch {}
+      sshStreams.delete(streamId);
+    });
+
+    ws.on('message', (raw) => {
+      let msg;
+      try { msg = JSON.parse(raw.toString()); } catch { return; }
+      // Match the message shapes the existing terminal-pane.tsx sends so
+      // the SSH attach can use the same component unchanged. `input` is
+      // keystrokes; `resize` is xterm.js fit; `kill` ends the session.
+      // `pause`/`resume`/`claim-drive` are no-ops in SSH mode (no
+      // server-side coalescing, single subscriber, always driver).
+      if (msg.type === 'input' && typeof msg.data === 'string') {
+        if (msg.data.length > 64 * 1024) return;
+        try { proc.write(msg.data); } catch {}
+        return;
+      }
+      if (msg.type === 'resize') {
+        const w = terminalDimension(msg.cols, 80, 20, 500);
+        const h = terminalDimension(msg.rows, 24, 5, 200);
+        try { proc.resize(w, h); } catch {}
+        return;
+      }
+      if (msg.type === 'kill') {
+        try { proc.kill(); } catch {}
+        return;
+      }
+    });
+
+    ws.on('close', () => {
+      sshStreams.delete(streamId);
+      try { proc.kill(); } catch {}
+    });
+
+    // Drive state: SSH attaches are single-subscriber. Tell the pane it's
+    // the driver and not read-only so the "Take control" badge stays hidden
+    // and input flows immediately.
+    sendJson(ws, { type: 'driver-changed', driver: true, readOnly: false });
+  }
+
   return {
     registerAgent,
     registerBrowser,
@@ -978,8 +1221,21 @@ function createBroker({ prisma, wss }) {
       broadcastStatus(userId, true);
     },
     connectedDevices(userId) {
-      return connectedAgents(userId).map(publicAgentStatus);
+      // Merge agent-backed devices with SSH-host devices. SSH hosts that
+      // haven't been loaded yet (e.g., first call after broker restart)
+      // get loaded asynchronously here — the first call returns whatever
+      // is in-memory; subsequent calls see the full list. The status WS
+      // path also calls refreshSshHosts on connect, so browsers don't see
+      // an incomplete picture in practice.
+      if (!sshHosts.has(userId)) refreshSshHosts(userId).catch(() => {});
+      return [
+        ...connectedAgents(userId).map(publicAgentStatus),
+        ...[...sshHostsForUser(userId).values()].map(publicSshHostStatus)
+      ];
     },
+    refreshSshHosts,
+    probeSshHost: probeAndStoreSshHost,
+    forgetSshHost,
     // Fire-and-forget poke that asks a specific device's agent to send a
     // fresh health ping right now. Used by the publish API so the UI sees
     // the new tmux state without waiting for the next scheduled health
@@ -991,7 +1247,7 @@ function createBroker({ prisma, wss }) {
     },
     async listTmuxSessions(userId) {
       const liveAgents = connectedAgents(userId);
-      const results = await Promise.all(liveAgents.map(async (agent) => {
+      const agentResults = await Promise.all(liveAgents.map(async (agent) => {
         try {
           const data = await sendToAgent(userId, agent.deviceName, 'tmux-list', {}, 5000);
           const sessions = Array.isArray(data?.sessions) ? data.sessions : [];
@@ -1000,7 +1256,13 @@ function createBroker({ prisma, wss }) {
           return [];
         }
       }));
-      return results.flat();
+      // Merge in cached SSH-host tmux sessions. Each session takes the
+      // host's name as its rootKey so the existing per-device grouping
+      // in the UI / CLI just works.
+      const sshResults = sshDeviceSnapshots(userId).flatMap((snap) =>
+        snap.sessions.map((session) => ({ ...session, rootKey: snap.rootKey }))
+      );
+      return [...agentResults.flat(), ...sshResults];
     },
     async listDirectory(userId, deviceName, rootKey, relativePath) {
       if (!agentForUser(userId, deviceName)) throw new Error('Agent offline');

@@ -203,6 +203,10 @@ type CliDeviceEntry = {
   name: string;
   connected: boolean;
   version: string | null;
+  // "agent" (default) or "ssh". Optional for forward-compat with older
+  // brokers that don't surface it.
+  kind?: 'agent' | 'ssh';
+  lastError?: string | null;
   projects: CliProjectEntry[];
   rawTmuxSessions: Array<{ name: string; windowCount: number; path: string | null }>;
 };
@@ -373,11 +377,19 @@ async function runList(args: string[]) {
   if (state && state.devices.length > 0) {
     for (const device of state.devices) {
       const flag = device.connected ? '\x1b[32m●\x1b[0m' : '\x1b[2m○\x1b[0m';
-      const versionLabel = device.version ? ` v${sanitizeForTerminal(device.version)}` : '';
+      // SSH hosts replace the "vX.Y.Z" agent version tag with a "ssh" label
+      // so the listing distinguishes them at a glance. The broker reports
+      // `kind: 'ssh'` (with a literal "ssh" sentinel in version); fall back
+      // to the version string for native agents.
+      const isSsh = device.kind === 'ssh' || device.version === 'ssh';
+      const kindLabel = isSsh ? ' ssh' : (device.version ? ` v${sanitizeForTerminal(device.version)}` : '');
       const stateLabel = device.connected ? 'connected' : 'offline';
-      console.log(`  ${flag} \x1b[1m${sanitizeForTerminal(device.name)}\x1b[0m  \x1b[2m${stateLabel}${versionLabel}\x1b[0m`);
+      const errSuffix = !device.connected && device.lastError
+        ? `  \x1b[31m· ${sanitizeForTerminal(device.lastError).slice(0, 80)}\x1b[0m`
+        : '';
+      console.log(`  ${flag} \x1b[1m${sanitizeForTerminal(device.name)}\x1b[0m  \x1b[2m${stateLabel}${kindLabel}\x1b[0m${errSuffix}`);
       if (device.projects.length === 0 && device.rawTmuxSessions.length === 0) {
-        console.log('    \x1b[2m(no projects)\x1b[0m');
+        console.log(isSsh ? '    \x1b[2m(no tmux sessions)\x1b[0m' : '    \x1b[2m(no projects)\x1b[0m');
         continue;
       }
       for (const project of device.projects) {

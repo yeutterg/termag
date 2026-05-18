@@ -13,6 +13,11 @@ type CliState = {
     name: string;
     connected: boolean;
     version: string | null;
+    // "agent" or "ssh" — lets `termag list` label ssh hosts distinctly.
+    // Field is optional/defaulted so older CLIs keep working with newer
+    // brokers (and vice versa).
+    kind?: 'agent' | 'ssh';
+    lastError?: string | null;
     projects: Array<{
       id: string;
       name: string;
@@ -71,6 +76,8 @@ export const GET = withAuth(async (user) => {
         name,
         connected: Boolean(live?.connected),
         version: live?.version ?? null,
+        kind: live?.kind || 'agent',
+        lastError: live?.lastError ?? null,
         projects: projects
           .filter((project) => project.rootKey === name)
           .map((project) => ({

@@ -5,6 +5,7 @@ import { Check, Copy, ExternalLink, FolderCog, Plus, Trash2, X } from 'lucide-re
 import { cn } from '@/lib/utils';
 import type { AgentDeviceStatus, Project, Session, TmuxDeviceSession } from './types';
 import { DirectoryBrowser } from './directory-browser';
+import { SshHostsSection } from './ssh-hosts-section';
 
 type Token = {
   id: string;
@@ -407,6 +408,7 @@ export function DevicesDialog({ open, onOpenChange, user, devices, knownDeviceNa
             })}
           </div>
           {cleanupError && <div className="mt-3 text-xs text-bad">{cleanupError}</div>}
+          <SshHostsSection open={open} devices={devices} />
           <div className="mt-4 rounded-md border border-line bg-bg p-3 text-xs text-muted">
             <div className="mb-2 font-medium text-text">Setup</div>
             <p>Install the agent on each device, export its token and roots, then run connect from any terminal to publish a tmux workspace or start a new tmux-backed shell.</p>

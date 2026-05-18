@@ -9,6 +9,9 @@ type Broker = {
   renameTmuxWindow?: (userId: string, deviceName: string, tmuxName: string, name: string, timeoutMs?: number) => Promise<{ tmuxName?: string; tmuxWindowName?: string } | null>;
   disconnectAgentToken?: (userId: string, tokenId: string) => void;
   killTmux: (userId: string, tmuxName: string, timeoutMs?: number) => Promise<boolean>;
+  refreshSshHosts?: (userId: string) => Promise<void>;
+  probeSshHost?: (userId: string, hostId: string) => Promise<{ ok: boolean; error?: string | null; sessions?: Array<{ name: string; windowCount: number; path: string }> }>;
+  forgetSshHost?: (userId: string, hostId: string) => void;
 };
 
 export type ConnectedDevice = {
@@ -20,6 +23,10 @@ export type ConnectedDevice = {
   streamCount?: number;
   uptimeSec?: number;
   memMb?: number;
+  // "agent" (default, omitted on the wire) or "ssh". Lets the UI render
+  // an SSH-host badge and the CLI label hosts in `termag list`.
+  kind?: 'agent' | 'ssh';
+  lastError?: string | null;
 };
 
 export type DirectoryListing = {
@@ -122,4 +129,31 @@ export async function listDeviceDirectory(
   const live = broker();
   if (!live?.listDirectory) throw new Error('Agent offline');
   return live.listDirectory(userId, deviceName, rootKey, relativePath);
+}
+
+/**
+ * Reload SshHost rows for this user into the broker's in-memory poller.
+ * Idempotent — call from any route that mutates the SshHost table so the
+ * broker doesn't have to wait for its 30s reconcile tick.
+ */
+export async function refreshSshHostsForUser(userId: string): Promise<void> {
+  await broker()?.refreshSshHosts?.(userId);
+}
+
+/**
+ * One-shot probe of a single registered SshHost: reachability + tmux list.
+ * Persists results back to the DB (lastSeenAt / lastError) and returns the
+ * probe outcome so the API caller can echo it to the user.
+ */
+export async function probeRegisteredSshHost(userId: string, hostId: string) {
+  return broker()?.probeSshHost?.(userId, hostId) ?? { ok: false, error: 'broker offline' };
+}
+
+/**
+ * Drop in-memory state for an SshHost that's about to be deleted. The DB
+ * row is the source of truth; this cleanup just stops the poller from
+ * resurrecting the host before the next reconcile tick.
+ */
+export function forgetSshHostInBroker(userId: string, hostId: string): void {
+  broker()?.forgetSshHost?.(userId, hostId);
 }

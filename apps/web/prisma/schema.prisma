@@ -24,6 +24,7 @@ model User {
   projects    Project[]
   agentTokens AgentToken[]
   auditEvents AuditEvent[]
+  sshHosts    SshHost[]
 }
 
 model AgentToken {
@@ -133,6 +134,29 @@ model ScrollbackChunk {
   // chunks. Cheap on insert (one extra B-tree write) for a big speedup on
   // delete-by-age.
   @@index([createdAt])
+}
+
+// Remote tmux host accessed via SSH. Adds a "device" slot alongside agent
+// tokens — the broker treats the SshHost as a virtual agent: polls it for
+// tmux sessions and spawns one `ssh -t ... tmux attach` subprocess per
+// browser attach. No key material lives in the DB; auth defers to the
+// broker process's ssh-agent + ~/.ssh/config.
+model SshHost {
+  id         String    @id @default(cuid())
+  name       String    // doubles as device label / rootKey in CLI/UI listings
+  host       String
+  port       Int       @default(22)
+  user       String
+  lastSeenAt DateTime?
+  lastError  String?   // most recent probe failure, surfaced in UI
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+
+  userId    String
+  ownedBy   User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, name])
+  @@index([userId])
 }
 
 // Append-only security/activity log. Used for the audit dashboard and for
