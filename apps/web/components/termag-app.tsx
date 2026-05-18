@@ -21,6 +21,7 @@ import {
   Terminal
 } from 'lucide-react';
 import { TerminalPane } from './terminal/terminal-pane';
+import { HealthBanner } from './health-banner';
 import { PlatformProvider, Shortcut, shortcutSuffix } from './shortcut';
 import { TabLabel } from './tab-label';
 import { useTabHistory } from './use-tab-history';
@@ -289,6 +290,22 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
         event.preventDefault();
         setSearchOpen(true);
         return;
+      }
+
+      // `/` opens the search palette when nothing typeable has focus
+      // (vim/help convention). xterm.js focuses a hidden textarea while
+      // the terminal is active — we treat that as typing too and skip,
+      // so `/` inside a shell still works normally. The Mod+Shift+F
+      // shortcut stays as the always-works alternative.
+      if (!mod && !event.altKey && !event.shiftKey && event.key === '/') {
+        const target = event.target as HTMLElement | null;
+        const tagName = target?.tagName?.toLowerCase();
+        const isTyping = tagName === 'input' || tagName === 'textarea' || target?.isContentEditable;
+        if (!isTyping) {
+          event.preventDefault();
+          setSearchOpen(true);
+          return;
+        }
       }
 
       // Note: ⌃Tab / ⌃⇧Tab and ⌘W are intentionally NOT bound — every
@@ -964,6 +981,9 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
       </aside>
 
       <section className="flex min-w-0 flex-1 flex-col">
+        {/* Config-misconfiguration banner sits above the chrome so users
+            see it on every dashboard view, not just the Devices dialog. */}
+        <HealthBanner />
         <header className="flex h-14 shrink-0 items-center justify-between bg-bg px-3 md:px-4">
           <div className="flex min-w-0 items-center gap-2">
             {/* Open the drawer on mobile, expand the desktop sidebar otherwise */}
@@ -1170,6 +1190,11 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
             onTheme={cycleTheme}
             onSearch={() => setSearchOpen(true)}
             onDevices={() => openDevices()}
+            onAddDevice={() => setNewDeviceOpen(true)}
+            // SSH host add lives inside the Devices dialog (the section
+            // owns the dialog state). Open Devices first; the SSH add
+            // button is one click away.
+            onAddSshHost={() => openDevices()}
             authMode={authMode}
           />
         </Suspense>

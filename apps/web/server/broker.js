@@ -1343,11 +1343,19 @@ function createBroker({ prisma, wss }) {
         .catch(() => null);
     },
     disconnectAgentToken(userId, tokenId) {
+      let kicked = false;
       for (const agent of agentsForUser(userId).values()) {
         if (agent.tokenId === tokenId && agent.ws.readyState === WebSocket.OPEN) {
           agent.ws.close(1008, 'token revoked');
+          kicked = true;
         }
       }
+      // The ws.close above eventually triggers broadcastStatus on the
+      // close handler, but that runs *after* the close round-trip. Fire
+      // an immediate broadcast so the web UI's "connected" dot updates
+      // instantly rather than waiting up to ~30s for the next health
+      // tick (or the close to round-trip back).
+      if (kicked) broadcastStatus(userId, true);
     },
     killTmux(userId, tmuxName, timeoutMs = 5000) {
       if (!tmuxName || !agentForUser(userId)) return Promise.resolve(false);

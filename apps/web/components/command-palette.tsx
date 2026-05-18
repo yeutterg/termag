@@ -17,6 +17,8 @@ interface CommandPaletteProps {
   onTheme: () => void;
   onSearch: () => void;
   onDevices: () => void;
+  onAddDevice?: () => void;
+  onAddSshHost?: () => void;
   authMode: 'oauth' | 'password' | 'trusted';
 }
 
@@ -37,6 +39,8 @@ export function CommandPalette({
   onTheme,
   onSearch,
   onDevices,
+  onAddDevice,
+  onAddSshHost,
   authMode
 }: CommandPaletteProps) {
   if (!open) return null;
@@ -99,6 +103,12 @@ export function CommandPalette({
             <CommandRow icon={<Trash2 className="h-3.5 w-3.5" />} label="Delete current window" onSelect={() => { onKill(); onOpenChange(false); }} />
             <CommandRow icon={<Moon className="h-3.5 w-3.5" />} label="Toggle theme" shortcut={['mod', '.']} onSelect={() => { onTheme(); onOpenChange(false); }} />
             <CommandRow icon={<Laptop className="h-3.5 w-3.5" />} label="Open devices" shortcut={['mod', ';']} onSelect={() => { onDevices(); onOpenChange(false); }} />
+            {onAddDevice && (
+              <CommandRow icon={<Plus className="h-3.5 w-3.5" />} label="Add device (agent)" onSelect={() => { onAddDevice(); onOpenChange(false); }} />
+            )}
+            {onAddSshHost && (
+              <CommandRow icon={<Plus className="h-3.5 w-3.5" />} label="Add SSH host" onSelect={() => { onAddSshHost(); onOpenChange(false); }} />
+            )}
             {authMode === 'oauth' && (
               <CommandRow icon={<LogOut className="h-3.5 w-3.5" />} label="Sign out" onSelect={() => signOut({ callbackUrl: '/login' })} />
             )}

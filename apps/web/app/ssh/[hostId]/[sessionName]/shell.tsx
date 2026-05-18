@@ -34,6 +34,11 @@ export function SshAttachShell({ hostId, hostName, hostLabel, sessionName }: Ssh
           ssh={{ hostId, tmuxName: sessionName }}
         />
       </main>
+      {/* Detach hint: closing the tab IS the detach for web — the remote
+          tmux session stays alive, other subscribers keep streaming. */}
+      <footer className="border-t border-line bg-panel px-3 py-1 text-xs text-muted">
+        Close this tab to detach. The remote tmux session keeps running; reopen anytime to re-attach.
+      </footer>
     </div>
   );
 }

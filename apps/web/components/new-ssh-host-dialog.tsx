@@ -10,7 +10,25 @@ export type SshHost = {
   user: string;
   lastSeenAt: string | null;
   lastError: string | null;
+  color?: string | null;
 };
+
+// A small fixed palette keeps the picker simple and avoids the user
+// choosing colors that don't read against the dashboard theme. Stored as
+// short tokens — UI components map them to actual CSS colors.
+export const HOST_COLOR_PALETTE = ['red', 'orange', 'amber', 'green', 'teal', 'blue', 'indigo', 'violet', 'pink'] as const;
+
+export function colorToCss(color: string | null | undefined): string | undefined {
+  if (!color) return undefined;
+  // Hex passthrough.
+  if (color.startsWith('#')) return color;
+  // Palette names → conservative HSL values that read well on both themes.
+  const map: Record<string, string> = {
+    red: '#ef4444', orange: '#f97316', amber: '#f59e0b', green: '#22c55e',
+    teal: '#14b8a6', blue: '#3b82f6', indigo: '#6366f1', violet: '#a855f7', pink: '#ec4899'
+  };
+  return map[color];
+}
 
 interface NewSshHostDialogProps {
   open: boolean;
@@ -21,6 +39,7 @@ interface NewSshHostDialogProps {
 export function NewSshHostDialog({ open, onOpenChange, onCreated }: NewSshHostDialogProps) {
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState('');
+  const [color, setColor] = useState<string>('');
 
   async function createHost(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -31,7 +50,8 @@ export function NewSshHostDialog({ open, onOpenChange, onCreated }: NewSshHostDi
       name: String(data.get('name') || '').trim(),
       host: String(data.get('host') || '').trim(),
       port: Number(data.get('port') || '22') || 22,
-      user: String(data.get('user') || '').trim()
+      user: String(data.get('user') || '').trim(),
+      color: color || null
     };
     if (!payload.name || !payload.host || !payload.user) {
       setError('Name, host, and user are required.');
@@ -115,6 +135,36 @@ export function NewSshHostDialog({ open, onOpenChange, onCreated }: NewSshHostDi
               className="h-9 w-full rounded-md border border-line bg-bg px-3 text-sm outline-none focus:border-accent"
             />
           </label>
+          <fieldset>
+            <legend className="mb-1 block text-xs font-medium text-muted">Color (helps distinguish hosts at a glance)</legend>
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setColor('')}
+                aria-label="No color"
+                aria-pressed={color === ''}
+                className={`h-6 w-6 rounded-md border ${color === '' ? 'border-accent ring-2 ring-accent' : 'border-line'} bg-bg`}
+              >
+                <span className="block h-full w-full text-[10px] text-muted">∅</span>
+              </button>
+              {HOST_COLOR_PALETTE.map((name) => {
+                const css = colorToCss(name)!;
+                const active = color === name;
+                return (
+                  <button
+                    key={name}
+                    type="button"
+                    onClick={() => setColor(name)}
+                    aria-label={name}
+                    aria-pressed={active}
+                    title={name}
+                    className={`h-6 w-6 rounded-md border ${active ? 'border-accent ring-2 ring-accent' : 'border-line'}`}
+                    style={{ backgroundColor: css }}
+                  />
+                );
+              })}
+            </div>
+          </fieldset>
           {error && <div className="rounded-md border border-bad/30 bg-bad/10 px-3 py-2 text-xs text-bad">{error}</div>}
           <div className="flex justify-end gap-2 pt-1">
             <button

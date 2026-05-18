@@ -35,6 +35,10 @@ model AgentToken {
   createdAt   DateTime  @default(now())
   lastUsedAt  DateTime?
   revokedAt   DateTime?
+  // Optional accent color (hex like "#ef4444" or a Tailwind token name).
+  // The UI uses this to tint the device chip + pane border so you can
+  // tell "this is the prod box" at a glance.
+  color       String?
 
   // Default folder the New Project dialog seeds when this device is selected.
   // Identifies a (rootKey, relativePath) under the agent's reported roots.
@@ -160,6 +164,8 @@ model SshHost {
   user       String
   lastSeenAt DateTime?
   lastError  String?   // most recent probe failure, surfaced in UI
+  // Accent color for the host's pane + chip. Same intent as AgentToken.color.
+  color      String?
   createdAt  DateTime  @default(now())
   updatedAt  DateTime  @updatedAt
 

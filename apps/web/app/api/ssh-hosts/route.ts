@@ -8,11 +8,17 @@ import { probeRegisteredSshHost, refreshSshHostsForUser } from '@/lib/broker';
 // Schema for "name": same shape as device labels elsewhere. Hostname is
 // permissive (allow DNS dots, IPv6 brackets, slashes-in-host? No, ssh uses
 // host[:port]) — we just block shell metacharacters in the probe path.
+// Color accepts either a hex like "#ef4444" or empty/null for "no color".
+// Tailwind palette tokens like "red" / "amber" / "green" / etc. would be
+// passed through; UI maps known names to its theme variables.
+const colorSchema = z.string().trim().max(20).regex(/^(#[0-9A-Fa-f]{6}|[a-z]{3,12})?$/).nullish();
+
 const createSchema = z.object({
   name: z.string().trim().min(1).max(80),
   host: z.string().trim().min(1).max(253).regex(/^[A-Za-z0-9._:\[\]-]+$/, 'hostname has invalid characters'),
   port: z.number().int().min(1).max(65535).optional(),
-  user: z.string().trim().min(1).max(64).regex(/^[A-Za-z0-9._-]+$/, 'ssh user has invalid characters')
+  user: z.string().trim().min(1).max(64).regex(/^[A-Za-z0-9._-]+$/, 'ssh user has invalid characters'),
+  color: colorSchema
 });
 
 const publicView = {
@@ -23,6 +29,7 @@ const publicView = {
   user: true,
   lastSeenAt: true,
   lastError: true,
+  color: true,
   createdAt: true
 } as const;
 
@@ -73,7 +80,8 @@ export const POST = withAuth(async (user, request: Request) => {
       name: body.name,
       host: body.host,
       port: body.port ?? 22,
-      user: body.user
+      user: body.user,
+      color: body.color || null
     },
     select: publicView
   });

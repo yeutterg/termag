@@ -3,7 +3,7 @@
 import { useEffect, useState } from 'react';
 import { ExternalLink, Plus, RotateCcw, Trash2 } from 'lucide-react';
 import { cn } from '@/lib/utils';
-import { NewSshHostDialog, type SshHost } from './new-ssh-host-dialog';
+import { NewSshHostDialog, type SshHost, colorToCss } from './new-ssh-host-dialog';
 import type { AgentDeviceStatus } from './types';
 
 interface SshHostsSectionProps {
@@ -99,8 +99,16 @@ export function SshHostsSection({ open, devices }: SshHostsSectionProps) {
           const matching = devices.find((device) => device.name === host.name);
           const sessions = matching?.tmuxSessions ?? [];
           const connected = Boolean(matching?.connected);
+          const accent = colorToCss(host.color);
           return (
-            <div key={host.id} className="rounded-md border border-line bg-bg p-3">
+            <div
+              key={host.id}
+              className="rounded-md border border-line bg-bg p-3"
+              // Left border-strip carries the user's accent color when set.
+              // Subtle enough not to fight the dashboard theme but obvious
+              // enough to glance-distinguish prod from staging.
+              style={accent ? { borderLeft: `3px solid ${accent}` } : undefined}
+            >
               <div className="flex items-start justify-between gap-3">
                 <div className="min-w-0">
                   <div className="flex items-center gap-2">
