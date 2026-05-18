@@ -25,6 +25,8 @@ model User {
   agentTokens AgentToken[]
   auditEvents AuditEvent[]
   sshHosts    SshHost[]
+  bootstrapCodes BootstrapCode[]
+  shareLinks  ShareLink[]
 }
 
 model AgentToken {
@@ -185,6 +187,54 @@ model SshHost {
 // `payload` is a free-form JSON blob for action-specific data (e.g., a
 // killed session's tmuxName, a project's spawnCommand). Retention is
 // unbounded for now — rows are tiny and incidents may surface weeks later.
+// One-time, short-TTL code that a fresh agent CLI redeems to receive
+// pre-minted credentials. Used by `termag bootstrap <url>` to skip the
+// copy/paste relay of TERMAG_URL + TERMAG_AGENT_TOKEN + roots. The code
+// is consumed atomically (consumedAt set on first claim); a second claim
+// fails. The mints-on-claim flow means the new AgentToken row only
+// exists if someone actually claimed it — abandoned codes don't pollute
+// the token table.
+model BootstrapCode {
+  id          String    @id @default(cuid())
+  code        String    @unique
+  deviceName  String?
+  expiresAt   DateTime
+  consumedAt  DateTime?
+  tokenId     String?   // populated on claim; references the AgentToken minted
+  createdAt   DateTime  @default(now())
+
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+// TTL'd read-only share link for a single session. Anyone with the link
+// can attach in read-only mode until the expiry. We persist enough info
+// to route the eventual WS upgrade (sessionId for agent flow, sshHostId
+// + tmuxName for ssh flow) without re-resolving names.
+model ShareLink {
+  id           String    @id @default(cuid())
+  code         String    @unique
+  // Exactly one of (sessionId) or (sshHostId+tmuxName) is set, depending
+  // on whether this link targets an agent session or an ssh attach.
+  sessionId    String?
+  sshHostId    String?
+  tmuxName     String?
+  expiresAt    DateTime
+  revokedAt    DateTime?
+  lastUsedAt   DateTime?
+  useCount     Int       @default(0)
+  createdAt    DateTime  @default(now())
+
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+}
+
 model AuditEvent {
   id          String   @id @default(cuid())
   action      String   // "attach", "kill-session", "create-project", "rotate-token", etc.

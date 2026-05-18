@@ -73,6 +73,14 @@ interface TerminalPaneProps {
    */
   ssh?: { hostId: string; tmuxName: string };
   /**
+   * Read-only share viewer mode. Connects to the broker's
+   * /api/ws/share-terminal?code= endpoint, which resolves the
+   * (sshHostId, tmuxName) on the server side from the code. Inputs are
+   * suppressed both at the pane (no input messages sent) and at the
+   * broker (read-only subscriber flag).
+   */
+  share?: { code: string };
+  /**
    * Optional callback fired with the latest subscriber count for the
    * session. Parents (e.g., the SSH attach shell) use this to render a
    * "👁 N" chip when more than one client is attached. Only the SSH path
@@ -81,7 +89,7 @@ interface TerminalPaneProps {
   onSubscriberCount?: (count: number) => void;
 }
 
-function TerminalPaneImpl({ sessionId, active, title, status, onTitleChange, hideHeader, ssh, onSubscriberCount }: TerminalPaneProps) {
+function TerminalPaneImpl({ sessionId, active, title, status, onTitleChange, hideHeader, ssh, share, onSubscriberCount }: TerminalPaneProps) {
   const hostRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<XTerm | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
@@ -130,13 +138,16 @@ function TerminalPaneImpl({ sessionId, active, title, status, onTitleChange, hid
       type ConnectionLike = { saveData?: boolean; effectiveType?: string };
       const conn = (navigator as Navigator & { connection?: ConnectionLike }).connection;
       const saveDataHint = conn?.saveData || /^(slow-2g|2g|3g)$/.test(conn?.effectiveType ?? '') ? '&saveData=1' : '';
-      // SSH attaches use a separate endpoint with hostId+tmuxName instead
-      // of sessionId. The broker's protocol from this point on is the
-      // same (binary frames for output, JSON for control), so nothing
-      // else in this component needs to branch.
-      const wsUrl = ssh
-        ? `${protocol}//${window.location.host}/api/ws/ssh-terminal?hostId=${encodeURIComponent(ssh.hostId)}&tmuxName=${encodeURIComponent(ssh.tmuxName)}&cols=${term.cols}&rows=${term.rows}`
-        : `${protocol}//${window.location.host}/api/ws/terminal?sessionId=${sessionId}&cols=${term.cols}&rows=${term.rows}${saveDataHint}`;
+      // Three connection modes. Share routes through a public WS path
+      // that authenticates via the share code; SSH attaches use hostId
+      // + tmuxName; everything else is sessionId-keyed. The on-wire
+      // protocol is identical from this point on (binary frames for
+      // output, JSON for control), so nothing else here has to branch.
+      const wsUrl = share
+        ? `${protocol}//${window.location.host}/api/ws/share-terminal?code=${encodeURIComponent(share.code)}&cols=${term.cols}&rows=${term.rows}`
+        : ssh
+          ? `${protocol}//${window.location.host}/api/ws/ssh-terminal?hostId=${encodeURIComponent(ssh.hostId)}&tmuxName=${encodeURIComponent(ssh.tmuxName)}&cols=${term.cols}&rows=${term.rows}`
+          : `${protocol}//${window.location.host}/api/ws/terminal?sessionId=${sessionId}&cols=${term.cols}&rows=${term.rows}${saveDataHint}`;
       const ws = new WebSocket(wsUrl);
       ws.binaryType = 'arraybuffer';
       wsRef.current = ws;
@@ -344,7 +355,7 @@ function TerminalPaneImpl({ sessionId, active, title, status, onTitleChange, hid
       term?.dispose();
       termRef.current = null;
     };
-  }, [active, sessionId, ssh?.hostId, ssh?.tmuxName]);
+  }, [active, sessionId, ssh?.hostId, ssh?.tmuxName, share?.code]);
 
   function claimDrive() {
     const ws = wsRef.current;

@@ -221,7 +221,7 @@ class SshSessionStream {
    * minimum cols/rows across all attached subscribers so a small mobile
    * client doesn't get mangled output when a desktop is also attached.
    */
-  async subscribe(ws, cols, rows) {
+  async subscribe(ws, cols, rows, options = {}) {
     if (!this.alive) throw new Error('stream already torn down');
     // Cancel any pending idle teardown — we have a subscriber again.
     if (this.idleTimer) {
@@ -230,9 +230,17 @@ class SshSessionStream {
     }
 
     const subscriberId = `sub_${++this.subSeq}_${Date.now()}`;
-    const sub = { ws, cols: clampDim(cols, 80, 20, 500), rows: clampDim(rows, 24, 5, 200) };
+    const sub = {
+      ws,
+      cols: clampDim(cols, 80, 20, 500),
+      rows: clampDim(rows, 24, 5, 200),
+      readOnly: Boolean(options.readOnly)
+    };
     this.subscribers.set(subscriberId, sub);
-    this.recomputePtySize();
+    // Read-only subscribers (share-link viewers) don't influence pty
+    // sizing — their window size shouldn't shrink the pty for the
+    // owner. Only writers participate in the smallest-wins calculation.
+    if (!sub.readOnly) this.recomputePtySize();
     // Wire close handler SYNCHRONOUSLY before any await. If the WS closes
     // during the scrollback fetch below, this handler still fires and
     // unsubscribes us cleanly. Previously the caller wired close after
@@ -309,7 +317,7 @@ class SshSessionStream {
     for (const data of this.recentBuffer) sendBinary(ws, data);
 
     // Initial control frame so the pane drops out of "connecting" state.
-    sendJson(ws, { type: 'driver-changed', driver: true, readOnly: false });
+    sendJson(ws, { type: 'driver-changed', driver: !sub.readOnly, readOnly: sub.readOnly });
     this.broadcastSubscriberCount();
   }
 
@@ -318,11 +326,17 @@ class SshSessionStream {
     const sub = this.subscribers.get(subscriberId);
     if (!sub) return;
     if (msg.type === 'input' && typeof msg.data === 'string') {
+      // Read-only viewers (share link recipients) can't drive the pty.
+      // Silently drop their keystrokes — surface a one-time hint via
+      // the driver-changed flag they already received on subscribe.
+      if (sub.readOnly) return;
       if (msg.data.length > 64 * 1024) return;
       try { this.pty.write(msg.data); } catch {}
       return;
     }
     if (msg.type === 'resize') {
+      // Read-only subscribers don't influence pty dimensions, period.
+      if (sub.readOnly) return;
       sub.cols = clampDim(msg.cols, sub.cols, 20, 500);
       sub.rows = clampDim(msg.rows, sub.rows, 5, 200);
       this.recomputePtySize();

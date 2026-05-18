@@ -6,6 +6,8 @@ import { cn } from '@/lib/utils';
 import type { AgentDeviceStatus, Project, Session, TmuxDeviceSession } from './types';
 import { DirectoryBrowser } from './directory-browser';
 import { SshHostsSection } from './ssh-hosts-section';
+import { BootstrapDeviceDialog } from './bootstrap-device-dialog';
+import { Zap } from 'lucide-react';
 
 type Token = {
   id: string;
@@ -55,6 +57,7 @@ export function DevicesDialog({ open, onOpenChange, user, devices, knownDeviceNa
   const [cleanupError, setCleanupError] = useState('');
   const [editingDefault, setEditingDefault] = useState('');
   const [savingDefault, setSavingDefault] = useState('');
+  const [bootstrapOpen, setBootstrapOpen] = useState(false);
   const deviceRefs = useRef(new Map<string, HTMLDivElement>());
 
   async function patchToken(tokenId: string, payload: Partial<Pick<Token, 'defaultRootKey' | 'defaultRelativePath'>>) {
@@ -151,6 +154,15 @@ export function DevicesDialog({ open, onOpenChange, user, devices, knownDeviceNa
             <span className={cn('rounded-full px-2 py-1 text-xs', anyConnected ? 'bg-good/15 text-good' : 'bg-panel2 text-muted')}>
               {anyConnected ? `${devices.filter((device) => device.connected).length} connected` : 'No agents connected'}
             </span>
+            <button
+              type="button"
+              onClick={() => setBootstrapOpen(true)}
+              className="inline-flex h-7 items-center gap-1.5 rounded-md border border-line bg-bg px-2 text-xs text-text hover:bg-panel2"
+              title="One-time code: paste a command on the new device, done"
+            >
+              <Zap className="h-3.5 w-3.5" />
+              Bootstrap
+            </button>
             {onAddDevice && (
               <button
                 type="button"
@@ -164,6 +176,7 @@ export function DevicesDialog({ open, onOpenChange, user, devices, knownDeviceNa
             )}
           </div>
         </div>
+        <BootstrapDeviceDialog open={bootstrapOpen} onOpenChange={setBootstrapOpen} />
         <div className="min-h-0 flex-1 overflow-y-auto">
           <div className="mb-3">
             <h3 className="text-sm font-medium">Device tokens</h3>

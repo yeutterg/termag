@@ -726,6 +726,21 @@ function createBroker({ prisma, wss }) {
   }
 
   async function registerBrowser(ws, req, url) {
+    // Share endpoint is public — the share code itself authenticates
+    // the viewer. Handle it before the userIdFromRequest gate so a
+    // signed-out user with a valid share link can still attach.
+    if (url.pathname === '/api/ws/share-terminal') {
+      const code = url.searchParams.get('code');
+      const cols = terminalDimension(url.searchParams.get('cols'), 80, 20, 500);
+      const rows = terminalDimension(url.searchParams.get('rows'), 24, 5, 200);
+      if (!code) {
+        ws.close(1008, 'code required');
+        return;
+      }
+      await handleShareAttach(ws, code, cols, rows);
+      return;
+    }
+
     const userId = await userIdFromRequest(req, prisma);
     if (!userId) {
       ws.close(1008, 'login required');
@@ -1247,6 +1262,81 @@ function createBroker({ prisma, wss }) {
     // events. We log on attach (not detach) — pair with the
     // SshSessionStream lifecycle to derive detach times if needed.
     writeSshAttachAudit(userId, record.spec, tmuxName, ws).catch(() => {});
+  }
+
+  /**
+   * Public share-link attach. The code authenticates the viewer; we
+   * resolve it to (userId, sshHostId, tmuxName), validate TTL +
+   * revocation, then subscribe as a read-only viewer to the owner's
+   * existing SshSessionStream. We do NOT call refreshSshHosts here —
+   * the link's existence implies the owner had the host loaded recently.
+   */
+  async function handleShareAttach(ws, code, cols, rows) {
+    let link;
+    try {
+      link = await prisma.shareLink.findUnique({
+        where: { code },
+        select: {
+          id: true,
+          userId: true,
+          sshHostId: true,
+          tmuxName: true,
+          expiresAt: true,
+          revokedAt: true,
+          sshHost: { select: { id: true, name: true, host: true, port: true, user: true } }
+        }
+      });
+    } catch (err) {
+      console.error('[share-attach] DB lookup failed:', err?.message || err);
+      ws.close(1011, 'lookup failed');
+      return;
+    }
+    if (!link || link.revokedAt || link.expiresAt < new Date() || !link.sshHostId || !link.sshHost || !link.tmuxName) {
+      ws.close(1008, 'share link unavailable');
+      return;
+    }
+    // Ensure the SshSessionStream for the owner exists by reusing the
+    // same getOrCreate path (it'll spawn a pty if no one's attached yet).
+    // We pass the owner's userId so accounting matches the host owner.
+    let stream;
+    try {
+      stream = sshStreamRegistry.getOrCreate({
+        userId: link.userId,
+        hostSpec: link.sshHost,
+        tmuxName: link.tmuxName,
+        cols,
+        rows
+      });
+    } catch (err) {
+      sendJson(ws, { type: 'fatal', message: sanitizeAgentText(err?.message || 'ssh spawn failed', 200) });
+      ws.close(1011, 'ssh spawn failed');
+      return;
+    }
+    try {
+      await stream.subscribe(ws, cols, rows, { readOnly: true });
+    } catch (err) {
+      sendJson(ws, { type: 'fatal', message: sanitizeAgentText(err?.message || 'subscribe failed', 200) });
+      ws.close(1011, 'subscribe failed');
+      return;
+    }
+    // Audit + bookkeeping: increment use count, update lastUsedAt.
+    // Fire-and-forget so a slow DB doesn't hold up the live stream.
+    prisma.shareLink
+      .update({ where: { id: link.id }, data: { useCount: { increment: 1 }, lastUsedAt: new Date() } })
+      .catch(() => {});
+    prisma.auditEvent
+      .create({
+        data: {
+          action: 'attach',
+          subjectType: 'session',
+          deviceName: link.sshHost.name,
+          ip: ws._socket?.remoteAddress || null,
+          userAgent: null,
+          payload: JSON.stringify({ kind: 'share-attach', code: link.code || code, tmuxName: link.tmuxName }),
+          userId: link.userId
+        }
+      })
+      .catch(() => {});
   }
 
   function writeSshAttachAudit(userId, hostSpec, tmuxName, ws) {

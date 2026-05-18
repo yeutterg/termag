@@ -94,6 +94,8 @@ if (subcommand === 'update') {
   void runAttach(argv.slice(1));
 } else if (subcommand === 'config') {
   void runConfig(argv.slice(1));
+} else if (subcommand === 'bootstrap') {
+  void runBootstrap(argv.slice(1));
 } else if (subcommand === '--version' || subcommand === '-v') {
   console.log(pkgVersion);
   process.exit(0);
@@ -152,6 +154,101 @@ Environment overrides:
   TERMAG_TERMINAL_APP       Terminal, iTerm2, Ghostty, or auto for menu actions
   TERMAG_CONFIG             config file path (default ~/.termag/config.json)
 `);
+}
+
+/**
+ * One-shot bootstrap: redeem a code from the broker, write
+ * ~/.termag/config.json with the returned URL + token, and print a
+ * one-liner next-step (`termag connect`). Eliminates the manual copy/
+ * paste of TERMAG_URL + TERMAG_AGENT_TOKEN that new users used to face.
+ *
+ * Usage:  termag bootstrap <claim-url>
+ *
+ * The claim URL is whatever the web UI's "Add device" flow generated.
+ * It's a single-use, short-TTL endpoint; calling it twice yields 409.
+ */
+async function runBootstrap(args: string[]) {
+  if (args[0] === '--help' || args[0] === '-h') {
+    console.log(`termag bootstrap <claim-url>\n\nRedeem a one-time bootstrap code from your broker and write the\nresulting URL + agent token to ~/.termag/config.json. Get the URL\nfrom the "Add device" flow in the web UI.\n`);
+    process.exit(0);
+  }
+  const claimUrl = args[0];
+  if (!claimUrl) {
+    console.error(`[${tag}] Usage: termag bootstrap <claim-url>`);
+    process.exit(1);
+  }
+  let parsed: URL;
+  try { parsed = new URL(claimUrl); } catch {
+    console.error(`[${tag}] Not a valid URL: ${claimUrl}`);
+    process.exit(1);
+  }
+  // Refuse to send anywhere that isn't HTTPS, except for localhost where
+  // dev workflows are common. The bootstrap response carries an agent
+  // token in plaintext, so a hijacked claim URL would be a credential
+  // leak.
+  if (parsed.protocol !== 'https:' && !isLocalHost(parsed.hostname)) {
+    console.error(`[${tag}] Refusing to claim over insecure ${parsed.protocol} on non-local host. Use https or a tunneled localhost.`);
+    process.exit(1);
+  }
+
+  const body = await new Promise<{ ok: boolean; status: number; data: Record<string, unknown> }>((resolve, reject) => {
+    const client = parsed.protocol === 'https:' ? https : http;
+    const req = client.request(
+      {
+        protocol: parsed.protocol,
+        hostname: parsed.hostname,
+        port: parsed.port,
+        path: parsed.pathname + parsed.search,
+        method: 'POST',
+        headers: { accept: 'application/json', 'content-length': '0' }
+      } as HttpsRequestOptions,
+      (res) => {
+        const chunks: Buffer[] = [];
+        res.on('data', (chunk) => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)));
+        res.on('end', () => {
+          let data: Record<string, unknown> = {};
+          try { data = JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch {}
+          resolve({ ok: (res.statusCode || 0) < 300, status: res.statusCode || 0, data });
+        });
+      }
+    );
+    req.setTimeout(15_000, () => req.destroy(new Error('claim timed out after 15s')));
+    req.on('error', reject);
+    req.end();
+  }).catch((err: unknown) => {
+    console.error(`[${tag}] could not reach broker: ${err instanceof Error ? err.message : String(err)}`);
+    process.exit(1);
+  });
+  if (!body.ok) {
+    const err = typeof body.data?.error === 'string' ? body.data.error : `HTTP ${body.status}`;
+    console.error(`[${tag}] bootstrap claim failed: ${err}`);
+    process.exit(1);
+  }
+  const claimed = body.data as { url?: string; token?: string; deviceName?: string; hint?: string };
+  if (!claimed.url || !claimed.token) {
+    console.error(`[${tag}] bootstrap response missing url/token`);
+    process.exit(1);
+  }
+
+  // Write config.json. Preserve any existing roots so a re-bootstrap on
+  // the same machine doesn't clobber the user's TERMAG_AGENT_ROOTS.
+  const existing = loadConfig();
+  const next = {
+    ...existing,
+    url: claimed.url,
+    agentToken: claimed.token,
+    agentRoots: existing.agentRoots || {}
+  };
+  saveConfig(next);
+  console.log(`[${tag}] credentials saved to ${configPath()}`);
+  console.log(`[${tag}] device: ${claimed.deviceName || '(unset)'}`);
+  if (claimed.hint) console.log(`[${tag}] ${claimed.hint}`);
+  if (!Object.keys(next.agentRoots || {}).length) {
+    console.log(`[${tag}] no roots configured yet — edit ${configPath()} or run:`);
+    console.log(`            termag config set roots '{"this-machine":"~/Code"}'`);
+  }
+  console.log(`[${tag}] next: termag connect`);
+  process.exit(0);
 }
 
 async function runConfig(args: string[]) {
