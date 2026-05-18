@@ -4,21 +4,33 @@ const pty = require('@lydell/node-pty');
 
 const execFileAsync = promisify(execFile);
 
-// Strict regex for any string that gets interpolated into a remote shell
-// command sent over ssh. tmux session names, window names, and user-supplied
-// fields all flow through here. Anything outside this character set is
-// rejected before it touches a subprocess — keeps shell-metacharacter
-// injection impossible on the remote side.
+// Strict regex for user/host argv pieces. These are passed to execFile as
+// argv, not a local shell, but ssh destination parsing is subtle enough that
+// keeping a tight set is still the right tradeoff.
 //
-// Allowed: alphanumeric, dash, underscore, dot, slash. tmux names can
-// include all of these; if a user has session names with whitespace or
-// shell metas, they need to rename. Acceptable tradeoff for v1.
+// Allowed for user: alphanumeric, dash, underscore, dot, slash. tmux names
+// are validated separately and shell-quoted so normal punctuation still works.
 const SAFE_REMOTE_TOKEN = /^[A-Za-z0-9_./-]+$/;
+const MAX_TMUX_NAME_LENGTH = 240;
 
 function assertSafeToken(value, label) {
   if (typeof value !== 'string' || !SAFE_REMOTE_TOKEN.test(value)) {
     throw new Error(`Unsafe ${label}: rejected by remote-shell allowlist`);
   }
+}
+
+function assertSafeTmuxName(value) {
+  if (typeof value !== 'string' || value.length === 0 || value.length > MAX_TMUX_NAME_LENGTH) {
+    throw new Error('Unsafe tmux session name: invalid length');
+  }
+  // eslint-disable-next-line no-control-regex
+  if (/[\x00-\x1F\x7F]/.test(value)) {
+    throw new Error('Unsafe tmux session name: control characters are not allowed');
+  }
+}
+
+function shellQuote(value) {
+  return `'${String(value).replace(/'/g, `'\\''`)}'`;
 }
 
 /**
@@ -57,7 +69,7 @@ async function probeSshHost(host) {
     if (/[\s'"`\\|;&$<>()]/.test(host.host)) {
       throw new Error('Unsafe ssh host: rejected');
     }
-    const args = [...baseSshArgs(host), destination(host), '--', 'true'];
+    const args = [...baseSshArgs(host), '--', destination(host), 'true'];
     await execFileAsync('ssh', args, { timeout: 15_000 });
     return { ok: true };
   } catch (err) {
@@ -81,7 +93,7 @@ async function listSshTmuxSessions(host) {
     // Pipe through `|| true` so an empty session list returns 0 instead of 1
     // (older tmuxen exit nonzero when no server is running).
     const remoteCmd = "tmux list-sessions -F '#{session_name}\t#{session_windows}\t#{session_path}' 2>/dev/null || true";
-    const args = [...baseSshArgs(host), destination(host), '--', remoteCmd];
+    const args = [...baseSshArgs(host), '--', destination(host), remoteCmd];
     const { stdout } = await execFileAsync('ssh', args, { timeout: 10_000 });
     return stdout
       .split('\n')
@@ -102,18 +114,18 @@ async function listSshTmuxSessions(host) {
 }
 
 /**
- * Spawn `ssh -t user@host -- tmux attach -t <name>` as a PTY so terminal
+ * Spawn `ssh -t -- user@host tmux attach -t <name>` as a PTY so terminal
  * control sequences (alternate screen, mouse, resize) work end-to-end. The
  * returned object exposes onData/onExit/write/resize/kill so the broker can
  * pipe it the same way it pipes an agent stream.
  *
- * The tmux session name is validated against SAFE_REMOTE_TOKEN before we
- * embed it in the remote command — refuses to spawn rather than risk shell
- * injection through a hostile session name.
+ * The tmux session name is shell-quoted before it is embedded in the remote
+ * command. That preserves ordinary tmux names with spaces/punctuation without
+ * reopening command injection.
  */
 function spawnSshTmuxAttach({ host, tmuxName, cols, rows }) {
   assertSafeToken(host.user, 'ssh user');
-  assertSafeToken(tmuxName, 'tmux session name');
+  assertSafeTmuxName(tmuxName);
   if (/[\s'"`\\|;&$<>()]/.test(host.host)) {
     throw new Error('Unsafe ssh host: rejected');
   }
@@ -121,12 +133,13 @@ function spawnSshTmuxAttach({ host, tmuxName, cols, rows }) {
   // context (we're spawning it under node-pty, which fakes a tty for our
   // side, but ssh's heuristics still pick up "this isn't interactive"
   // without the doubled -t).
+  const remoteCmd = `tmux attach -t ${shellQuote(tmuxName)}`;
   const args = [
     '-tt',
     ...baseSshArgs(host),
-    destination(host),
     '--',
-    'tmux', 'attach', '-t', tmuxName
+    destination(host),
+    remoteCmd
   ];
   const proc = pty.spawn('ssh', args, {
     name: 'xterm-256color',

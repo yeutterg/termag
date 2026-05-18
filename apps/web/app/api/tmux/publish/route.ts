@@ -5,6 +5,7 @@ import { publishTmuxProject } from '@/lib/projects';
 import { refreshUserProjects, requestAgentHealthRefresh } from '@/lib/broker';
 import { hashToken } from '@/lib/tokens';
 import { clientIpFromRequest, createRateLimiter } from '@/lib/rate-limit';
+import { readJsonBody } from '@/lib/auth';
 
 // Rate-limit bad-token attempts. Without this, an attacker can hammer
 // publish with a guessed bearer per request — each one costs a SHA-256 +
@@ -66,7 +67,9 @@ export async function POST(request: Request) {
   }
   limiter.record(ip, true);
 
-  const parsed = publishSchema.safeParse(await request.json().catch(() => null));
+  const bodyResult = await readJsonBody(request);
+  if (!bodyResult.ok) return bodyResult.response;
+  const parsed = publishSchema.safeParse(bodyResult.data);
   if (!parsed.success) {
     return NextResponse.json({ error: 'Invalid tmux publish payload' }, { status: 400 });
   }

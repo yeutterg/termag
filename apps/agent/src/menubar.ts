@@ -497,15 +497,15 @@ final class TermagStatusController: NSObject, NSApplicationDelegate, NSMenuDeleg
             cwd: chosenCwd,
             shell: shell
         )
-        let shellCommand = "printf %s \(shellQuote(bannerText)); exec \(shell)"
+        let shellCommand = "printf %s \(shellQuote(bannerText)); exec \(shellQuote(shell))"
         let result = runTmux(["new-session", "-d", "-s", name, "-c", chosenCwd, "-x", "120", "-y", "32", shellCommand])
         if result.status != 0 {
             showAlert("Could not create tmux session.", details: result.output)
             return
         }
 
-        _ = runTmux(["set-option", "-t", name, "-w", "window-size", "largest"])
-        _ = runTmux(["set-option", "-t", name, "history-limit", "10000"])
+        _ = runTmux(["set-option", "-t", "=\(name)", "-w", "window-size", "largest"])
+        _ = runTmux(["set-option", "-t", "=\(name)", "history-limit", "10000"])
         rebuildMenu()
     }
 
@@ -538,7 +538,7 @@ final class TermagStatusController: NSObject, NSApplicationDelegate, NSMenuDeleg
     }
 
     private func attachedClientTtys(sessionName: String) -> [String] {
-        let result = runTmux(["list-clients", "-t", sessionName, "-F", "#{client_tty}"])
+        let result = runTmux(["list-clients", "-t", "=\(sessionName)", "-F", "#{client_tty}"])
         if result.status != 0 {
             return []
         }
@@ -704,7 +704,7 @@ final class TermagStatusController: NSObject, NSApplicationDelegate, NSMenuDeleg
         let result = runProcess("/usr/bin/open", args: [
             "-na", "Ghostty",
             "--args",
-            "-e", tmuxPath, "attach-session", "-t", sessionName
+            "-e", tmuxPath, "attach-session", "-t", "=\(sessionName)"
         ])
         return result.status == 0
     }
@@ -740,7 +740,7 @@ final class TermagStatusController: NSObject, NSApplicationDelegate, NSMenuDeleg
     }
 
     private func listWindows(sessionName: String) -> [TmuxWindow] {
-        let result = runTmux(["list-windows", "-t", sessionName, "-F", "#{window_index}\t#{window_name}"])
+        let result = runTmux(["list-windows", "-t", "=\(sessionName)", "-F", "#{window_index}\t#{window_name}"])
         if result.status != 0 {
             return []
         }

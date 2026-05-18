@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { z } from 'zod';
-import { PASSWORD_COOKIE, checkPassword, isOriginSafe, passwordCookieValue, passwordGateEnabled } from '@/lib/auth';
+import { PASSWORD_COOKIE, checkPassword, isOriginSafe, passwordCookieValue, passwordGateEnabled, readJsonBody } from '@/lib/auth';
 import { logAudit } from '@/lib/audit';
 import { clientIpFromRequest, createRateLimiter } from '@/lib/rate-limit';
 
@@ -33,7 +33,13 @@ export async function POST(request: Request) {
     );
   }
 
-  const parsed = schema.safeParse(await request.json().catch(() => null));
+  const bodyResult = await readJsonBody(request);
+  if (!bodyResult.ok) {
+    limiter.record(ip, false);
+    logAudit({ action: 'password-failure', request, payload: { reason: 'invalid-payload' } });
+    return bodyResult.response;
+  }
+  const parsed = schema.safeParse(bodyResult.data);
   if (!parsed.success) {
     limiter.record(ip, false);
     logAudit({ action: 'password-failure', request, payload: { reason: 'invalid-payload' } });

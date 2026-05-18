@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { z } from 'zod';
-import { withAuth } from '@/lib/auth';
+import { readJsonBody, withAuth } from '@/lib/auth';
 import { prisma } from '@/lib/prisma';
 import { logAudit } from '@/lib/audit';
 import { normalizeRelativePath, parseRoots } from '@/lib/defaults';
@@ -17,7 +17,9 @@ type Params = { params: Promise<{ projectId: string }> };
 
 export const PATCH = withAuth(async (user, request: Request, { params }: Params) => {
   const { projectId } = await params;
-  const parsed = updateSchema.safeParse(await request.json().catch(() => null));
+  const bodyResult = await readJsonBody(request);
+  if (!bodyResult.ok) return bodyResult.response;
+  const parsed = updateSchema.safeParse(bodyResult.data);
   if (!parsed.success) return NextResponse.json({ error: 'Invalid project payload' }, { status: 400 });
   const body = parsed.data;
   // Reject path traversal before normalization (see the matching guard in

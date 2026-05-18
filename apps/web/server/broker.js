@@ -272,6 +272,13 @@ function createBroker({ prisma, wss }) {
     };
   }
 
+  function deviceStatuses(userId) {
+    return [
+      ...connectedAgents(userId).map(publicAgentStatus),
+      ...[...sshHostsForUser(userId).values()].map(publicSshHostStatus)
+    ];
+  }
+
   function normalizeTmuxSessions(input) {
     const sessions = Array.isArray(input) ? input : [];
     return sessions.map((session) => ({
@@ -491,10 +498,10 @@ function createBroker({ prisma, wss }) {
   }
 
   function broadcastStatus(userId, refresh = false) {
-    const devices = connectedAgents(userId).map(publicAgentStatus);
+    const devices = deviceStatuses(userId);
     for (const client of wss.clients) {
       if (client._termagStatusUserId === userId && client.readyState === WebSocket.OPEN) {
-        sendJson(client, { type: 'agent', connected: devices.length > 0, devices });
+        sendJson(client, { type: 'agent', connected: devices.some((device) => device.connected), devices });
         if (refresh) sendJson(client, { type: 'refresh' });
       }
     }
@@ -727,15 +734,17 @@ function createBroker({ prisma, wss }) {
 
     if (url.pathname === '/api/ws/status') {
       ws._termagStatusUserId = userId;
-      // Make sure SSH host state is loaded before we send the initial
-      // snapshot — otherwise a freshly-restarted broker would tell the
-      // first connecting browser that SSH hosts are missing.
-      await refreshSshHosts(userId);
-      const devices = [
-        ...connectedAgents(userId).map(publicAgentStatus),
-        ...[...sshHostsForUser(userId).values()].map(publicSshHostStatus)
-      ];
-      sendJson(ws, { type: 'agent', connected: devices.length > 0, devices });
+      // Load SSH host state from the DB on first contact so this browser
+      // sees its hosts immediately. We don't AWAIT the refresh — that
+      // would block the WS handshake on a slow probe. Instead we send
+      // whatever we have synchronously and let the probe broadcast a
+      // status update when it lands. refreshSshHosts() itself short-
+      // circuits when the user is already loaded, so this is cheap.
+      if (!sshHosts.has(userId)) {
+        refreshSshHosts(userId, { broadcast: true }).catch(() => {});
+      }
+      const devices = deviceStatuses(userId);
+      sendJson(ws, { type: 'agent', connected: devices.some((device) => device.connected), devices });
       return;
     }
 
@@ -748,10 +757,13 @@ function createBroker({ prisma, wss }) {
         ws.close(1008, 'hostId and tmuxName required');
         return;
       }
-      // Always refresh first so a brand-new browser session sees the same
-      // host inventory the server knows about; refreshSshHosts is cheap
-      // when nothing changed.
-      await refreshSshHosts(userId);
+      // Make sure host state is loaded so handleSshAttach can find the
+      // record by id. We only block if we don't have the user's hosts
+      // yet (e.g., right after broker restart); subsequent attaches
+      // skip the load. The handler does its own session-not-known check.
+      if (!sshHosts.has(userId)) {
+        await refreshSshHosts(userId, { broadcast: false });
+      }
       await handleSshAttach(ws, userId, hostId, tmuxName, cols, rows);
       return;
     }
@@ -1023,13 +1035,19 @@ function createBroker({ prisma, wss }) {
       kind: 'ssh',
       version: 'ssh',
       lastError: record.lastError || null,
-      deviceId: record.spec.id
+      deviceId: record.spec.id,
+      tmuxSessions: record.tmuxSessions.map((session) => ({
+        name: session.name,
+        path: session.path || '',
+        windowCount: session.windowCount || 0,
+        windows: []
+      }))
     };
   }
 
   // Idempotent: reload SshHost rows from the DB, start polling new ones,
   // stop polling removed ones, leave still-present rows alone.
-  async function refreshSshHosts(userId) {
+  async function refreshSshHosts(userId, options = {}) {
     let rows;
     try {
       rows = await prisma.sshHost.findMany({
@@ -1079,36 +1097,69 @@ function createBroker({ prisma, wss }) {
       record.pollHandle = handle;
     }
     if (current.size === 0) sshHosts.delete(userId);
-    broadcastStatus(userId, true);
+    if (options.broadcast !== false) broadcastStatus(userId, true);
   }
 
   async function probeAndStoreSshHost(userId, hostId) {
     const record = sshHostsForUser(userId).get(hostId);
     if (!record) return { ok: false, error: 'host not registered' };
-    // Lazy require so the ssh helper (and its node-pty dep) only loads when
-    // SSH features are actually exercised.
-    const { probeSshHost, listSshTmuxSessions } = require('./ssh');
-    const probe = await probeSshHost(record.spec);
-    if (probe.ok) {
-      record.connected = true;
-      record.lastSeenAt = new Date();
-      record.lastError = null;
-      record.tmuxSessions = await listSshTmuxSessions(record.spec);
-    } else {
-      record.connected = false;
-      record.lastError = probe.error || 'probe failed';
-      record.tmuxSessions = [];
-    }
-    // Persist the lastSeenAt / lastError so the UI can render them even
-    // after a broker restart (state survives the in-memory record).
-    prisma.sshHost
-      .update({
-        where: { id: hostId },
-        data: { lastSeenAt: record.lastSeenAt, lastError: record.lastError }
-      })
-      .catch(() => {});
-    broadcastStatus(userId, true);
-    return { ok: probe.ok, error: probe.error || null, sessions: record.tmuxSessions };
+    // Coalesce concurrent probes for the same host. The 30s poll can
+    // overlap with a manual "Test connection" or an attach-time probe; we
+    // don't want two ssh subprocesses racing to write the same record.
+    // Whoever started first wins; latecomers wait on its promise.
+    if (record.probeInFlight) return record.probeInFlight;
+
+    record.probeInFlight = (async () => {
+      try {
+        // Capture pre-probe state so we only broadcast when something
+        // changed. Polling every 30s × N users × M hosts would otherwise
+        // spam every browser's status WS even when nothing is different.
+        const prevConnected = record.connected;
+        const prevError = record.lastError;
+        const prevSessionFingerprint = sessionFingerprint(record.tmuxSessions);
+
+        // Lazy require so the ssh helper (and its node-pty dep) only
+        // loads when SSH features are actually exercised.
+        const { probeSshHost, listSshTmuxSessions } = require('./ssh');
+        const probe = await probeSshHost(record.spec);
+        // The host may have been removed while the probe was in flight.
+        if (!sshHostsForUser(userId).has(hostId)) {
+          return { ok: false, error: 'host removed during probe' };
+        }
+        if (probe.ok) {
+          record.connected = true;
+          record.lastSeenAt = new Date();
+          record.lastError = null;
+          record.tmuxSessions = await listSshTmuxSessions(record.spec);
+        } else {
+          record.connected = false;
+          record.lastError = probe.error || 'probe failed';
+          record.tmuxSessions = [];
+        }
+        if (!sshHostsForUser(userId).has(hostId)) {
+          return { ok: probe.ok, error: probe.error || null, sessions: [] };
+        }
+        prisma.sshHost
+          .update({
+            where: { id: hostId },
+            data: { lastSeenAt: record.lastSeenAt, lastError: record.lastError }
+          })
+          .catch(() => {});
+        const changed = prevConnected !== record.connected
+          || prevError !== record.lastError
+          || prevSessionFingerprint !== sessionFingerprint(record.tmuxSessions);
+        if (changed) broadcastStatus(userId, true);
+        return { ok: probe.ok, error: probe.error || null, sessions: record.tmuxSessions };
+      } finally {
+        record.probeInFlight = null;
+      }
+    })();
+    return record.probeInFlight;
+  }
+
+  function sessionFingerprint(sessions) {
+    if (!Array.isArray(sessions)) return '';
+    return sessions.map((s) => `${s.name}|${s.windowCount}|${s.path || ''}`).join('\n');
   }
 
   function forgetSshHost(userId, hostId) {
@@ -1142,11 +1193,26 @@ function createBroker({ prisma, wss }) {
       ws.close(1008, 'ssh host not registered');
       return;
     }
-    // Friendly allowlist: the user has to have seen this session in the
-    // broker's last probe. Catches typos and prevents a hostile browser
-    // from blind-firing tmux names. The strict-token regex inside the
-    // pty spawn is the hard guard.
-    const known = record.tmuxSessions.some((session) => session.name === tmuxName);
+    // Friendly allowlist: the requested tmux session must show up in our
+    // cached probe. Catches typos and prevents a hostile client from
+    // blind-firing arbitrary session names. (The pty spawn re-validates
+    // the name with a strict regex on the way to the remote shell — this
+    // check is for UX.)
+    //
+    // If the cache doesn't have it AND the cache is stale (>15s since last
+    // probe), force an inline probe and recheck — covers the case where
+    // the user just created a tmux session on the remote and the 30s poll
+    // hasn't run yet. Without this, freshly-created sessions feel broken
+    // for up to half a minute after first creation.
+    let known = record.tmuxSessions.some((session) => session.name === tmuxName);
+    if (!known) {
+      const cacheAge = record.lastSeenAt ? Date.now() - record.lastSeenAt.getTime() : Infinity;
+      if (cacheAge > 15_000) {
+        try { await probeAndStoreSshHost(userId, hostId); } catch {}
+        const fresh = sshHostsForUser(userId).get(hostId);
+        known = fresh?.tmuxSessions?.some((session) => session.name === tmuxName) ?? false;
+      }
+    }
     if (!known) {
       ws.close(1008, 'unknown tmux session — refresh device status');
       return;
@@ -1165,15 +1231,44 @@ function createBroker({ prisma, wss }) {
       ws.close(1011, 'ssh spawn failed');
       return;
     }
-    let unsubscribe;
     try {
-      unsubscribe = await stream.subscribe(ws);
+      // subscribe() wires its own ws.on('close') for unsubscribe — the
+      // caller doesn't need a teardown handle. Wiring it inside subscribe
+      // closes a race where the WS could close during the async scrollback
+      // replay before the caller had a chance to attach a close handler.
+      await stream.subscribe(ws, cols, rows);
     } catch (err) {
       sendJson(ws, { type: 'fatal', message: sanitizeAgentText(err?.message || 'subscribe failed', 200) });
       ws.close(1011, 'subscribe failed');
       return;
     }
-    ws.on('close', () => unsubscribe());
+    // Audit: record the attach. SSH attaches give shell access to a
+    // remote machine, so this is one of the higher-value forensic
+    // events. We log on attach (not detach) — pair with the
+    // SshSessionStream lifecycle to derive detach times if needed.
+    writeSshAttachAudit(userId, record.spec, tmuxName, ws).catch(() => {});
+  }
+
+  function writeSshAttachAudit(userId, hostSpec, tmuxName, ws) {
+    // Pull the originating request's IP off the upgrade socket. The WS
+    // request itself was consumed by `handleUpgrade`, so we read from
+    // the underlying socket's remoteAddress as a best-effort. Same XFF
+    // policy as the audit lib: only honored when behind a trusted proxy.
+    const ip = process.env.TERMAG_TRUSTED_PROXY === 'true'
+      ? null  // header-based ip would require keeping the upgrade headers around — skip for now
+      : (ws._socket?.remoteAddress || null);
+    return prisma.auditEvent.create({
+      data: {
+        action: 'attach',
+        subjectType: 'session',
+        subjectId: null,
+        deviceName: hostSpec.name,
+        ip,
+        userAgent: null,
+        payload: JSON.stringify({ kind: 'ssh', host: hostSpec.host, tmuxName }),
+        userId
+      }
+    });
   }
 
   return {

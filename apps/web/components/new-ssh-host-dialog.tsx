@@ -52,6 +52,8 @@ export function NewSshHostDialog({ open, onOpenChange, onCreated }: NewSshHostDi
       onCreated?.(body as SshHost);
       form.reset();
       onOpenChange(false);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not add host');
     } finally {
       setSubmitting(false);
     }

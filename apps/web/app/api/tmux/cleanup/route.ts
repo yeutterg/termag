@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { z } from 'zod';
-import { withAuth } from '@/lib/auth';
+import { readJsonBody, withAuth } from '@/lib/auth';
 import { killTmuxProjectSessions, refreshUserProjects } from '@/lib/broker';
 import { prisma } from '@/lib/prisma';
 
@@ -21,7 +21,9 @@ const missingSchema = z.object({
 const cleanupSchema = z.discriminatedUnion('mode', [activeSchema, missingSchema]);
 
 export const POST = withAuth(async (user, request: Request) => {
-  const parsed = cleanupSchema.safeParse(await request.json().catch(() => null));
+  const bodyResult = await readJsonBody(request);
+  if (!bodyResult.ok) return bodyResult.response;
+  const parsed = cleanupSchema.safeParse(bodyResult.data);
   if (!parsed.success) {
     return NextResponse.json({ error: 'Invalid tmux cleanup payload' }, { status: 400 });
   }

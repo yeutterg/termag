@@ -26,8 +26,10 @@ function buildCsp(): string {
   // hashes once a CSP-aware build pipeline is added.
   const isProd = process.env.NODE_ENV === 'production';
   const styleSrc = isProd ? "'self' 'unsafe-inline'" : "'self' 'unsafe-inline'";
-  // Next.js dev also evaluates inline scripts for HMR; allow eval there.
-  const scriptSrc = isProd ? "'self'" : "'self' 'unsafe-eval' 'unsafe-inline'";
+  // Next injects bootstrap/RSC scripts unless the app is wired for CSP
+  // nonces. Keep inline scripts enabled in prod until that pipeline exists;
+  // otherwise the built app renders but cannot hydrate.
+  const scriptSrc = isProd ? "'self' 'unsafe-inline'" : "'self' 'unsafe-eval' 'unsafe-inline'";
   return [
     "default-src 'self'",
     `script-src ${scriptSrc}`,

@@ -28,7 +28,8 @@ function isUniqueConstraintError(error: unknown): boolean {
  */
 function rejectPathTraversal(value: string | undefined | null): void {
   if (!value) return;
-  if (value.includes('\x00')) throw new Error('Path contains NUL byte');
+  // eslint-disable-next-line no-control-regex
+  if (/[\x00-\x1F\x7F]/.test(value)) throw new Error('Path contains illegal control characters');
   const parts = value.split(/[\\/]+/);
   if (parts.some((part) => part === '..')) {
     throw new Error('Path must not contain ".." segments');
@@ -83,6 +84,7 @@ export async function createProject(input: {
   agentSpawnCommand?: string;
   agents?: ProjectAgent[];
 }) {
+  rejectPathTraversal(input.relativePath);
   const relativePath = normalizeRelativePath(input.relativePath);
   if (!relativePath) throw new Error('Project path is required');
   const agents = input.agents?.length

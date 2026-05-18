@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { z } from 'zod';
-import { withAuth } from '@/lib/auth';
+import { readJsonBody, withAuth } from '@/lib/auth';
 import { listTmuxSessions } from '@/lib/broker';
 import { createAttachedTmuxProject } from '@/lib/projects';
 import { prisma } from '@/lib/prisma';
@@ -16,7 +16,9 @@ function key(rootKey: string, value: string) {
 }
 
 export const POST = withAuth(async (user, request: Request) => {
-  const parsed = attachSchema.safeParse(await request.json().catch(() => null));
+  const bodyResult = await readJsonBody(request);
+  if (!bodyResult.ok) return bodyResult.response;
+  const parsed = attachSchema.safeParse(bodyResult.data);
   if (!parsed.success) {
     return NextResponse.json({ error: 'Invalid tmux attach payload' }, { status: 400 });
   }

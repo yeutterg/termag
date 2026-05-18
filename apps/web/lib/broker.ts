@@ -9,7 +9,7 @@ type Broker = {
   renameTmuxWindow?: (userId: string, deviceName: string, tmuxName: string, name: string, timeoutMs?: number) => Promise<{ tmuxName?: string; tmuxWindowName?: string } | null>;
   disconnectAgentToken?: (userId: string, tokenId: string) => void;
   killTmux: (userId: string, tmuxName: string, timeoutMs?: number) => Promise<boolean>;
-  refreshSshHosts?: (userId: string) => Promise<void>;
+  refreshSshHosts?: (userId: string, options?: { broadcast?: boolean }) => Promise<void>;
   probeSshHost?: (userId: string, hostId: string) => Promise<{ ok: boolean; error?: string | null; sessions?: Array<{ name: string; windowCount: number; path: string }> }>;
   forgetSshHost?: (userId: string, hostId: string) => void;
 };
@@ -140,8 +140,8 @@ export async function listDeviceDirectory(
  * Idempotent — call from any route that mutates the SshHost table so the
  * broker doesn't have to wait for its 30s reconcile tick.
  */
-export async function refreshSshHostsForUser(userId: string): Promise<void> {
-  await broker()?.refreshSshHosts?.(userId);
+export async function refreshSshHostsForUser(userId: string, options?: { broadcast?: boolean }): Promise<void> {
+  await broker()?.refreshSshHosts?.(userId, options);
 }
 
 /**

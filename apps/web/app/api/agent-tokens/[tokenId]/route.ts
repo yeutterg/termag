@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { z } from 'zod';
-import { withAuth } from '@/lib/auth';
+import { readJsonBody, withAuth } from '@/lib/auth';
 import { prisma } from '@/lib/prisma';
 import { logAudit } from '@/lib/audit';
 import { disconnectAgentToken } from '@/lib/broker';
@@ -22,6 +22,10 @@ const patchSchema = z.object({
 
 function normalizeRelative(value: string | null | undefined): string | null {
   if (value == null) return null;
+  // eslint-disable-next-line no-control-regex
+  if (/[\x00-\x1F\x7F]/.test(value) || value.split(/[\\/]+/).some((part) => part === '..')) {
+    throw new Error('Default path must stay inside the device root');
+  }
   const cleaned = value
     .replace(/\\/g, '/')
     .replace(/\/+/g, '/')
@@ -59,7 +63,9 @@ export const PATCH = withAuth(async (user, request: Request, { params }: { param
   const existing = await prisma.agentToken.findFirst({ where: { id: tokenId, userId: user.id } });
   if (!existing) return NextResponse.json({ error: 'Not found' }, { status: 404 });
 
-  const parsed = patchSchema.safeParse(await request.json().catch(() => null));
+  const bodyResult = await readJsonBody(request);
+  if (!bodyResult.ok) return bodyResult.response;
+  const parsed = patchSchema.safeParse(bodyResult.data);
   if (!parsed.success) {
     return NextResponse.json({ error: 'Invalid token payload' }, { status: 400 });
   }
@@ -68,7 +74,14 @@ export const PATCH = withAuth(async (user, request: Request, { params }: { param
     data.defaultRootKey = parsed.data.defaultRootKey ?? null;
   }
   if ('defaultRelativePath' in parsed.data) {
-    data.defaultRelativePath = normalizeRelative(parsed.data.defaultRelativePath ?? null);
+    try {
+      data.defaultRelativePath = normalizeRelative(parsed.data.defaultRelativePath ?? null);
+    } catch (error) {
+      return NextResponse.json(
+        { error: error instanceof Error ? error.message : 'Invalid default path' },
+        { status: 400 }
+      );
+    }
   }
   const updated = await prisma.agentToken.update({
     where: { id: tokenId },

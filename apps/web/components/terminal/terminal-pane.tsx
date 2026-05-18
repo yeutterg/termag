@@ -100,6 +100,7 @@ function TerminalPaneImpl({ sessionId, active, title, status, onTitleChange, hid
     let themeObserverRef: MutationObserver | null = null;
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
     let reconnectAttempts = 0;
+    let fatalMessage = '';
 
     // WebSocket lifecycle is its own function so we can re-run it on disconnect.
     // All input sites (term.onData, onKill, onVisibility, ResizeObserver) read
@@ -168,6 +169,11 @@ function TerminalPaneImpl({ sessionId, active, title, status, onTitleChange, hid
         if (msg.type === 'output') term!.write(msg.data ?? ''); // legacy/control fallback
         if (msg.type === 'sleeping') term!.write(`\r\n${msg.message ?? 'Agent sleeping'}\r\n`);
         if (msg.type === 'exit') term!.write('\r\n[session ended]\r\n');
+        if (msg.type === 'fatal') {
+          fatalMessage = msg.message || 'terminal unavailable';
+          term!.write(`\r\n\x1b[31m[${fatalMessage}]\x1b[0m\r\n`);
+          try { ws.close(1008, 'terminal unavailable'); } catch {}
+        }
         if (msg.type === 'driver-changed') {
           // Multi-subscriber model: agent's SessionStream broadcasts on every
           // driver change so each viewer knows whether they're driving or
@@ -186,7 +192,7 @@ function TerminalPaneImpl({ sessionId, active, title, status, onTitleChange, hid
         // surface the reason and stop. Anything else is treated as a transient
         // network blip and gets exponential-backoff retry.
         if (event.code === 1008) {
-          const reason = event.reason || 'session unavailable';
+          const reason = fatalMessage || event.reason || 'session unavailable';
           term!.write(`\r\n\x1b[2m[disconnected: ${reason}]\x1b[0m\r\n`);
           return;
         }

@@ -18,8 +18,7 @@ export default async function SshAttachPage({
   if (!user) {
     redirect('/login');
   }
-  const { hostId, sessionName: encoded } = await params;
-  const sessionName = decodeURIComponent(encoded);
+  const { hostId, sessionName } = await params;
   const host = await prisma.sshHost.findFirst({
     where: { id: hostId, userId: user.id },
     select: { id: true, name: true, host: true, user: true, port: true }

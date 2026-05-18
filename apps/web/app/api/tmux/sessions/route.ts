@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { withAuth } from '@/lib/auth';
-import { listTmuxSessions, type TmuxDeviceSession } from '@/lib/broker';
+import { listTmuxSessions, refreshSshHostsForUser, type TmuxDeviceSession } from '@/lib/broker';
 import { prisma } from '@/lib/prisma';
 
 function key(rootKey: string, value: string) {
@@ -41,6 +41,7 @@ function attachableSessions(sessions: TmuxDeviceSession[], connected: Awaited<Re
 }
 
 export const GET = withAuth(async (user) => {
+  await refreshSshHostsForUser(user.id, { broadcast: false });
   const [sessions, connected] = await Promise.all([
     listTmuxSessions(user.id),
     connectedTmuxTargets(user.id)

@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { z } from 'zod';
-import { withAuth } from '@/lib/auth';
+import { readJsonBody, withAuth } from '@/lib/auth';
 import { prisma } from '@/lib/prisma';
 import { killTmuxWindows, renameTmuxWindow } from '@/lib/broker';
 
@@ -10,7 +10,9 @@ const updateSchema = z.object({ name: z.string().trim().min(1).max(80) });
 
 export const PATCH = withAuth(async (user, request: Request, { params }: Params) => {
   const { projectId, tabId } = await params;
-  const parsed = updateSchema.safeParse(await request.json().catch(() => null));
+  const bodyResult = await readJsonBody(request);
+  if (!bodyResult.ok) return bodyResult.response;
+  const parsed = updateSchema.safeParse(bodyResult.data);
   if (!parsed.success) return NextResponse.json({ error: 'Invalid tab payload' }, { status: 400 });
   const tab = await prisma.tab.findFirst({
     where: { id: tabId, project: { id: projectId, userId: user.id } },

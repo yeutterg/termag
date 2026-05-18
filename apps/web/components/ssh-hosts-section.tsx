@@ -63,6 +63,8 @@ export function SshHostsSection({ open, devices }: SshHostsSectionProps) {
         setError('');
       }
       await reload();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not test host');
     } finally {
       setBusy('');
     }

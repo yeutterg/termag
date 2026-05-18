@@ -408,7 +408,7 @@ async function runList(args: string[]) {
       for (const session of device.rawTmuxSessions) {
         const winLabel = session.windowCount === 1 ? '1 window' : `${session.windowCount} windows`;
         const pathLabel = session.path ? `  ·  ${sanitizeForTerminal(session.path)}` : '';
-        console.log(`    \x1b[2m○ ${sanitizeForTerminal(session.name)}  (adopted · ${winLabel})${pathLabel}\x1b[0m`);
+        console.log(`    \x1b[2m○ ${sanitizeForTerminal(session.name)}  (tmux · ${winLabel})${pathLabel}\x1b[0m`);
       }
     }
   } else if (stateResult.status === 'rejected') {
@@ -2060,6 +2060,10 @@ function resolveCwd(cwd?: Json) {
 }
 
 function normalizeRelativeCwd(input: string) {
+  // eslint-disable-next-line no-control-regex
+  if (/[\x00-\x1F\x7F]/.test(input)) {
+    throw new Error('Path contains illegal control characters');
+  }
   const parts = input
     .replace(/\\/g, '/')
     .replace(/^\/+/, '')

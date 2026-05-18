@@ -14,12 +14,15 @@ export const DELETE = withAuth(async (user, request: Request, { params }: Params
   });
   if (!existing) return NextResponse.json({ error: 'Not found' }, { status: 404 });
 
-  // Tell the broker to drop any cached/poller state for this host first —
-  // otherwise the next 30s tick would resurrect the row briefly. The DB
-  // delete is the source of truth.
-  forgetSshHostInBroker(user.id, hostId);
-
+  // Order matters: DB delete FIRST, then in-memory cleanup. The previous
+  // order (in-memory first, then DB delete) had a resurrection race —
+  // any concurrent refreshSshHosts during the await would re-read the
+  // still-present DB row and rebuild the in-memory record including a
+  // fresh 30s pollHandle that leaked until the broker restarted. Doing
+  // the DB delete first means any concurrent refresh sees the row gone
+  // and prunes the in-memory entry instead of resurrecting it.
   await prisma.sshHost.delete({ where: { id: hostId } });
+  forgetSshHostInBroker(user.id, hostId);
 
   logAudit({
     userId: user.id,

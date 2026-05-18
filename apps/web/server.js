@@ -135,6 +135,11 @@ function browserOriginAllowed(req) {
   return false;
 }
 
+function bearerAuthPresent(req) {
+  const header = req.headers.authorization || req.headers.Authorization;
+  return typeof header === 'string' && /^Bearer\s+\S+/i.test(header);
+}
+
 let originFallbackWarned = false;
 function warnOriginFallbackOnce() {
   if (originFallbackWarned) return;
@@ -194,7 +199,7 @@ app.prepare().then(() => {
       });
       return;
     }
-    if (url.pathname !== '/api/ws/agent' && !browserOriginAllowed(req)) {
+    if (url.pathname !== '/api/ws/agent' && !bearerAuthPresent(req) && !browserOriginAllowed(req)) {
       rejectUpgrade(socket, 403, 'Forbidden');
       return;
     }

@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server';
 import { withAuth } from '@/lib/auth';
 import { prisma } from '@/lib/prisma';
 import { listProjects } from '@/lib/projects';
-import { listConnectedDevices, listTmuxSessions } from '@/lib/broker';
+import { listConnectedDevices, listTmuxSessions, refreshSshHostsForUser } from '@/lib/broker';
 
 // JSON shape consumed by `termag list` and `termag attach` resolution. Keep
 // the per-device structure stable — both CLI subcommands key off it. We use
@@ -39,6 +39,7 @@ type CliState = {
 };
 
 export const GET = withAuth(async (user) => {
+  await refreshSshHostsForUser(user.id, { broadcast: false });
   const projects = await listProjects(user.id);
   const tokens = await prisma.agentToken.findMany({
     where: { userId: user.id, revokedAt: null },

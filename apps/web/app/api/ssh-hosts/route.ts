@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { z } from 'zod';
-import { withAuth } from '@/lib/auth';
+import { readJsonBody, withAuth } from '@/lib/auth';
 import { prisma } from '@/lib/prisma';
 import { logAudit } from '@/lib/audit';
 import { probeRegisteredSshHost, refreshSshHostsForUser } from '@/lib/broker';
@@ -36,7 +36,9 @@ export const GET = withAuth(async (user) => {
 });
 
 export const POST = withAuth(async (user, request: Request) => {
-  const parsed = createSchema.safeParse(await request.json().catch(() => null));
+  const bodyResult = await readJsonBody(request);
+  if (!bodyResult.ok) return bodyResult.response;
+  const parsed = createSchema.safeParse(bodyResult.data);
   if (!parsed.success) {
     return NextResponse.json({ error: parsed.error.errors[0]?.message || 'Invalid SSH host payload' }, { status: 400 });
   }
@@ -93,7 +95,7 @@ export const POST = withAuth(async (user, request: Request) => {
   // waiting on the create call. The broker's poller will also pick it up on
   // the next 30s tick, but immediate probing makes "Add host" feel
   // responsive.
-  refreshSshHostsForUser(user.id);
+  refreshSshHostsForUser(user.id).catch(() => {});
   probeRegisteredSshHost(user.id, host.id).catch(() => {});
 
   return NextResponse.json(host, { status: 201 });
