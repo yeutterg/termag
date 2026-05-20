@@ -6,7 +6,7 @@ import { cn } from '@/lib/utils';
 import type { AgentDeviceStatus, Project, Session, TmuxDeviceSession } from './types';
 import { DirectoryBrowser } from './directory-browser';
 import { SshHostsSection } from './ssh-hosts-section';
-import { BootstrapDeviceDialog } from './bootstrap-device-dialog';
+import type { SshHost } from './new-ssh-host-dialog';
 import { Zap } from 'lucide-react';
 
 type Token = {
@@ -29,7 +29,15 @@ interface DevicesDialogProps {
   focusedDevice?: string | null;
   onTokenDeleted?: (tokenName: string) => void;
   onAddDevice?: () => void;
+  // Add-host flow lifted to the parent so the same dialog is reachable
+  // from the + menu without juggling two copies of state.
+  onAddSshHost?: () => void;
+  onBootstrap?: () => void;
   onCleanup?: () => void | Promise<void>;
+  // Bump from the parent to force a re-fetch of agent tokens + ssh
+  // hosts (e.g., after a host is added via the dashboard + menu while
+  // Devices is open in the background).
+  refreshTrigger?: number;
 }
 
 type MissingTarget = {
@@ -50,14 +58,19 @@ function shellSingleQuoteContent(value: string) {
   return value.replace(/'/g, "'\\''");
 }
 
-export function DevicesDialog({ open, onOpenChange, user, devices, knownDeviceNames = [], projects = [], focusedDevice, onTokenDeleted, onAddDevice, onCleanup }: DevicesDialogProps) {
+export function DevicesDialog({ open, onOpenChange, user, devices, knownDeviceNames = [], projects = [], focusedDevice, onTokenDeleted, onAddDevice, onAddSshHost, onBootstrap, onCleanup, refreshTrigger = 0 }: DevicesDialogProps) {
   const [tokens, setTokens] = useState<Token[]>([]);
+  const [sshHosts, setSshHosts] = useState<SshHost[]>([]);
   const [copied, setCopied] = useState('');
   const [deleting, setDeleting] = useState('');
   const [cleanupError, setCleanupError] = useState('');
   const [editingDefault, setEditingDefault] = useState('');
   const [savingDefault, setSavingDefault] = useState('');
-  const [bootstrapOpen, setBootstrapOpen] = useState(false);
+  // Single flag: render skeleton until BOTH tokens + ssh-hosts have
+  // resolved. Without this, the dialog opens with empty sections that
+  // pop in milliseconds later — feels janky. We fetch both in parallel
+  // and only flip the flag once both promises settle.
+  const [loaded, setLoaded] = useState(false);
   const deviceRefs = useRef(new Map<string, HTMLDivElement>());
 
   async function patchToken(tokenId: string, payload: Partial<Pick<Token, 'defaultRootKey' | 'defaultRelativePath'>>) {
@@ -79,18 +92,24 @@ export function DevicesDialog({ open, onOpenChange, user, devices, knownDeviceNa
   useEffect(() => {
     if (!open) return;
     let cancelled = false;
-    fetch('/api/agent-tokens')
-      .then((res) => (res.ok ? res.json() : []))
-      .then((next) => {
-        if (!cancelled) setTokens(Array.isArray(next) ? next : []);
-      })
-      .catch(() => {
-        if (!cancelled) setTokens([]);
-      });
+    setLoaded(false);
+    // Parallel fetch of tokens + ssh hosts so both sections appear at
+    // the same instant. Errors in either one don't block the other —
+    // they just leave that section empty (with the section's own error
+    // UI surfacing later when reload-on-action runs).
+    Promise.allSettled([
+      fetch('/api/agent-tokens').then((res) => (res.ok ? res.json() : [])),
+      fetch('/api/ssh-hosts').then((res) => (res.ok ? res.json() : []))
+    ]).then(([tokenResult, sshResult]) => {
+      if (cancelled) return;
+      setTokens(tokenResult.status === 'fulfilled' && Array.isArray(tokenResult.value) ? tokenResult.value : []);
+      setSshHosts(sshResult.status === 'fulfilled' && Array.isArray(sshResult.value) ? sshResult.value : []);
+      setLoaded(true);
+    });
     return () => {
       cancelled = true;
     };
-  }, [open]);
+  }, [open, refreshTrigger]);
 
   async function copyText(id: string, value: string) {
     try {
@@ -150,39 +169,51 @@ export function DevicesDialog({ open, onOpenChange, user, devices, knownDeviceNa
             <h2 className="text-base font-semibold">Devices</h2>
             <p className="text-sm text-muted">{user.email}</p>
           </div>
-          <div className="flex items-center gap-2">
-            <span className={cn('rounded-full px-2 py-1 text-xs', anyConnected ? 'bg-good/15 text-good' : 'bg-panel2 text-muted')}>
-              {anyConnected ? `${devices.filter((device) => device.connected).length} connected` : 'No agents connected'}
-            </span>
-            <button
-              type="button"
-              onClick={() => setBootstrapOpen(true)}
-              className="inline-flex h-7 items-center gap-1.5 rounded-md border border-line bg-bg px-2 text-xs text-text hover:bg-panel2"
-              title="One-time code: paste a command on the new device, done"
-            >
-              <Zap className="h-3.5 w-3.5" />
-              Bootstrap
-            </button>
-            {onAddDevice && (
-              <button
-                type="button"
-                onClick={() => { onOpenChange(false); onAddDevice(); }}
-                className="inline-flex h-7 items-center gap-1.5 rounded-md border border-line bg-bg px-2 text-xs text-text hover:bg-panel2"
-                title="Create a new device token"
-              >
-                <Plus className="h-3.5 w-3.5" />
-                Add device
-              </button>
-            )}
-          </div>
+          <span className={cn('rounded-full px-2 py-1 text-xs', anyConnected ? 'bg-good/15 text-good' : 'bg-panel2 text-muted')}>
+            {anyConnected ? `${devices.filter((device) => device.connected).length} connected` : 'No agents connected'}
+          </span>
         </div>
-        <BootstrapDeviceDialog open={bootstrapOpen} onOpenChange={setBootstrapOpen} />
         <div className="min-h-0 flex-1 overflow-y-auto">
-          <div className="mb-3">
-            <h3 className="text-sm font-medium">Device tokens</h3>
-            <p className="text-xs text-muted">One token per device. Revoke to disconnect that device.</p>
+          <div className="mb-3 flex items-end justify-between gap-2">
+            <div>
+              <h3 className="text-sm font-medium">Device tokens (agent)</h3>
+              <p className="text-xs text-muted">One token per device. Revoke to disconnect.</p>
+            </div>
+            <div className="flex items-center gap-1.5">
+              {onBootstrap && (
+                <button
+                  type="button"
+                  onClick={() => { onOpenChange(false); onBootstrap(); }}
+                  className="inline-flex h-7 items-center gap-1.5 rounded-md border border-line bg-bg px-2 text-xs text-text hover:bg-panel2"
+                  title="One-time code: paste a command on the new device, done"
+                >
+                  <Zap className="h-3.5 w-3.5" />
+                  Bootstrap
+                </button>
+              )}
+              {onAddDevice && (
+                <button
+                  type="button"
+                  onClick={() => { onOpenChange(false); onAddDevice(); }}
+                  className="inline-flex h-7 items-center gap-1.5 rounded-md border border-line bg-bg px-2 text-xs text-text hover:bg-panel2"
+                  title="Create a device token manually"
+                >
+                  <Plus className="h-3.5 w-3.5" />
+                  Add device
+                </button>
+              )}
+            </div>
           </div>
-          <div className="space-y-2">
+          {!loaded && (
+            // Skeleton: identical row count + height to the rendered list
+            // so the dialog doesn't visibly resize when data lands.
+            <div className="space-y-2">
+              {[0, 1].map((i) => (
+                <div key={i} className="h-20 animate-pulse rounded-md border border-line bg-bg/60" />
+              ))}
+            </div>
+          )}
+          <div className={cn('space-y-2', !loaded && 'hidden')}>
             {allNames.length === 0 && (
               <div className="rounded-md border border-line bg-bg px-3 py-6 text-center text-sm text-muted">
                 No devices yet.
@@ -421,7 +452,18 @@ export function DevicesDialog({ open, onOpenChange, user, devices, knownDeviceNa
             })}
           </div>
           {cleanupError && <div className="mt-3 text-xs text-bad">{cleanupError}</div>}
-          <SshHostsSection open={open} devices={devices} />
+          <SshHostsSection
+            open={open}
+            devices={devices}
+            hosts={sshHosts}
+            onHostsChange={setSshHosts}
+            // Open the lifted dialog on TOP of Devices instead of
+            // closing Devices first. After the host is added, the
+            // parent's onCreated callback refreshes our hosts list so
+            // the new row appears without re-opening Devices.
+            onAddSshHost={onAddSshHost}
+            loaded={loaded}
+          />
           <div className="mt-4 rounded-md border border-line bg-bg p-3 text-xs text-muted">
             <div className="mb-2 font-medium text-text">Setup</div>
             <p>Install the agent on each device, export its token and roots, then run connect from any terminal to publish a tmux workspace or start a new tmux-backed shell.</p>

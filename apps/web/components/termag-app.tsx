@@ -2,6 +2,8 @@
 
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  Bell,
+  BellOff,
   Check,
   ChevronLeft,
   ChevronRight,
@@ -15,15 +17,16 @@ import {
   Menu,
   Monitor,
   Moon,
+  Network,
   Plus,
   Search,
   Sun,
-  Terminal
+  Terminal,
+  Zap
 } from 'lucide-react';
 import { TerminalPane } from './terminal/terminal-pane';
 import { HealthBanner } from './health-banner';
 import { useSessionNotifications } from './use-session-notifications';
-import { Bell, BellOff } from 'lucide-react';
 import { PlatformProvider, Shortcut, shortcutSuffix } from './shortcut';
 import { TabLabel } from './tab-label';
 import { useTabHistory } from './use-tab-history';
@@ -39,6 +42,8 @@ const ShortcutsHelp = lazy(() => import('./shortcuts-help').then((m) => ({ defau
 const NewDeviceDialog = lazy(() => import('./new-device-dialog').then((m) => ({ default: m.NewDeviceDialog })));
 const NewProjectDialog = lazy(() => import('./new-project-dialog').then((m) => ({ default: m.NewProjectDialog })));
 const AttachTmuxDialog = lazy(() => import('./attach-tmux-dialog').then((m) => ({ default: m.AttachTmuxDialog })));
+const NewSshHostDialog = lazy(() => import('./new-ssh-host-dialog').then((m) => ({ default: m.NewSshHostDialog })));
+const BootstrapDeviceDialog = lazy(() => import('./bootstrap-device-dialog').then((m) => ({ default: m.BootstrapDeviceDialog })));
 
 function isTypingTarget(target: EventTarget | null): boolean {
   if (!(target instanceof HTMLElement)) return false;
@@ -126,6 +131,12 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
   const [createMenuOpen, setCreateMenuOpen] = useState(false);
   const [projectMenuId, setProjectMenuId] = useState<string | null>(null);
   const [newDeviceOpen, setNewDeviceOpen] = useState(false);
+  const [newSshHostOpen, setNewSshHostOpen] = useState(false);
+  const [bootstrapOpen, setBootstrapOpen] = useState(false);
+  // Counter incremented after a successful host add. DevicesDialog
+  // re-runs its parallel fetch whenever this changes, so background
+  // additions show up immediately if Devices happens to be open.
+  const [hostsRefreshTrigger, setHostsRefreshTrigger] = useState(0);
   const [newProjectOpen, setNewProjectOpen] = useState(false);
   const [attachTmuxOpen, setAttachTmuxOpen] = useState(false);
   const [newProjectDevice, setNewProjectDevice] = useState<string | null>(null);
@@ -737,17 +748,6 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
                 <button
                   type="button"
                   className="flex h-8 w-full items-center gap-2 rounded px-2 text-left text-sm text-muted hover:bg-panel2 hover:text-text"
-                  onClick={() => {
-                    setCreateMenuOpen(false);
-                    setNewDeviceOpen(true);
-                  }}
-                >
-                  <Laptop className="h-3.5 w-3.5" />
-                  <span className="whitespace-nowrap">New Device</span>
-                </button>
-                <button
-                  type="button"
-                  className="flex h-8 w-full items-center gap-2 rounded px-2 text-left text-sm text-muted hover:bg-panel2 hover:text-text"
                   onClick={() => openNewProject()}
                 >
                   <FolderPlus className="h-3.5 w-3.5" />
@@ -764,6 +764,40 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
                 >
                   <Terminal className="h-3.5 w-3.5" />
                   <span className="whitespace-nowrap">Connect tmux session</span>
+                </button>
+                <div className="my-1 h-px bg-line" />
+                <button
+                  type="button"
+                  className="flex h-8 w-full items-center gap-2 rounded px-2 text-left text-sm text-muted hover:bg-panel2 hover:text-text"
+                  onClick={() => {
+                    setCreateMenuOpen(false);
+                    setBootstrapOpen(true);
+                  }}
+                >
+                  <Zap className="h-3.5 w-3.5" />
+                  <span className="whitespace-nowrap">Bootstrap device</span>
+                </button>
+                <button
+                  type="button"
+                  className="flex h-8 w-full items-center gap-2 rounded px-2 text-left text-sm text-muted hover:bg-panel2 hover:text-text"
+                  onClick={() => {
+                    setCreateMenuOpen(false);
+                    setNewDeviceOpen(true);
+                  }}
+                >
+                  <Laptop className="h-3.5 w-3.5" />
+                  <span className="whitespace-nowrap">New device (manual)</span>
+                </button>
+                <button
+                  type="button"
+                  className="flex h-8 w-full items-center gap-2 rounded px-2 text-left text-sm text-muted hover:bg-panel2 hover:text-text"
+                  onClick={() => {
+                    setCreateMenuOpen(false);
+                    setNewSshHostOpen(true);
+                  }}
+                >
+                  <Network className="h-3.5 w-3.5" />
+                  <span className="whitespace-nowrap">New SSH host</span>
                 </button>
                 <div className="my-1 h-px bg-line" />
                 <button
@@ -1288,7 +1322,10 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
               setTokenDevices((current) => current.filter((device) => device !== name));
             }}
             onAddDevice={() => setNewDeviceOpen(true)}
+            onAddSshHost={() => setNewSshHostOpen(true)}
+            onBootstrap={() => setBootstrapOpen(true)}
             onCleanup={() => reloadProjects()}
+            refreshTrigger={hostsRefreshTrigger}
           />
         </Suspense>
       )}
@@ -1301,6 +1338,24 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
               if (token.name) setTokenDevices((current) => [...new Set([...current, token.name])]);
             }}
           />
+        </Suspense>
+      )}
+      {newSshHostOpen && (
+        <Suspense fallback={null}>
+          <NewSshHostDialog
+            open={newSshHostOpen}
+            onOpenChange={setNewSshHostOpen}
+            // Bump a counter so the DevicesDialog's parent-side fetch
+            // re-runs if Devices is open in the background. Without
+            // this, a host added while Devices is showing wouldn't
+            // appear until the user closes and re-opens Devices.
+            onCreated={() => setHostsRefreshTrigger((n) => n + 1)}
+          />
+        </Suspense>
+      )}
+      {bootstrapOpen && (
+        <Suspense fallback={null}>
+          <BootstrapDeviceDialog open={bootstrapOpen} onOpenChange={setBootstrapOpen} />
         </Suspense>
       )}
       {newProjectOpen && (
