@@ -17,6 +17,9 @@
     "db:backup": "./scripts/backup-db.sh",
     "db:restore": "./scripts/restore-db.sh",
     "deploy:staging": "./scripts/deploy-staging.sh",
+    "test": "jest",
+    "test:watch": "jest --watch",
+    "test:coverage": "jest --coverage",
     "lint": "npm run lint -w apps/web && npm run lint -w apps/agent",
     "lint:fix": "npm run lint:fix -w apps/web && npm run lint:fix -w apps/agent",
     "format": "prettier --write \"apps/**/*.{ts,tsx,js,jsx,json,css,md}\"",
@@ -29,6 +32,9 @@
   },
   "devDependencies": {
     "@sentry/nextjs": "^10.55.0",
+    "@testing-library/jest-dom": "^6.9.1",
+    "@testing-library/react": "^16.3.2",
+    "@types/jest": "^30.0.0",
     "@typescript-eslint/eslint-plugin": "^8.60.0",
     "@typescript-eslint/parser": "^8.60.0",
     "eslint": "^9.39.4",
@@ -37,8 +43,11 @@
     "eslint-plugin-react": "^7.37.5",
     "eslint-plugin-react-hooks": "^7.1.1",
     "husky": "^9.1.7",
+    "jest": "^30.4.2",
+    "jest-environment-jsdom": "^30.4.1",
     "lint-staged": "^17.0.6",
     "prettier": "^3.8.3",
+    "ts-jest": "^29.4.11",
     "winston": "^3.19.0"
   },
   "lint-staged": {
