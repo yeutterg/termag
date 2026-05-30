@@ -70,5 +70,18 @@ export default [
         version: "detect"
       }
     }
+  },
+  {
+    files: ["apps/agent/src/index.ts"],
+    rules: {
+      "no-console": "off",
+      "@typescript-eslint/no-require-imports": "off"
+    }
+  },
+  {
+    files: ["apps/web/server/broker.js"],
+    rules: {
+      "@typescript-eslint/no-require-imports": "off"
+    }
   }
 ];

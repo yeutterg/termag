@@ -1,17 +1,52 @@
 type Broker = {
   listTmuxSessions?: (userId: string) => Promise<TmuxDeviceSession[]>;
-  listDirectory?: (userId: string, deviceName: string, rootKey: string, relativePath: string) => Promise<DirectoryListing>;
+  listDirectory?: (
+    userId: string,
+    deviceName: string,
+    rootKey: string,
+    relativePath: string
+  ) => Promise<DirectoryListing>;
   connectedDevices?: (userId: string) => ConnectedDevice[];
   refreshUser?: (userId: string) => void;
   requestHealthRefresh?: (userId: string, deviceName: string) => void;
-  killTmuxSession?: (userId: string, deviceName: string, tmuxSessionName: string, timeoutMs?: number) => Promise<boolean>;
-  killTmuxWindow?: (userId: string, deviceName: string, tmuxName: string, timeoutMs?: number) => Promise<boolean>;
-  renameTmuxWindow?: (userId: string, deviceName: string, tmuxName: string, name: string, timeoutMs?: number) => Promise<{ tmuxName?: string; tmuxWindowName?: string } | null>;
+  killTmuxSession?: (
+    userId: string,
+    deviceName: string,
+    tmuxSessionName: string,
+    timeoutMs?: number
+  ) => Promise<boolean>;
+  killTmuxWindow?: (
+    userId: string,
+    deviceName: string,
+    tmuxName: string,
+    timeoutMs?: number
+  ) => Promise<boolean>;
+  renameTmuxWindow?: (
+    userId: string,
+    deviceName: string,
+    tmuxName: string,
+    name: string,
+    timeoutMs?: number
+  ) => Promise<{ tmuxName?: string; tmuxWindowName?: string } | null>;
   disconnectAgentToken?: (userId: string, tokenId: string) => void;
   killTmux: (userId: string, tmuxName: string, timeoutMs?: number) => Promise<boolean>;
   refreshSshHosts?: (userId: string, options?: { broadcast?: boolean }) => Promise<void>;
-  probeSshHost?: (userId: string, hostId: string) => Promise<{ ok: boolean; error?: string | null; sessions?: Array<{ name: string; windowCount: number; path: string }> }>;
+  probeSshHost?: (
+    userId: string,
+    hostId: string
+  ) => Promise<{
+    ok: boolean;
+    error?: string | null;
+    sessions?: Array<{ name: string; windowCount: number; path: string }>;
+  }>;
   forgetSshHost?: (userId: string, hostId: string) => void;
+  executeCommand?: (
+    userId: string,
+    deviceName: string,
+    command: string,
+    workingDirectory?: string,
+    timeoutMs?: number
+  ) => Promise<{ output: string; exitCode: number }>;
 };
 
 export type ConnectedDevice = {
@@ -25,7 +60,7 @@ export type ConnectedDevice = {
   memMb?: number;
   // "agent" (default, omitted on the wire) or "ssh". Lets the UI render
   // an SSH-host badge and the CLI label hosts in `termag list`.
-  kind?: 'agent' | 'ssh';
+  kind?: "agent" | "ssh";
   lastError?: string | null;
   // Stable id for the device — AgentToken.id for agents, SshHost.id for
   // ssh hosts. The CLI uses this to construct the WS attach URL without
@@ -63,7 +98,9 @@ function broker(): Broker | null {
 
 export async function listTmuxSessions(userId: string): Promise<TmuxDeviceSession[]> {
   const live = broker();
-  if (!live?.listTmuxSessions) return [];
+  if (!live?.listTmuxSessions) {
+    return [];
+  }
   return live.listTmuxSessions(userId);
 }
 
@@ -82,46 +119,83 @@ export function requestAgentHealthRefresh(userId: string, deviceName: string) {
   broker()?.requestHealthRefresh?.(userId, deviceName);
 }
 
-export async function killTmuxWindows(userId: string, targets: Array<{ rootKey: string; tmuxName: string | null | undefined }>) {
+export async function killTmuxWindows(
+  userId: string,
+  targets: Array<{ rootKey: string; tmuxName: string | null | undefined }>
+) {
   const live = broker();
-  if (!live) return;
-  const validTargets = targets.filter((target): target is { rootKey: string; tmuxName: string } => Boolean(target.tmuxName));
-  if (validTargets.length === 0) return;
-  await Promise.all(validTargets.map((target) =>
-    live.killTmuxWindow
-      ? live.killTmuxWindow(userId, target.rootKey, target.tmuxName).catch(() => false)
-      : live.killTmux(userId, target.tmuxName).catch(() => false)
-  ));
+  if (!live) {
+    return;
+  }
+  const validTargets = targets.filter((target): target is { rootKey: string; tmuxName: string } =>
+    Boolean(target.tmuxName)
+  );
+  if (validTargets.length === 0) {
+    return;
+  }
+  await Promise.all(
+    validTargets.map(target =>
+      live.killTmuxWindow
+        ? live.killTmuxWindow(userId, target.rootKey, target.tmuxName).catch(() => false)
+        : live.killTmux(userId, target.tmuxName).catch(() => false)
+    )
+  );
 }
 
-export async function killTmuxProjectSessions(userId: string, targets: Array<{ rootKey: string; tmuxSessionName: string | null | undefined }>) {
+export async function killTmuxProjectSessions(
+  userId: string,
+  targets: Array<{ rootKey: string; tmuxSessionName: string | null | undefined }>
+) {
   const live = broker();
-  if (!live) return;
-  const validTargets = targets.filter((target): target is { rootKey: string; tmuxSessionName: string } => Boolean(target.tmuxSessionName));
-  if (validTargets.length === 0) return;
-  await Promise.all(validTargets.map((target) =>
-    live.killTmuxSession
-      ? live.killTmuxSession(userId, target.rootKey, target.tmuxSessionName).catch(() => false)
-      : live.killTmux(userId, target.tmuxSessionName).catch(() => false)
-  ));
+  if (!live) {
+    return;
+  }
+  const validTargets = targets.filter(
+    (target): target is { rootKey: string; tmuxSessionName: string } =>
+      Boolean(target.tmuxSessionName)
+  );
+  if (validTargets.length === 0) {
+    return;
+  }
+  await Promise.all(
+    validTargets.map(target =>
+      live.killTmuxSession
+        ? live.killTmuxSession(userId, target.rootKey, target.tmuxSessionName).catch(() => false)
+        : live.killTmux(userId, target.tmuxSessionName).catch(() => false)
+    )
+  );
 }
 
-export async function renameTmuxWindow(userId: string, target: { rootKey: string; tmuxName: string | null | undefined; name: string }) {
+export async function renameTmuxWindow(
+  userId: string,
+  target: { rootKey: string; tmuxName: string | null | undefined; name: string }
+) {
   const live = broker();
-  if (!live?.renameTmuxWindow || !target.tmuxName || !target.name.trim()) return null;
-  return live.renameTmuxWindow(userId, target.rootKey, target.tmuxName, target.name.trim()).catch(() => null);
+  if (!live?.renameTmuxWindow || !target.tmuxName || !target.name.trim()) {
+    return null;
+  }
+  return live
+    .renameTmuxWindow(userId, target.rootKey, target.tmuxName, target.name.trim())
+    .catch(() => null);
 }
 
 export function disconnectAgentToken(userId: string, tokenId: string) {
   broker()?.disconnectAgentToken?.(userId, tokenId);
 }
 
-export async function killTmuxSessions(userId: string, tmuxNames: Array<string | null | undefined>) {
+export async function killTmuxSessions(
+  userId: string,
+  tmuxNames: Array<string | null | undefined>
+) {
   const live = broker();
-  if (!live) return;
+  if (!live) {
+    return;
+  }
   const targets = tmuxNames.filter((name): name is string => Boolean(name));
-  if (targets.length === 0) return;
-  await Promise.all(targets.map((name) => live.killTmux(userId, name).catch(() => false)));
+  if (targets.length === 0) {
+    return;
+  }
+  await Promise.all(targets.map(name => live.killTmux(userId, name).catch(() => false)));
 }
 
 export async function listDeviceDirectory(
@@ -131,7 +205,9 @@ export async function listDeviceDirectory(
   relativePath: string
 ): Promise<DirectoryListing> {
   const live = broker();
-  if (!live?.listDirectory) throw new Error('Agent offline');
+  if (!live?.listDirectory) {
+    throw new Error("Agent offline");
+  }
   return live.listDirectory(userId, deviceName, rootKey, relativePath);
 }
 
@@ -140,7 +216,10 @@ export async function listDeviceDirectory(
  * Idempotent — call from any route that mutates the SshHost table so the
  * broker doesn't have to wait for its 30s reconcile tick.
  */
-export async function refreshSshHostsForUser(userId: string, options?: { broadcast?: boolean }): Promise<void> {
+export async function refreshSshHostsForUser(
+  userId: string,
+  options?: { broadcast?: boolean }
+): Promise<void> {
   await broker()?.refreshSshHosts?.(userId, options);
 }
 
@@ -150,7 +229,7 @@ export async function refreshSshHostsForUser(userId: string, options?: { broadca
  * probe outcome so the API caller can echo it to the user.
  */
 export async function probeRegisteredSshHost(userId: string, hostId: string) {
-  return broker()?.probeSshHost?.(userId, hostId) ?? { ok: false, error: 'broker offline' };
+  return broker()?.probeSshHost?.(userId, hostId) ?? { ok: false, error: "broker offline" };
 }
 
 /**
@@ -160,4 +239,21 @@ export async function probeRegisteredSshHost(userId: string, hostId: string) {
  */
 export function forgetSshHostInBroker(userId: string, hostId: string): void {
   broker()?.forgetSshHost?.(userId, hostId);
+}
+
+/**
+ * Execute a shell command on a device's agent
+ */
+export async function executeCommandOnDevice(
+  userId: string,
+  deviceName: string,
+  command: string,
+  workingDirectory?: string,
+  timeoutMs: number = 30000
+): Promise<{ output: string; exitCode: number }> {
+  const live = broker();
+  if (!live?.executeCommand) {
+    throw new Error("Broker offline or does not support command execution");
+  }
+  return live.executeCommand(userId, deviceName, command, workingDirectory, timeoutMs);
 }

@@ -49,8 +49,11 @@ export async function executeGitCommand(
 /**
  * Get git status
  */
-export async function getGitStatus(workingDirectory: string): Promise<GitStatus> {
-  const result = await executeGitCommand("git status --porcelain", workingDirectory);
+export async function getGitStatus(
+  workingDirectory: string,
+  sessionId: string
+): Promise<GitStatus> {
+  const result = await executeGitCommand("git status --porcelain", workingDirectory, sessionId);
 
   // Parse git status output
   const status: GitStatus = {
@@ -84,8 +87,11 @@ export async function getGitStatus(workingDirectory: string): Promise<GitStatus>
 /**
  * Get git branches
  */
-export async function getGitBranches(workingDirectory: string): Promise<GitBranch[]> {
-  const result = await executeGitCommand("git branch -a", workingDirectory);
+export async function getGitBranches(
+  workingDirectory: string,
+  sessionId: string
+): Promise<GitBranch[]> {
+  const result = await executeGitCommand("git branch -a", workingDirectory, sessionId);
 
   const branches: GitBranch[] = [];
   const lines = result.stdout.split("\n");
@@ -110,11 +116,13 @@ export async function getGitBranches(workingDirectory: string): Promise<GitBranc
  */
 export async function getGitLog(
   workingDirectory: string,
+  sessionId: string,
   limit: number = 10
 ): Promise<GitCommit[]> {
   const result = await executeGitCommand(
     `git log -${limit} --pretty=format:"%H|%s|%an|%ad" --date=iso`,
-    workingDirectory
+    workingDirectory,
+    sessionId
   );
 
   const commits: GitCommit[] = [];
@@ -138,26 +146,38 @@ export async function getGitLog(
 /**
  * Git commit
  */
-export async function gitCommit(message: string, workingDirectory: string): Promise<boolean> {
-  const result = await executeGitCommand(`git commit -m "${message}"`, workingDirectory);
+export async function gitCommit(
+  message: string,
+  workingDirectory: string,
+  sessionId: string
+): Promise<boolean> {
+  const result = await executeGitCommand(`git commit -m "${message}"`, workingDirectory, sessionId);
   return result.exitCode === 0;
 }
 
 /**
  * Git push
  */
-export async function gitPush(branch?: string, workingDirectory: string): Promise<boolean> {
+export async function gitPush(
+  branch: string | undefined,
+  workingDirectory: string,
+  sessionId: string
+): Promise<boolean> {
   const command = branch ? `git push origin ${branch}` : "git push";
-  const result = await executeGitCommand(command, workingDirectory);
+  const result = await executeGitCommand(command, workingDirectory, sessionId);
   return result.exitCode === 0;
 }
 
 /**
  * Git pull
  */
-export async function gitPull(branch?: string, workingDirectory: string): Promise<boolean> {
+export async function gitPull(
+  branch: string | undefined,
+  workingDirectory: string,
+  sessionId: string
+): Promise<boolean> {
   const command = branch ? `git pull origin ${branch}` : "git pull";
-  const result = await executeGitCommand(command, workingDirectory);
+  const result = await executeGitCommand(command, workingDirectory, sessionId);
   return result.exitCode === 0;
 }
 
@@ -167,65 +187,100 @@ export async function gitPull(branch?: string, workingDirectory: string): Promis
 export async function createBranch(
   branchName: string,
   workingDirectory: string,
+  sessionId: string,
   checkout: boolean = true
 ): Promise<boolean> {
   const command = checkout ? `git checkout -b ${branchName}` : `git branch ${branchName}`;
-  const result = await executeGitCommand(command, workingDirectory);
+  const result = await executeGitCommand(command, workingDirectory, sessionId);
   return result.exitCode === 0;
 }
 
 /**
  * Switch branch
  */
-export async function switchBranch(branchName: string, workingDirectory: string): Promise<boolean> {
-  const result = await executeGitCommand(`git checkout ${branchName}`, workingDirectory);
+export async function switchBranch(
+  branchName: string,
+  workingDirectory: string,
+  sessionId: string
+): Promise<boolean> {
+  const result = await executeGitCommand(`git checkout ${branchName}`, workingDirectory, sessionId);
   return result.exitCode === 0;
 }
 
 /**
  * Get current branch
  */
-export async function getCurrentBranch(workingDirectory: string): Promise<string> {
-  const result = await executeGitCommand("git rev-parse --abbrev-ref HEAD", workingDirectory);
+export async function getCurrentBranch(
+  workingDirectory: string,
+  sessionId: string
+): Promise<string> {
+  const result = await executeGitCommand(
+    "git rev-parse --abbrev-ref HEAD",
+    workingDirectory,
+    sessionId
+  );
   return result.stdout.trim();
 }
 
 /**
  * Check if directory is a git repository
  */
-export async function isGitRepository(workingDirectory: string): Promise<boolean> {
-  const result = await executeGitCommand("git rev-parse --is-inside-work-tree", workingDirectory);
+export async function isGitRepository(
+  workingDirectory: string,
+  sessionId: string
+): Promise<boolean> {
+  const result = await executeGitCommand(
+    "git rev-parse --is-inside-work-tree",
+    workingDirectory,
+    sessionId
+  );
   return result.stdout.trim() === "true";
 }
 
 /**
  * Stage all changes
  */
-export async function stageAll(workingDirectory: string): Promise<boolean> {
-  const result = await executeGitCommand("git add -A", workingDirectory);
+export async function stageAll(workingDirectory: string, sessionId: string): Promise<boolean> {
+  const result = await executeGitCommand("git add -A", workingDirectory, sessionId);
   return result.exitCode === 0;
 }
 
 /**
  * Stage specific file
  */
-export async function stageFile(filePath: string, workingDirectory: string): Promise<boolean> {
-  const result = await executeGitCommand(`git add ${filePath}`, workingDirectory);
+export async function stageFile(
+  filePath: string,
+  workingDirectory: string,
+  sessionId: string
+): Promise<boolean> {
+  const result = await executeGitCommand(`git add ${filePath}`, workingDirectory, sessionId);
   return result.exitCode === 0;
 }
 
 /**
  * Unstage file
  */
-export async function unstageFile(filePath: string, workingDirectory: string): Promise<boolean> {
-  const result = await executeGitCommand(`git reset ${filePath}`, workingDirectory);
+export async function unstageFile(
+  filePath: string,
+  workingDirectory: string,
+  sessionId: string
+): Promise<boolean> {
+  const result = await executeGitCommand(`git reset ${filePath}`, workingDirectory, sessionId);
   return result.exitCode === 0;
 }
 
 /**
  * Discard changes in file
  */
-export async function discardChanges(filePath: string, workingDirectory: string): Promise<boolean> {
-  const result = await executeGitCommand(`git checkout -- ${filePath}`, workingDirectory);
+export async function discardChanges(
+  filePath: string,
+  workingDirectory: string,
+  sessionId: string
+): Promise<boolean> {
+  const result = await executeGitCommand(
+    `git checkout -- ${filePath}`,
+    workingDirectory,
+    sessionId
+  );
   return result.exitCode === 0;
 }

@@ -20,6 +20,7 @@ interface GitOperationsDialogProps {
   isOpen: boolean;
   onClose: () => void;
   workingDirectory: string;
+  sessionId: string;
   onCommandExecute?: (command: string) => void;
   className?: string;
 }
@@ -28,6 +29,7 @@ export function GitOperationsDialog({
   isOpen,
   onClose,
   workingDirectory,
+  sessionId,
   onCommandExecute,
   className,
 }: GitOperationsDialogProps) {
@@ -41,8 +43,8 @@ export function GitOperationsDialog({
     setLoading(true);
     try {
       const [statusData, branchesData] = await Promise.all([
-        getGitStatus(workingDirectory),
-        getGitBranches(workingDirectory),
+        getGitStatus(workingDirectory, sessionId),
+        getGitBranches(workingDirectory, sessionId),
       ]);
       setStatus(statusData);
       setBranches(branchesData);
@@ -51,7 +53,7 @@ export function GitOperationsDialog({
     } finally {
       setLoading(false);
     }
-  }, [workingDirectory]);
+  }, [workingDirectory, sessionId]);
 
   useEffect(() => {
     if (isOpen) {
@@ -64,7 +66,7 @@ export function GitOperationsDialog({
       return;
     }
 
-    const success = await gitCommit(commitMessage, workingDirectory);
+    const success = await gitCommit(commitMessage, workingDirectory, sessionId);
     if (success && onCommandExecute) {
       onCommandExecute(`git commit -m "${commitMessage}"`);
       setCommitMessage("");
@@ -72,16 +74,16 @@ export function GitOperationsDialog({
     }
   };
 
-  const handlePush = async (branch?: string) => {
-    const success = await gitPush(branch, workingDirectory);
+  const handlePush = async (branch: string | undefined) => {
+    const success = await gitPush(branch, workingDirectory, sessionId);
     if (success && onCommandExecute) {
       onCommandExecute(branch ? `git push origin ${branch}` : "git push");
       loadGitData();
     }
   };
 
-  const handlePull = async (branch?: string) => {
-    const success = await gitPull(branch, workingDirectory);
+  const handlePull = async (branch: string | undefined) => {
+    const success = await gitPull(branch, workingDirectory, sessionId);
     if (success && onCommandExecute) {
       onCommandExecute(branch ? `git pull origin ${branch}` : "git pull");
       loadGitData();
@@ -89,7 +91,7 @@ export function GitOperationsDialog({
   };
 
   const handleSwitchBranch = async (branchName: string) => {
-    const success = await switchBranch(branchName, workingDirectory);
+    const success = await switchBranch(branchName, workingDirectory, sessionId);
     if (success && onCommandExecute) {
       onCommandExecute(`git checkout ${branchName}`);
       loadGitData();

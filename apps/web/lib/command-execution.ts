@@ -3,6 +3,9 @@
  * Connects the command palette systems to the termag WebSocket/agent architecture
  */
 
+import { prisma } from "./prisma";
+import { executeCommandOnDevice } from "./broker";
+
 export interface CommandExecutionOptions {
   sessionId: string;
   command: string;
@@ -21,19 +24,40 @@ export interface CommandResult {
  */
 export async function executeCommand(options: CommandExecutionOptions): Promise<CommandResult> {
   try {
-    const response = await fetch("/api/terminal/execute", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
+    // Resolve sessionId to get project info
+    const session = await prisma.session.findUnique({
+      where: { id: options.sessionId },
+      include: {
+        tab: {
+          include: {
+            project: true,
+          },
+        },
       },
-      body: JSON.stringify(options),
     });
 
-    if (!response.ok) {
-      throw new Error(`Command execution failed: ${response.statusText}`);
+    if (!session) {
+      throw new Error("Session not found");
     }
 
-    return await response.json();
+    const userId = session.tab.project.userId;
+    const deviceName = session.tab.project.rootKey;
+    const workingDirectory = options.workingDirectory;
+
+    // Execute command through the broker
+    const result = await executeCommandOnDevice(
+      userId,
+      deviceName,
+      options.command,
+      workingDirectory,
+      options.timeoutMs
+    );
+
+    return {
+      output: result.output,
+      exitCode: result.exitCode,
+      executedAt: new Date().toISOString(),
+    };
   } catch (error) {
     console.error("Failed to execute command:", error);
     throw error;
