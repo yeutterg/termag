@@ -1,0 +1,14 @@
+{
+  # Auto HTTPS will attempt to get certificates for staging domains
+  # For internal staging, you may need to use self-signed certs or disable auto HTTPS
+  email admin@termag.example.com
+}
+
+staging.termag.example.com {
+  reverse_proxy web:3000
+}
+
+# Optional: Handle multiple staging environments
+*.staging.termag.example.com {
+  reverse_proxy web:3000
+}

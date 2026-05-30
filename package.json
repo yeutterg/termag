@@ -16,6 +16,7 @@
     "db:migrate": "npm run db:migrate -w apps/web",
     "db:backup": "./scripts/backup-db.sh",
     "db:restore": "./scripts/restore-db.sh",
+    "deploy:staging": "./scripts/deploy-staging.sh",
     "lint": "npm run lint -w apps/web && npm run lint -w apps/agent",
     "lint:fix": "npm run lint:fix -w apps/web && npm run lint:fix -w apps/agent",
     "format": "prettier --write \"apps/**/*.{ts,tsx,js,jsx,json,css,md}\"",
@@ -27,6 +28,7 @@
     "node": ">=20"
   },
   "devDependencies": {
+    "@sentry/nextjs": "^10.55.0",
     "@typescript-eslint/eslint-plugin": "^8.60.0",
     "@typescript-eslint/parser": "^8.60.0",
     "eslint": "^9.39.4",

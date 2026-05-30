@@ -1,105 +1,186 @@
-/**
- * Shared in-memory rate limiter. Single-process broker so this is enough;
- * a multi-instance deployment needs to move state to Redis. Each call site
- * creates its own bucket store via createRateLimiter() so limits stay
- * isolated (a brute force on /api/auth/password can't lock out
- * /api/tmux/publish or vice versa).
- *
- * IP identification policy is the same as the audit log: trust XFF /
- * X-Real-IP only when TERMAG_TRUSTED_PROXY=true. Otherwise everyone shares
- * the "unknown" bucket and only the global ceiling applies.
- */
+import { NextResponse } from "next/server";
 
-export type RateLimitConfig = {
-  perIpWindowMs: number;
-  perIpBurst: number;
-  perIpLockoutMs: number;
-  globalWindowMs: number;
-  globalBurst: number;
-  bucketsCap?: number;
-  sweepIntervalMs?: number;
-};
+// Simple in-memory rate limiter for development
+// In production, consider using Redis-backed rate limiting
+interface RateLimitEntry {
+  count: number;
+  resetTime: number;
+}
 
-export type RateLimitResult = { ok: true } | { ok: false; retryAfterSec: number };
+class RateLimiter {
+  private requests: Map<string, RateLimitEntry> = new Map();
+  private cleanupInterval: NodeJS.Timeout | null = null;
 
-type IpBucket = { count: number; windowStart: number; lockedUntil: number };
+  constructor(
+    private maxRequests: number = 100,
+    private windowMs: number = 60000
+  ) {
+    // Clean up expired entries every minute
+    this.cleanupInterval = setInterval(() => {
+      this.cleanup();
+    }, 60000);
+  }
 
-export function createRateLimiter(config: RateLimitConfig) {
-  const ipBuckets = new Map<string, IpBucket>();
-  let globalCount = 0;
-  let globalWindowStart = Date.now();
-  let lastSweepAt = Date.now();
-  const bucketsCap = config.bucketsCap ?? 10_000;
-  const sweepIntervalMs = config.sweepIntervalMs ?? 5 * 60 * 1000;
-
-  function maybeSweep(now: number) {
-    if (now - lastSweepAt < sweepIntervalMs && ipBuckets.size < bucketsCap) return;
-    lastSweepAt = now;
-    for (const [ip, bucket] of ipBuckets) {
-      const expired = bucket.lockedUntil <= now && now - bucket.windowStart > config.perIpWindowMs;
-      if (expired) ipBuckets.delete(ip);
-    }
-    if (ipBuckets.size > bucketsCap) {
-      const entries = [...ipBuckets.entries()].sort((a, b) => a[1].windowStart - b[1].windowStart);
-      for (let i = 0; i < entries.length - bucketsCap; i++) {
-        ipBuckets.delete(entries[i][0]);
+  private cleanup() {
+    const now = Date.now();
+    for (const [key, entry] of this.requests.entries()) {
+      if (entry.resetTime <= now) {
+        this.requests.delete(key);
       }
     }
   }
 
-  function check(ip: string): RateLimitResult {
+  check(identifier: string): { allowed: boolean; remaining: number; resetTime: number } {
     const now = Date.now();
-    maybeSweep(now);
-    if (now - globalWindowStart > config.globalWindowMs) {
-      globalCount = 0;
-      globalWindowStart = now;
+    const entry = this.requests.get(identifier);
+
+    if (!entry || entry.resetTime <= now) {
+      // First request or window expired
+      const newEntry: RateLimitEntry = {
+        count: 1,
+        resetTime: now + this.windowMs,
+      };
+      this.requests.set(identifier, newEntry);
+      return {
+        allowed: true,
+        remaining: this.maxRequests - 1,
+        resetTime: newEntry.resetTime,
+      };
     }
-    if (globalCount >= config.globalBurst) {
-      const retryAfterMs = config.globalWindowMs - (now - globalWindowStart);
-      return { ok: false, retryAfterSec: Math.max(1, Math.ceil(retryAfterMs / 1000)) };
+
+    if (entry.count >= this.maxRequests) {
+      return {
+        allowed: false,
+        remaining: 0,
+        resetTime: entry.resetTime,
+      };
     }
-    if (ip === 'unknown') return { ok: true };
-    let bucket = ipBuckets.get(ip);
-    if (!bucket || now - bucket.windowStart > config.perIpWindowMs) {
-      bucket = { count: 0, windowStart: now, lockedUntil: 0 };
-      ipBuckets.set(ip, bucket);
-    }
-    if (bucket.lockedUntil > now) {
-      return { ok: false, retryAfterSec: Math.ceil((bucket.lockedUntil - now) / 1000) };
-    }
-    if (bucket.count >= config.perIpBurst) {
-      bucket.lockedUntil = now + config.perIpLockoutMs;
-      return { ok: false, retryAfterSec: Math.ceil(config.perIpLockoutMs / 1000) };
-    }
-    return { ok: true };
+
+    entry.count++;
+    return {
+      allowed: true,
+      remaining: this.maxRequests - entry.count,
+      resetTime: entry.resetTime,
+    };
   }
 
-  function record(ip: string, success: boolean) {
-    globalCount += 1;
-    if (ip === 'unknown') return;
-    const bucket = ipBuckets.get(ip);
-    if (!bucket) return;
-    if (success) {
-      ipBuckets.delete(ip);
-    } else {
-      bucket.count += 1;
-    }
+  reset(identifier: string) {
+    this.requests.delete(identifier);
   }
 
-  return { check, record };
+  destroy() {
+    if (this.cleanupInterval) {
+      clearInterval(this.cleanupInterval);
+      this.cleanupInterval = null;
+    }
+    this.requests.clear();
+  }
 }
 
-/**
- * Identifies the client by IP. Only honors X-Forwarded-For / X-Real-IP when
- * TERMAG_TRUSTED_PROXY=true. Without that flag, trusting these headers
- * lets a direct attacker spoof a fresh IP per request to defeat the
- * per-IP limit. Returns "unknown" otherwise — paired with the limiter's
- * "skip per-IP when unknown" rule, so legitimate non-proxy callers aren't
- * sharing one global bucket that locks everyone out.
- */
-export function clientIpFromRequest(request: Request): string {
-  if (process.env.TERMAG_TRUSTED_PROXY !== 'true') return 'unknown';
-  const xff = request.headers.get('x-forwarded-for');
-  if (xff) return xff.split(',')[0]!.trim().slice(0, 64);
-  return request.headers.get('x-real-ip')?.trim().slice(0, 64) || 'unknown';
+// Rate limiters for different endpoints
+const apiLimiter = new RateLimiter(100, 60000); // 100 requests per minute
+const authLimiter = new RateLimiter(5, 60000); // 5 requests per minute for auth
+const sensitiveLimiter = new RateLimiter(10, 60000); // 10 requests per minute for sensitive operations
+
+function getClientIdentifier(request: Request): string {
+  // Try to get client IP from various headers
+  const forwardedFor = request.headers.get("x-forwarded-for");
+  const realIp = request.headers.get("x-real-ip");
+  const cfConnectingIp = request.headers.get("cf-connecting-ip");
+
+  if (forwardedFor) {
+    return forwardedFor.split(",")[0].trim();
+  }
+  if (realIp) {
+    return realIp;
+  }
+  if (cfConnectingIp) {
+    return cfConnectingIp;
+  }
+
+  // Fallback to a combination of headers
+  return request.headers.get("user-agent") || "unknown";
 }
+
+export function rateLimit(limiter: RateLimiter = apiLimiter) {
+  return async (request: Request): Promise<NextResponse | null> => {
+    const identifier = getClientIdentifier(request);
+    const result = limiter.check(identifier);
+
+    if (!result.allowed) {
+      return NextResponse.json(
+        {
+          error: "Rate limit exceeded",
+          retryAfter: Math.ceil((result.resetTime - Date.now()) / 1000),
+        },
+        {
+          status: 429,
+          headers: {
+            "X-RateLimit-Limit": limiter["maxRequests"].toString(),
+            "X-RateLimit-Remaining": result.remaining.toString(),
+            "X-RateLimit-Reset": new Date(result.resetTime).toISOString(),
+            "Retry-After": Math.ceil((result.resetTime - Date.now()) / 1000).toString(),
+          },
+        }
+      );
+    }
+
+    return null; // Allow request to proceed
+  };
+}
+
+export function rateLimitByAuth(limiter: RateLimiter = authLimiter) {
+  return async (request: Request, userId?: string): Promise<NextResponse | null> => {
+    const identifier = userId || getClientIdentifier(request);
+    const result = limiter.check(identifier);
+
+    if (!result.allowed) {
+      return NextResponse.json(
+        {
+          error: "Too many authentication attempts",
+          retryAfter: Math.ceil((result.resetTime - Date.now()) / 1000),
+        },
+        {
+          status: 429,
+          headers: {
+            "X-RateLimit-Limit": limiter["maxRequests"].toString(),
+            "X-RateLimit-Remaining": result.remaining.toString(),
+            "X-RateLimit-Reset": new Date(result.resetTime).toISOString(),
+            "Retry-After": Math.ceil((result.resetTime - Date.now()) / 1000).toString(),
+          },
+        }
+      );
+    }
+
+    return null;
+  };
+}
+
+export function rateLimitSensitive(limiter: RateLimiter = sensitiveLimiter) {
+  return async (request: Request): Promise<NextResponse | null> => {
+    const identifier = getClientIdentifier(request);
+    const result = limiter.check(identifier);
+
+    if (!result.allowed) {
+      return NextResponse.json(
+        {
+          error: "Too many sensitive operations",
+          retryAfter: Math.ceil((result.resetTime - Date.now()) / 1000),
+        },
+        {
+          status: 429,
+          headers: {
+            "X-RateLimit-Limit": limiter["maxRequests"].toString(),
+            "X-RateLimit-Remaining": result.remaining.toString(),
+            "X-RateLimit-Reset": new Date(result.resetTime).toISOString(),
+            "Retry-After": Math.ceil((result.resetTime - Date.now()) / 1000).toString(),
+          },
+        }
+      );
+    }
+
+    return null;
+  };
+}
+
+export { apiLimiter, authLimiter, sensitiveLimiter };
