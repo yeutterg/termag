@@ -291,7 +291,15 @@ function createBroker({ prisma, wss }) {
           id: typeof window?.id === 'string' ? window.id : '',
           name: typeof window?.name === 'string' ? window.name : '',
           target: typeof window?.target === 'string' ? window.target : '',
-          path: typeof window?.path === 'string' ? window.path : undefined
+          path: typeof window?.path === 'string' ? window.path : undefined,
+          // Poll facts the agent attaches per window for the broker's status
+          // classifier. All optional — older agents omit them and the
+          // classifier falls through to its existing branches. Coerce with
+          // the same Number.isFinite/typeof guards used for the core fields.
+          activityAgeSec: Number.isFinite(Number(window?.activityAgeSec)) ? Number(window.activityAgeSec) : undefined,
+          bell: typeof window?.bell === 'boolean' ? window.bell : undefined,
+          currentCommand: typeof window?.currentCommand === 'string' ? window.currentCommand : undefined,
+          lastExit: Number.isFinite(Number(window?.lastExit)) ? Number(window.lastExit) : undefined
         })).filter((window) => window.target || window.id || window.name)
         : []
     })).filter((session) => session.name);

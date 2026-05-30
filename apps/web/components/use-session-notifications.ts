@@ -56,11 +56,25 @@ export function useSessionNotifications(opts: {
     for (const tab of opts.tabSnapshots) {
       const last = prev.get(tab.tabId);
       const wasBusy = last === 'working' || last === 'waiting';
-      const nowFinal = tab.status === 'idle' || tab.status === 'error';
-      if (wasBusy && nowFinal && subscribed.has(tab.tabId)) {
+      // 'waiting' is now a "needs you" terminal-ish state (BEL / blocking on
+      // input), so it counts as final alongside idle/error. Guarding on
+      // last !== tab.status keeps 'waiting' → 'waiting' from re-firing, so a
+      // bell that keeps mapping to 'waiting' only notifies once on entry.
+      const nowFinal = tab.status === 'idle' || tab.status === 'error' || tab.status === 'waiting';
+      if (wasBusy && nowFinal && last !== tab.status && subscribed.has(tab.tabId)) {
         try {
-          const title = tab.status === 'error' ? `❌ ${tab.projectName}: ${tab.tabName}` : `✓ ${tab.projectName}: ${tab.tabName}`;
-          const body = tab.status === 'error' ? 'Session reported an error.' : 'Session is idle.';
+          const title =
+            tab.status === 'error'
+              ? `❌ ${tab.projectName}: ${tab.tabName}`
+              : tab.status === 'waiting'
+                ? `🔔 ${tab.projectName}: ${tab.tabName}`
+                : `✓ ${tab.projectName}: ${tab.tabName}`;
+          const body =
+            tab.status === 'error'
+              ? 'Session reported an error.'
+              : tab.status === 'waiting'
+                ? 'Session needs your input.'
+                : 'Session is idle.';
           new Notification(title, { body, tag: `termag.session.${tab.tabId}`, silent: false });
         } catch {
           // Some platforms throw on rapid duplicate notifications.

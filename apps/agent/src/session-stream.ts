@@ -20,6 +20,10 @@ import WebSocket from 'ws';
 const RECENT_BUFFER_BYTES = 64 * 1024;  // late-joiner replay window
 const IDLE_TEARDOWN_MS = 30_000;        // PTY lifetime after last unsubscribe
 const DRIVER_GRACE_MS = 2_000;          // driver keeps wheel after last input
+// Re-emit 'working' at most this often during continuous output so the
+// broker's PTY-precedence window never lapses mid-stream. On output stop we
+// simply stop refreshing and the broker poll classifier takes over.
+const WORKING_EMIT_THROTTLE_MS = 1_500;
 
 export type SubscriberOptions = {
   streamId: string;
@@ -63,6 +67,7 @@ export class SessionStream {
   private recentBufferBytes = 0;
   private idleTimer: ReturnType<typeof setTimeout> | null = null;
   private closed = false;
+  private lastWorkingEmitAt = 0;  // throttle for the PTY 'working' fast-path
 
   static getOrCreate(tmuxName: string, opts: SessionSpawnOptions): SessionStream {
     const existing = sessionStreams.get(tmuxName);
