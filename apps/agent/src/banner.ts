@@ -1,5 +1,6 @@
 import os from 'node:os';
 import path from 'node:path';
+import { shellExecInvocation } from './shell-hook';
 
 // Italic ANSI-wrapped figlet ("Standard" font) of "termag" printed once at
 // the top of every fresh shell tmux pane that termag spawns, followed by a
@@ -77,9 +78,24 @@ function buildBannerText(ctx: BannerContext): string {
  * (italic ASCII + optional context lines) and `exec` the shell so the
  * wrapper process disappears. Anything else (agent programs, custom
  * scripts) passes through unchanged.
+ *
+ * For zsh/bash we exec the shell against a termag-generated rc (via ZDOTDIR
+ * for zsh, --rcfile for bash) that sources the user's real rc FIRST and then
+ * installs an exit-code hook writing #{@termag_last_exit} after each command.
+ * This is how the broker poll classifier detects 'error' in unattended
+ * windows.
+ *
+ * LIMITATION: exit-code / 'error' detection only works for termag-spawned
+ * zsh/bash. Other shells (fish/sh/ksh/dash) exec as before with NO hook, and
+ * adopted/pre-existing sessions never run through this path at all — in both
+ * cases @termag_last_exit stays unset and the broker simply never reports
+ * 'error' for those windows (graceful degradation).
  */
 export function wrapWithBanner(resolvedCommand: string, ctx?: BannerContext): string {
   if (!looksLikeShell(resolvedCommand)) return resolvedCommand;
   const text = buildBannerText({ ...(ctx || {}), shell: ctx?.shell ?? resolvedCommand });
-  return `printf %s ${shQuote(text)}; exec ${resolvedCommand}`;
+  // shellExecInvocation returns the hook-installing exec target for zsh/bash,
+  // or the plain shell command unchanged for any other shell.
+  const execTarget = shellExecInvocation(resolvedCommand);
+  return `printf %s ${shQuote(text)}; exec ${execTarget}`;
 }

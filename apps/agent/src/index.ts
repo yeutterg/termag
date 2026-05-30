@@ -932,7 +932,19 @@ type TmuxSessionSnapshot = {
   name: string;
   path?: string;
   windowCount?: number;
-  windows: Array<{ index: number; id: string; name: string; target: string; path?: string }>;
+  windows: Array<{
+    index: number;
+    id: string;
+    name: string;
+    target: string;
+    path?: string;
+    // Optional health facts the broker poll classifier consumes. Omitted when
+    // tmux can't supply a usable value so the broker can fall back cleanly.
+    activityAgeSec?: number;   // seconds since the window last produced output
+    bell?: boolean;            // window bell flag / '!' in window_flags
+    currentCommand?: string;   // active pane's #{pane_current_command}
+    lastExit?: number;         // @termag_last_exit, only when set + numeric
+  }>;
 };
 
 type TmuxContext = {
@@ -2016,7 +2028,17 @@ async function listTmuxSessions(): Promise<TmuxSessionSnapshot[]> {
     name: string;
     path: string;
     windowCount: number;
-    windows: Array<{ index: number; id: string; name: string; target: string; path: string }>;
+    windows: Array<{
+      index: number;
+      id: string;
+      name: string;
+      target: string;
+      path: string;
+      activityAgeSec?: number;
+      bell?: boolean;
+      currentCommand?: string;
+      lastExit?: number;
+    }>;
   }>();
 
   for (const line of sessionStdout.split('\n')) {
@@ -2035,28 +2057,73 @@ async function listTmuxSessions(): Promise<TmuxSessionSnapshot[]> {
   try {
     const result = await execFileAsync('tmux', [
       'list-panes', '-a',
-      '-F', '#{session_name}\t#{window_index}\t#{window_id}\t#{window_name}\t#{pane_active}\t#{pane_current_path}'
+      // New health fields appended at the END so the existing leading columns
+      // keep their positions. @termag_last_exit expands to '' when unset.
+      '-F', '#{session_name}\t#{window_index}\t#{window_id}\t#{window_name}\t#{pane_active}\t#{pane_current_path}\t#{window_activity}\t#{window_bell_flag}\t#{window_flags}\t#{pane_current_command}\t#{@termag_last_exit}'
     ]);
     paneStdout = result.stdout;
   } catch {
     return [...sessions.values()];
   }
 
+  // Capture wall-clock once per poll so every window's age is measured against
+  // the same instant; window_activity is unix seconds, so compare in seconds.
+  const nowSec = Math.floor(Date.now() / 1000);
   const seenWindows = new Set<string>();
   for (const line of paneStdout.split('\n')) {
     if (!line.trim()) continue;
-    const [sessionName, rawIndex = '0', windowId = '', windowName = '', paneActive = '', panePath = ''] = line.split('\t');
+    const [
+      sessionName,
+      rawIndex = '0',
+      windowId = '',
+      windowName = '',
+      paneActive = '',
+      panePath = '',
+      rawActivity = '',
+      bellFlag = '',
+      windowFlags = '',
+      currentCommand = '',
+      rawLastExit = ''
+    ] = line.split('\t');
     if (paneActive !== '1') continue;
     const session = sessions.get(sessionName);
     if (!session || !windowId || seenWindows.has(windowId)) continue;
     seenWindows.add(windowId);
-    session.windows.push({
+
+    const win: {
+      index: number;
+      id: string;
+      name: string;
+      target: string;
+      path: string;
+      activityAgeSec?: number;
+      bell?: boolean;
+      currentCommand?: string;
+      lastExit?: number;
+    } = {
       index: Number(rawIndex) || session.windows.length,
       id: windowId,
       name: windowName || `Window ${rawIndex}`,
       target: windowId,
       path: panePath || session.path
-    });
+    };
+
+    // activityAgeSec: omit entirely if the activity timestamp is unparseable.
+    const activitySec = Number.parseInt(rawActivity, 10);
+    if (Number.isFinite(activitySec)) {
+      win.activityAgeSec = Math.max(0, nowSec - activitySec);
+    }
+    // bell: explicit flag, or '!' surfaced in the aggregate window_flags.
+    win.bell = bellFlag === '1' || windowFlags.includes('!');
+    // currentCommand: active pane's foreground command (we already filtered).
+    if (currentCommand) win.currentCommand = currentCommand;
+    // lastExit: only attach when the user option is set to a numeric value.
+    if (rawLastExit.trim() !== '') {
+      const exit = Number(rawLastExit);
+      if (Number.isFinite(exit)) win.lastExit = exit;
+    }
+
+    session.windows.push(win);
   }
 
   return [...sessions.values()].map((session) => ({

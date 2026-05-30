@@ -62,6 +62,9 @@ async function ensureTmuxSession(tmuxName: string, cwd: string, command: string,
       ]);
       await execFileAsync('tmux', ['set-option', '-t', tmuxName, '-w', 'window-size', 'largest']);
       await execFileAsync('tmux', ['set-option', '-t', tmuxName, 'history-limit', '10000']);
+      // Let the broker poll read bell/activity flags for unattended windows.
+      await execFileAsync('tmux', ['set-option', '-t', tmuxName, 'monitor-bell', 'on']).catch(() => {});
+      await execFileAsync('tmux', ['set-option', '-t', tmuxName, 'monitor-activity', 'on']).catch(() => {});
       return { wasNew: true };
     } catch (err) {
       // Concurrent attach race: another caller created the session between
@@ -121,6 +124,9 @@ async function ensureTmuxWindow(sessionName: string, windowName: string, cwd: st
       ]);
       await execFileAsync('tmux', ['set-option', '-t', sessionName, '-w', 'window-size', 'largest']);
       await execFileAsync('tmux', ['set-option', '-t', sessionName, 'history-limit', '10000']);
+      // Let the broker poll read bell/activity flags for unattended windows.
+      await execFileAsync('tmux', ['set-option', '-t', sessionName, 'monitor-bell', 'on']).catch(() => {});
+      await execFileAsync('tmux', ['set-option', '-t', sessionName, 'monitor-activity', 'on']).catch(() => {});
       return { wasNew: true };
     } catch (err) {
       if (await tmuxWindowExists(sessionName, windowName)) return { wasNew: false };
@@ -128,6 +134,9 @@ async function ensureTmuxWindow(sessionName: string, windowName: string, cwd: st
         await execFileAsync('tmux', ['new-window', '-d', '-t', sessionName, '-n', windowName, '-c', cwd, shellCommand]);
         await execFileAsync('tmux', ['set-option', '-t', sessionName, '-w', 'window-size', 'largest']);
         await execFileAsync('tmux', ['set-option', '-t', sessionName, 'history-limit', '10000']);
+        // Let the broker poll read bell/activity flags for unattended windows.
+        await execFileAsync('tmux', ['set-option', '-t', sessionName, 'monitor-bell', 'on']).catch(() => {});
+        await execFileAsync('tmux', ['set-option', '-t', sessionName, 'monitor-activity', 'on']).catch(() => {});
         return { wasNew: true };
       }
       throw err;
@@ -138,6 +147,9 @@ async function ensureTmuxWindow(sessionName: string, windowName: string, cwd: st
     await execFileAsync('tmux', ['new-window', '-d', '-t', sessionName, '-n', windowName, '-c', cwd, shellCommand]);
     await execFileAsync('tmux', ['set-option', '-t', sessionName, '-w', 'window-size', 'largest']);
     await execFileAsync('tmux', ['set-option', '-t', sessionName, 'history-limit', '10000']);
+    // Let the broker poll read bell/activity flags for unattended windows.
+    await execFileAsync('tmux', ['set-option', '-t', sessionName, 'monitor-bell', 'on']).catch(() => {});
+    await execFileAsync('tmux', ['set-option', '-t', sessionName, 'monitor-activity', 'on']).catch(() => {});
     return { wasNew: true };
   } catch (err) {
     if (await tmuxWindowExists(sessionName, windowName)) return { wasNew: false };

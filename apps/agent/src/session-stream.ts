@@ -250,6 +250,28 @@ export class SessionStream {
     for (const sub of this.subscribers.values()) {
       this.sendDataTo(sub, data);
     }
+    // PTY fast-path status. A BEL byte (char 7) means attention/done — emit
+    // 'waiting' immediately. Otherwise any output means the program is busy;
+    // refresh 'working' but throttled so we don't spam the broker during a
+    // continuous stream while still keeping its precedence window fresh.
+    if (data.indexOf('\x07') !== -1) {
+      this.emitStatus('waiting');
+    } else {
+      const now = Date.now();
+      if (now - this.lastWorkingEmitAt >= WORKING_EMIT_THROTTLE_MS) {
+        this.lastWorkingEmitAt = now;
+        this.emitStatus('working');
+      }
+    }
+  }
+
+  // Fan a PTY-derived status to every subscriber's agent->broker socket. The
+  // broker maps any of the session's streamIds back to the same sessionId, so
+  // emitting per-subscriber is fine. No subscribers -> nothing to send.
+  private emitStatus(status: 'working' | 'waiting'): void {
+    for (const sub of this.subscribers.values()) {
+      sendJson(sub.ws, { type: 'status', streamId: sub.streamId, status });
+    }
   }
 
   private handleExit(): void {

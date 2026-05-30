@@ -246,6 +246,18 @@ function createBroker({ prisma, wss }) {
   const sshHosts = new Map();
   const sshStreamRegistry = createSshStreamRegistry({ prisma });
   const SSH_POLL_INTERVAL_MS = 30_000;
+  // Last PTY fast-path status we received per session, with the epoch-ms it
+  // landed. The poll classifier prefers this over poll facts while it's
+  // fresh AND the session still has an attached browser stream — the PTY
+  // path reacts to live output/BEL faster than the 30s health tick.
+  const ptyStatusBySession = new Map(); // sessionId -> { status, at }
+  // A window whose last output is younger than this counts as actively
+  // working — fresh output beats a stale bell flag. Env-overridable to match
+  // the HEALTH_INTERVAL_MS tuning pattern over in apps/agent/src/index.ts.
+  const WORKING_THRESHOLD_SEC = Number(process.env.TERMAG_WORKING_THRESHOLD_SEC) || 8;
+  // How long a PTY-reported status stays authoritative before the poll
+  // classifier takes back over (the PTY path stops refreshing on output stop).
+  const PTY_FRESH_MS = Number(process.env.TERMAG_PTY_FRESH_MS) || 5000;
   let seq = 0;
 
   // Schedule the scrollback TTL prune as part of broker boot. Runs once
@@ -399,7 +411,12 @@ function createBroker({ prisma, wss }) {
     const state = {
       sessions: new Set(),
       windows: new Set(),
-      globalWindows: new Set()
+      globalWindows: new Set(),
+      // window-target-key -> { activityAgeSec, bell, currentCommand, lastExit }.
+      // Keyed by the SAME scoped + global keys we add to the Sets above so the
+      // classifier can look up the poll facts for whichever target matched a
+      // session (tmuxSessionIsLive scopes by project, falls back to global).
+      facts: new Map()
     };
     const sessions = Array.isArray(tmuxSessions) ? tmuxSessions : [];
     for (const session of sessions) {
@@ -412,9 +429,19 @@ function createBroker({ prisma, wss }) {
         addTmuxTarget(targets, window?.target);
         addTmuxTarget(targets, window?.id);
         addTmuxTarget(targets, window?.name);
+        const facts = {
+          activityAgeSec: window?.activityAgeSec,
+          bell: window?.bell,
+          currentCommand: window?.currentCommand,
+          lastExit: window?.lastExit
+        };
         for (const target of targets) {
           state.globalWindows.add(target);
           state.windows.add(scopedTmuxTarget(sessionName, target));
+          // Store the facts under both the global and the scoped key so the
+          // matched-target lookup works regardless of which path matched.
+          state.facts.set(target, facts);
+          state.facts.set(scopedTmuxTarget(sessionName, target), facts);
         }
       }
     }
@@ -451,8 +478,62 @@ function createBroker({ prisma, wss }) {
     return false;
   }
 
-  function statusForLiveTmuxSession(currentStatus) {
-    return currentStatus && currentStatus !== 'sleeping' ? currentStatus : 'idle';
+  // Find the poll facts for whichever live window this session matched. Mirrors
+  // the match order in tmuxSessionIsLive: scoped-by-project first (when the
+  // project has a tmux session name), else the global window keys. Returns the
+  // facts object stored by buildLiveTmuxState, or null if no window matched
+  // (e.g. the session is live via the session-name Set, not a window).
+  function pollFactsForSession(session, tmuxState) {
+    const projectSessionName = typeof session.project?.tmuxSessionName === 'string'
+      ? session.project.tmuxSessionName.trim()
+      : '';
+    if (projectSessionName) {
+      for (const candidate of sessionTargetCandidates(session, projectSessionName)) {
+        const facts = tmuxState.facts.get(scopedTmuxTarget(projectSessionName, candidate));
+        if (facts) return facts;
+      }
+      return null;
+    }
+    for (const candidate of sessionTargetCandidates(session, '')) {
+      const facts = tmuxState.facts.get(candidate);
+      if (facts) return facts;
+    }
+    return null;
+  }
+
+  // Shell process names that mean the prompt has returned (program exited) —
+  // login shells show with a leading dash. Used by the classifier's idle branch.
+  const SHELL_COMMAND_RE = /^(zsh|bash|sh|fish|ksh|dash|-zsh|-bash)$/;
+
+  // Classify a LIVE session per the shared wire contract. PTY fast-path wins
+  // while fresh AND a browser is attached; otherwise derive from poll facts.
+  function classifyLiveTmuxSession(session, facts) {
+    // Precedence: a recent PTY status for a session with an attached browser
+    // stream reflects live output/BEL faster than the ~10s health poll. Without an
+    // attached stream there's no PTY feeding us, so the fast-path is stale.
+    const pty = ptyStatusBySession.get(session.id);
+    if (pty && Date.now() - pty.at < PTY_FRESH_MS) {
+      for (const stream of browserStreams.values()) {
+        if (stream.sessionId === session.id && stream.attached === true) {
+          return pty.status;
+        }
+      }
+    }
+    if (facts) {
+      // (a) fresh output beats a stale bell flag.
+      if (typeof facts.activityAgeSec === 'number' && facts.activityAgeSec < WORKING_THRESHOLD_SEC) return 'working';
+      // (b) bell rung (BEL or window-flags '!') and not actively outputting.
+      if (facts.bell === true) return 'waiting';
+      // (c) last command exited non-zero.
+      if (typeof facts.lastExit === 'number' && facts.lastExit !== 0) return 'error';
+      // (d) a shell prompt is back — the program finished and isn't an error.
+      if (typeof facts.currentCommand === 'string' && SHELL_COMMAND_RE.test(facts.currentCommand)) return 'idle';
+      // (e) something is running but not outputting — treat as waiting.
+      return 'waiting';
+    }
+    // No window facts (live via session-name only / older agent): preserve the
+    // previous non-sleeping status, defaulting to idle, as before.
+    return session.status && session.status !== 'sleeping' ? session.status : 'idle';
   }
 
   async function reconcileDeviceTmuxStatus(userId, deviceName, tmuxSessions) {
@@ -478,7 +559,9 @@ function createBroker({ prisma, wss }) {
     for (const session of sessions) {
       projectStatuses.set(session.projectId, session.project.status);
       const live = tmuxSessionIsLive(session, tmuxState);
-      const nextStatus = live ? statusForLiveTmuxSession(session.status) : 'sleeping';
+      const nextStatus = live
+        ? classifyLiveTmuxSession(session, pollFactsForSession(session, tmuxState))
+        : 'sleeping';
       if (session.status !== nextStatus) {
         changed = true;
         updates.push(prisma.session.update({
@@ -684,13 +767,20 @@ function createBroker({ prisma, wss }) {
         return;
       }
 
-      if (msg.type === 'status' && msg.sessionId && msg.status) {
+      if (msg.type === 'status' && msg.status) {
         if (!VALID_SESSION_STATUSES.has(msg.status)) return;
+        // Accept either an explicit sessionId or the PTY fast-path streamId,
+        // which we resolve back to its session via the browserStreams map.
+        const sessionId = msg.sessionId || browserStreams.get(msg.streamId)?.sessionId;
+        if (!sessionId) return;
         const session = await prisma.session.findFirst({
-          where: { id: msg.sessionId, project: { userId: record.userId, rootKey: deviceName } },
+          where: { id: sessionId, project: { userId: record.userId, rootKey: deviceName } },
           select: { id: true, tabId: true, projectId: true }
         }).catch(() => null);
         if (!session) return;
+        // Record the fast-path status so the poll classifier prefers it while
+        // fresh (PTY_FRESH_MS) and the session still has an attached browser.
+        ptyStatusBySession.set(session.id, { status: msg.status, at: Date.now() });
         await prisma.session.update({
           where: { id: session.id },
           data: { status: msg.status, lastSeenAt: new Date() }
