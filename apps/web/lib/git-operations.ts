@@ -1,6 +1,8 @@
 /* eslint-disable no-console */
 /* eslint-disable @typescript-eslint/no-unused-vars */
 
+import { executeGitCommand as execGitCommand } from "./command-execution";
+
 export interface GitBranch {
   name: string;
   isCurrent: boolean;
