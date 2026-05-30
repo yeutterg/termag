@@ -35,7 +35,8 @@
     "fake": "TERMAG_AGENT_FAKE=true tsx src/index.ts",
     "build": "tsc -p tsconfig.json",
     "start": "node dist/index.js",
-    "lint": "tsc -p tsconfig.json --noEmit",
+    "lint": "eslint . --ext .ts",
+    "lint:fix": "eslint . --ext .ts --fix",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "prepublishOnly": "npm run build"
   },
@@ -45,8 +46,10 @@
   },
   "devDependencies": {
     "@types/node": "^22.10.2",
+    "@types/winston": "^2.4.4",
     "@types/ws": "^8.5.13",
     "tsx": "^4.19.2",
-    "typescript": "^5.7.2"
+    "typescript": "^5.7.2",
+    "winston": "^3.19.0"
   }
 }
