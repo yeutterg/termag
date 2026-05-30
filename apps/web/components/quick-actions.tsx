@@ -1,26 +1,22 @@
 "use client";
 
-import { useState } from "react";
 import {
-  Copy,
-  ClipboardPaste,
   Trash2,
   Maximize2,
   Minimize2,
   Search,
   MoreHorizontal,
-  Check,
-  LucideIcon,
+  RefreshCw,
+  Settings,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { copyToClipboard, pasteFromClipboard } from "@/lib/usability";
 import { useToast } from "./toast-provider";
 
 interface QuickActionsProps {
   onClear?: () => void;
-  onCopy?: () => string | null;
-  onPaste?: (text: string) => void;
   onSearch?: () => void;
+  onRefresh?: () => void;
+  onSettings?: () => void;
   onZoomIn?: () => void;
   onZoomOut?: () => void;
   onResetZoom?: () => void;
@@ -28,7 +24,7 @@ interface QuickActionsProps {
 }
 
 interface ActionButtonProps {
-  icon: LucideIcon;
+  icon: any;
   label: string;
   onClick: () => void;
   disabled?: boolean;
@@ -57,51 +53,15 @@ function ActionButton({ icon: Icon, label, onClick, disabled = false }: ActionBu
 
 export function QuickActions({
   onClear,
-  onCopy,
-  onPaste,
   onSearch,
+  onRefresh,
+  onSettings,
   onZoomIn,
   onZoomOut,
   onResetZoom,
   className,
 }: QuickActionsProps) {
-  const [showMore, setShowMore] = useState(false);
-  const [copied, setCopied] = useState(false);
-  const { success, error } = useToast();
-
-  const handleCopy = async () => {
-    let text: string | null = null;
-    if (onCopy) {
-      text = onCopy();
-    }
-
-    if (!text) {
-      // Try to get selected text
-      const selection = window.getSelection();
-      text = selection?.toString() || null;
-    }
-
-    if (text) {
-      const success = await copyToClipboard(text);
-      if (success) {
-        setCopied(true);
-        success("Copied to clipboard");
-        setTimeout(() => setCopied(false), 2000);
-      } else {
-        error("Failed to copy");
-      }
-    }
-  };
-
-  const handlePaste = async () => {
-    const text = await pasteFromClipboard();
-    if (text && onPaste) {
-      onPaste(text);
-      success("Pasted from clipboard");
-    } else {
-      error("Nothing to paste");
-    }
-  };
+  const { success } = useToast();
 
   const handleClear = () => {
     if (onClear) {
@@ -112,20 +72,14 @@ export function QuickActions({
 
   return (
     <div className={cn("flex items-center gap-1", className)}>
-      {/* Primary Actions */}
-      <ActionButton
-        icon={copied ? Check : Copy}
-        label={copied ? "Copied!" : "Copy"}
-        onClick={handleCopy}
-      />
+      {/* Terminal-specific actions */}
+      {onRefresh && <ActionButton icon={RefreshCw} label="Refresh session" onClick={onRefresh} />}
 
-      <ActionButton icon={ClipboardPaste} label="Paste" onClick={handlePaste} />
+      {onSearch && <ActionButton icon={Search} label="Search in terminal" onClick={onSearch} />}
 
-      {onSearch && <ActionButton icon={Search} label="Search" onClick={onSearch} />}
+      {onClear && <ActionButton icon={Trash2} label="Clear terminal" onClick={handleClear} />}
 
-      {onClear && <ActionButton icon={Trash2} label="Clear" onClick={handleClear} />}
-
-      {/* Zoom Controls */}
+      {/* Zoom controls */}
       {(onZoomIn || onZoomOut || onResetZoom) && (
         <>
           <div className="w-px h-6 bg-gray-300 dark:bg-gray-700 mx-1" />
@@ -140,21 +94,13 @@ export function QuickActions({
         </>
       )}
 
-      {/* More Actions */}
-      {(onZoomIn || onZoomOut || onResetZoom) && (
-        <div className="w-px h-6 bg-gray-300 dark:bg-gray-700 mx-1" />
+      {/* Settings */}
+      {onSettings && (
+        <>
+          <div className="w-px h-6 bg-gray-300 dark:bg-gray-700 mx-1" />
+          <ActionButton icon={Settings} label="Settings" onClick={onSettings} />
+        </>
       )}
-
-      <button
-        onClick={() => setShowMore(!showMore)}
-        className="flex flex-col items-center justify-center p-2 rounded-lg hover:bg-gray-200 dark:hover:bg-gray-700 transition-colors group relative"
-        title="More actions"
-      >
-        <MoreHorizontal className="h-4 w-4 text-gray-600 dark:text-gray-400" />
-        <span className="absolute -top-8 left-1/2 -translate-x-1/2 px-2 py-1 bg-gray-900 text-white text-xs rounded opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap pointer-events-none">
-          More
-        </span>
-      </button>
     </div>
   );
 }

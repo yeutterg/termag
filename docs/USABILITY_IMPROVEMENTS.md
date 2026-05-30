@@ -32,25 +32,28 @@ This document outlines usability improvements to enhance the user experience of 
 
 **Status**: Implemented
 
-- Copy/paste with clipboard fallback
-- Clear terminal
+- Refresh session
 - Search in terminal
+- Clear terminal
 - Zoom controls
+- Settings access
 - Tooltips on hover
 - Keyboard accessible
 
-**Impact**: Common actions always accessible
+**Impact**: Terminal-specific actions always accessible
 
-### 4. Improved Copy/Paste ✅
+**Note**: Copy/paste uses standard browser shortcuts (Ctrl+C/Ctrl+V or Cmd+C/Cmd+V) to maintain familiar behavior and avoid interfering with terminal operations.
 
-**Status**: Implemented
+### 4. Improved Copy/Paste
 
-- Smart clipboard handling
-- Fallback for older browsers
-- Visual feedback on copy
-- Error handling
+**Status**: Use standard browser shortcuts
 
-**Impact**: Core terminal workflow improvement
+- Users should use standard browser copy/paste shortcuts
+- Terminal selection works with standard text selection
+- No custom copy/paste buttons needed
+- Maintains familiar browser behavior
+
+**Impact**: Better alignment with user expectations and terminal conventions
 
 ## 🚀 Priority 2: Medium Impact, Medium Effort
 
