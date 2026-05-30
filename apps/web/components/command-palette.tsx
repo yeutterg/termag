@@ -17,6 +17,35 @@ import {
   Keyboard,
   HelpCircle,
   Minus,
+  X,
+  Split,
+  Copy,
+  Clipboard,
+  GitBranch,
+  GitCommit,
+  GitPullRequest,
+  GitFork,
+  RefreshCw,
+  Maximize2,
+  Minimize2,
+  Layout,
+  Pin,
+  Download,
+  Upload,
+  Play,
+  Command,
+  Clock,
+  History,
+  FileType,
+  Replace,
+  Monitor,
+  Sidebar,
+  Square,
+  ChevronRight,
+  ChevronDown,
+  GitMerge,
+  CheckSquare,
+  Type,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -274,38 +303,164 @@ export function useCommandPalette(_commands: Command[]) {
 
 // Pre-configured command sets for termag
 export function getTermagCommands(options: {
+  // Project Management
   onCreateProject?: () => void;
   onNewSession?: () => void;
   onSwitchProject?: (projectId: string) => void;
-  onOpenSettings?: () => void;
-  onToggleTheme?: () => void;
-  onOpenShortcuts?: () => void;
-  onOpenHelp?: () => void;
+  projects?: Array<{ id: string; name: string; rootKey: string }>;
+
+  // Session Management
+  onSwitchTab?: (tabId: string) => void;
+  onCloseSession?: () => void;
+  onSplitHorizontal?: () => void;
+  onSplitVertical?: () => void;
+  onCreateTab?: () => void;
+  onReopenLastClosed?: () => void;
+  tabs?: Array<{ id: string; name: string }>;
+
+  // Clipboard History
+  onPasteFromHistory?: () => void;
+  onCopyLastOutput?: () => void;
+  onCopyCurrentLine?: () => void;
+
+  // Git Operations
+  onGitStatus?: () => void;
+  onGitCommit?: () => void;
+  onGitPush?: () => void;
+  onGitPull?: () => void;
+  onGitLog?: () => void;
+  onGitCreateBranch?: () => void;
+  onGitSwitchBranch?: (branch: string) => void;
+  gitBranches?: string[];
+
+  // Quick Actions
+  onRunSnippet?: (snippetId: string) => void;
+  snippets?: Array<{ id: string; name: string; command: string }>;
+  onApplyTemplate?: (templateId: string) => void;
+  templates?: Array<{ id: string; name: string }>;
+  onToggleAutoSave?: () => void;
+  onToggleLineNumbers?: () => void;
+  onToggleWordWrap?: () => void;
+
+  // Search
+  onSearchInFile?: () => void;
+  onSearchAllFiles?: () => void;
+  onGrepSearch?: () => void;
+  onReplaceInFile?: () => void;
+
+  // Window Management
+  onFocusTerminal?: () => void;
+  onFocusFileExplorer?: () => void;
+  onFocusSidebar?: () => void;
+  onToggleFullscreen?: () => void;
+  onToggleSidebar?: () => void;
+
+  // Advanced
+  onExecuteCustomCommand?: () => void;
+  onOpenRecentProject?: (projectId: string) => void;
+  recentProjects?: Array<{ id: string; name: string }>;
+  onPinSession?: () => void;
+  onExportSession?: () => void;
+  onImportSession?: () => void;
+
+  // Navigation
   onSearchFiles?: () => void;
   onSearchHistory?: () => void;
   onOpenTemplates?: () => void;
   onOpenSnippets?: () => void;
+
+  // Terminal Actions
   onClearTerminal?: () => void;
   onZoomIn?: () => void;
   onZoomOut?: () => void;
-  projects?: Array<{ id: string; name: string; rootKey: string }>;
+
+  // Settings
+  onOpenSettings?: () => void;
+  onToggleTheme?: () => void;
+  onOpenShortcuts?: () => void;
+
+  // Help
+  onOpenHelp?: () => void;
 }): Command[] {
   const {
+    // Project Management
     onCreateProject,
     onNewSession,
     onSwitchProject,
-    onOpenSettings,
-    onToggleTheme,
-    onOpenShortcuts,
-    onOpenHelp,
+    projects = [],
+
+    // Session Management
+    onSwitchTab,
+    onCloseSession,
+    onSplitHorizontal,
+    onSplitVertical,
+    onCreateTab,
+    onReopenLastClosed,
+    tabs = [],
+
+    // Clipboard History
+    onPasteFromHistory,
+    onCopyLastOutput,
+    onCopyCurrentLine,
+
+    // Git Operations
+    onGitStatus,
+    onGitCommit,
+    onGitPush,
+    onGitPull,
+    onGitLog,
+    onGitCreateBranch,
+    onGitSwitchBranch,
+    gitBranches = [],
+
+    // Quick Actions
+    onRunSnippet,
+    snippets = [],
+    onApplyTemplate,
+    templates = [],
+    onToggleAutoSave,
+    onToggleLineNumbers,
+    onToggleWordWrap,
+
+    // Search
+    onSearchInFile,
+    onSearchAllFiles,
+    onGrepSearch,
+    onReplaceInFile,
+
+    // Window Management
+    onFocusTerminal,
+    onFocusFileExplorer,
+    onFocusSidebar,
+    onToggleFullscreen,
+    onToggleSidebar,
+
+    // Advanced
+    onExecuteCustomCommand,
+    onOpenRecentProject,
+    recentProjects = [],
+    onPinSession,
+    onExportSession,
+    onImportSession,
+
+    // Navigation
     onSearchFiles,
     onSearchHistory,
     onOpenTemplates,
     onOpenSnippets,
+
+    // Terminal Actions
     onClearTerminal,
     onZoomIn,
     onZoomOut,
-    projects = [],
+
+    // Settings
+    onOpenSettings,
+    onToggleTheme,
+    onOpenShortcuts,
+
+    // Help
+    onOpenHelp,
   } = options;
 
   const commands: Command[] = [
@@ -339,6 +494,351 @@ export function getTermagCommands(options: {
       keywords: [p.name, p.rootKey, "switch", "project"],
       action: () => onSwitchProject?.(p.id),
     })),
+
+    // Session Management
+    ...tabs.map(t => ({
+      id: `switch-tab-${t.id}`,
+      label: `Switch to ${t.name}`,
+      description: "Switch to this tab",
+      icon: Square,
+      category: "Session",
+      keywords: [t.name, "tab", "switch"],
+      action: () => onSwitchTab?.(t.id),
+    })),
+    {
+      id: "close-session",
+      label: "Close Current Session",
+      description: "Close the current terminal session",
+      icon: X,
+      category: "Session",
+      keywords: ["close", "session", "tab"],
+      action: () => onCloseSession?.(),
+      shortcut: "⌘W",
+    },
+    {
+      id: "split-horizontal",
+      label: "Split Pane Horizontal",
+      description: "Split terminal horizontally",
+      icon: Split,
+      category: "Session",
+      keywords: ["split", "horizontal", "pane"],
+      action: () => onSplitHorizontal?.(),
+      shortcut: "⌘D",
+    },
+    {
+      id: "split-vertical",
+      label: "Split Pane Vertical",
+      description: "Split terminal vertically",
+      icon: Split,
+      category: "Session",
+      keywords: ["split", "vertical", "pane"],
+      action: () => onSplitVertical?.(),
+      shortcut: "⌘⇧D",
+    },
+    {
+      id: "create-tab",
+      label: "Create New Tab",
+      description: "Create a new tab in current project",
+      icon: Plus,
+      category: "Session",
+      keywords: ["tab", "new", "create"],
+      action: () => onCreateTab?.(),
+      shortcut: "⌘T",
+    },
+    {
+      id: "reopen-closed",
+      label: "Reopen Last Closed Tab",
+      description: "Reopen the most recently closed tab",
+      icon: History,
+      category: "Session",
+      keywords: ["reopen", "restore", "tab"],
+      action: () => onReopenLastClosed?.(),
+      shortcut: "⌘⇧T",
+    },
+
+    // Clipboard History
+    {
+      id: "paste-history",
+      label: "Paste from Clipboard History",
+      description: "Select and paste from clipboard history",
+      icon: Clipboard,
+      category: "Clipboard",
+      keywords: ["paste", "clipboard", "history"],
+      action: () => onPasteFromHistory?.(),
+      shortcut: "⌘⇧V",
+    },
+    {
+      id: "copy-output",
+      label: "Copy Last Command Output",
+      description: "Copy the output of the last command",
+      icon: Copy,
+      category: "Clipboard",
+      keywords: ["copy", "output", "result"],
+      action: () => onCopyLastOutput?.(),
+      shortcut: "⌘⇧C",
+    },
+    {
+      id: "copy-line",
+      label: "Copy Current Line",
+      description: "Copy the current line in terminal",
+      icon: Copy,
+      category: "Clipboard",
+      keywords: ["copy", "line", "current"],
+      action: () => onCopyCurrentLine?.(),
+      shortcut: "⌘C",
+    },
+
+    // Git Operations
+    {
+      id: "git-status",
+      label: "Git Status",
+      description: "Show git repository status",
+      icon: GitBranch,
+      category: "Git",
+      keywords: ["git", "status", "repo"],
+      action: () => onGitStatus?.(),
+    },
+    {
+      id: "git-commit",
+      label: "Git Commit",
+      description: "Commit staged changes",
+      icon: GitCommit,
+      category: "Git",
+      keywords: ["git", "commit", "save"],
+      action: () => onGitCommit?.(),
+    },
+    {
+      id: "git-push",
+      label: "Git Push",
+      description: "Push commits to remote",
+      icon: GitPullRequest,
+      category: "Git",
+      keywords: ["git", "push", "upload"],
+      action: () => onGitPush?.(),
+    },
+    {
+      id: "git-pull",
+      label: "Git Pull",
+      description: "Pull changes from remote",
+      icon: GitPullRequest,
+      category: "Git",
+      keywords: ["git", "pull", "download"],
+      action: () => onGitPull?.(),
+    },
+    {
+      id: "git-log",
+      label: "View Git Log",
+      description: "Show commit history",
+      icon: History,
+      category: "Git",
+      keywords: ["git", "log", "history"],
+      action: () => onGitLog?.(),
+    },
+    {
+      id: "git-create-branch",
+      label: "Create New Branch",
+      description: "Create and checkout a new branch",
+      icon: GitFork,
+      category: "Git",
+      keywords: ["git", "branch", "create"],
+      action: () => onGitCreateBranch?.(),
+    },
+    ...gitBranches.map(b => ({
+      id: `git-switch-${b}`,
+      label: `Switch to ${b}`,
+      description: "Switch to this branch",
+      icon: GitMerge,
+      category: "Git",
+      keywords: ["git", "branch", "switch", b],
+      action: () => onGitSwitchBranch?.(b),
+    })),
+
+    // Quick Actions
+    ...snippets.map(s => ({
+      id: `run-snippet-${s.id}`,
+      label: `Run: ${s.name}`,
+      description: s.command,
+      icon: Zap,
+      category: "Quick Actions",
+      keywords: ["snippet", "run", "execute", s.name, s.command],
+      action: () => onRunSnippet?.(s.id),
+    })),
+    ...templates.map(t => ({
+      id: `apply-template-${t.id}`,
+      label: `Apply: ${t.name}`,
+      description: "Apply this session template",
+      icon: Layers,
+      category: "Quick Actions",
+      keywords: ["template", "apply", t.name],
+      action: () => onApplyTemplate?.(t.id),
+    })),
+    {
+      id: "toggle-autosave",
+      label: "Toggle Auto-Save",
+      description: "Enable or disable session auto-save",
+      icon: RefreshCw,
+      category: "Quick Actions",
+      keywords: ["autosave", "auto", "save"],
+      action: () => onToggleAutoSave?.(),
+    },
+    {
+      id: "toggle-line-numbers",
+      label: "Toggle Line Numbers",
+      description: "Show or hide line numbers",
+      icon: Type,
+      category: "Quick Actions",
+      keywords: ["line", "numbers", "toggle"],
+      action: () => onToggleLineNumbers?.(),
+    },
+    {
+      id: "toggle-word-wrap",
+      label: "Toggle Word Wrap",
+      description: "Enable or disable word wrap",
+      icon: FileType,
+      category: "Quick Actions",
+      keywords: ["wrap", "word", "toggle"],
+      action: () => onToggleWordWrap?.(),
+    },
+
+    // Search
+    {
+      id: "search-in-file",
+      label: "Search in Current File",
+      description: "Search within the current file",
+      icon: Search,
+      category: "Search",
+      keywords: ["search", "file", "current"],
+      action: () => onSearchInFile?.(),
+      shortcut: "⌘F",
+    },
+    {
+      id: "search-all-files",
+      label: "Search Across All Files",
+      description: "Search across all project files",
+      icon: Search,
+      category: "Search",
+      keywords: ["search", "all", "files"],
+      action: () => onSearchAllFiles?.(),
+      shortcut: "⇧⌘F",
+    },
+    {
+      id: "grep-search",
+      label: "Grep Search",
+      description: "Search using grep pattern",
+      icon: Command,
+      category: "Search",
+      keywords: ["grep", "pattern", "regex"],
+      action: () => onGrepSearch?.(),
+    },
+    {
+      id: "replace-in-file",
+      label: "Replace in File",
+      description: "Find and replace in current file",
+      icon: Replace,
+      category: "Search",
+      keywords: ["replace", "find", "substitute"],
+      action: () => onReplaceInFile?.(),
+      shortcut: "⌘H",
+    },
+
+    // Window Management
+    {
+      id: "focus-terminal",
+      label: "Focus Terminal",
+      description: "Focus the terminal window",
+      icon: Monitor,
+      category: "Window",
+      keywords: ["focus", "terminal", "window"],
+      action: () => onFocusTerminal?.(),
+      shortcut: "⌘1",
+    },
+    {
+      id: "focus-file-explorer",
+      label: "Focus File Explorer",
+      description: "Focus the file explorer",
+      icon: Folder,
+      category: "Window",
+      keywords: ["focus", "file", "explorer"],
+      action: () => onFocusFileExplorer?.(),
+      shortcut: "⌘2",
+    },
+    {
+      id: "focus-sidebar",
+      label: "Focus Sidebar",
+      description: "Focus the sidebar",
+      icon: Sidebar,
+      category: "Window",
+      keywords: ["focus", "sidebar"],
+      action: () => onFocusSidebar?.(),
+      shortcut: "⌘3",
+    },
+    {
+      id: "toggle-fullscreen",
+      label: "Toggle Fullscreen",
+      description: "Enter or exit fullscreen mode",
+      icon: Maximize2,
+      category: "Window",
+      keywords: ["fullscreen", "maximize"],
+      action: () => onToggleFullscreen?.(),
+      shortcut: "F11",
+    },
+    {
+      id: "toggle-sidebar",
+      label: "Toggle Sidebar",
+      description: "Show or hide the sidebar",
+      icon: Layout,
+      category: "Window",
+      keywords: ["sidebar", "toggle", "hide"],
+      action: () => onToggleSidebar?.(),
+      shortcut: "⌘B",
+    },
+
+    // Advanced
+    {
+      id: "execute-custom",
+      label: "Execute Custom Command",
+      description: "Run a custom shell command",
+      icon: Play,
+      category: "Advanced",
+      keywords: ["custom", "command", "execute", "run"],
+      action: () => onExecuteCustomCommand?.(),
+    },
+    ...recentProjects.map(p => ({
+      id: `recent-${p.id}`,
+      label: `Open Recent: ${p.name}`,
+      description: "Open this recent project",
+      icon: Clock,
+      category: "Advanced",
+      keywords: ["recent", "project", p.name],
+      action: () => onOpenRecentProject?.(p.id),
+    })),
+    {
+      id: "pin-session",
+      label: "Pin Current Session",
+      description: "Pin the current session to keep it open",
+      icon: Pin,
+      category: "Advanced",
+      keywords: ["pin", "session", "keep"],
+      action: () => onPinSession?.(),
+    },
+    {
+      id: "export-session",
+      label: "Export Session State",
+      description: "Export current session state to file",
+      icon: Download,
+      category: "Advanced",
+      keywords: ["export", "session", "save"],
+      action: () => onExportSession?.(),
+    },
+    {
+      id: "import-session",
+      label: "Import Session State",
+      description: "Import session state from file",
+      icon: Upload,
+      category: "Advanced",
+      keywords: ["import", "session", "load"],
+      action: () => onImportSession?.(),
+    },
 
     // Navigation
     {
@@ -405,7 +905,7 @@ export function getTermagCommands(options: {
       id: "zoom-out",
       label: "Zoom Out",
       description: "Decrease terminal font size",
-      icon: Minus, // Need to import
+      icon: Minus,
       category: "Terminal",
       keywords: ["zoom", "font", "size", "smaller"],
       action: () => onZoomOut?.(),
