@@ -391,6 +391,26 @@ final class TermagStatusController: NSObject, NSApplicationDelegate, NSMenuDeleg
 
         menu.addItem(NSMenuItem.separator())
 
+        // Quick Git Actions
+        if let status = readAgentStatus(), status.connected {
+            let gitStatusItem = NSMenuItem(title: "Git Status", action: #selector(gitStatus(_:)), keyEquivalent: "g")
+            gitStatusItem.target = self
+            gitStatusItem.isEnabled = true
+            menu.addItem(gitStatusItem)
+
+            let gitPullItem = NSMenuItem(title: "Git Pull", action: #selector(gitPull(_:)), keyEquivalent: "p")
+            gitPullItem.target = self
+            gitPullItem.isEnabled = true
+            menu.addItem(gitPullItem)
+
+            let gitPushItem = NSMenuItem(title: "Git Push", action: #selector(gitPush(_:)), keyEquivalent: "u")
+            gitPushItem.target = self
+            gitPushItem.isEnabled = true
+            menu.addItem(gitPushItem)
+        }
+
+        menu.addItem(NSMenuItem.separator())
+
         let create = NSMenuItem(title: "New tmux Session...", action: #selector(createSession(_:)), keyEquivalent: "n")
         create.target = self
         create.isEnabled = true
@@ -612,6 +632,47 @@ final class TermagStatusController: NSObject, NSApplicationDelegate, NSMenuDeleg
             _ = Darwin.kill(parentPid, SIGTERM)
         }
         NSApp.terminate(nil)
+    }
+
+    @objc private func gitStatus(_ sender: NSMenuItem) {
+        NSApp.activate(ignoringOtherApps: true)
+        let sessions = listSessions()
+        if let firstSession = sessions.first {
+            let result = runProcess("/usr/bin/git", args: ["-C", firstSession.path, "status", "--short"])
+            showAlert("Git Status for \(firstSession.name)", details: result.output.isEmpty ? "No changes" : result.output)
+        } else {
+            showAlert("No active session", details: "Open a tmux session first to run git commands.")
+        }
+    }
+
+    @objc private func gitPull(_ sender: NSMenuItem) {
+        NSApp.activate(ignoringOtherApps: true)
+        let sessions = listSessions()
+        if let firstSession = sessions.first {
+            let result = runProcess("/usr/bin/git", args: ["-C", firstSession.path, "pull"])
+            if result.status == 0 {
+                showAlert("Git Pull", details: result.output.isEmpty ? "Already up to date" : result.output)
+            } else {
+                showAlert("Git Pull Failed", details: result.output)
+            }
+        } else {
+            showAlert("No active session", details: "Open a tmux session first to run git commands.")
+        }
+    }
+
+    @objc private func gitPush(_ sender: NSMenuItem) {
+        NSApp.activate(ignoringOtherApps: true)
+        let sessions = listSessions()
+        if let firstSession = sessions.first {
+            let result = runProcess("/usr/bin/git", args: ["-C", firstSession.path, "push"])
+            if result.status == 0 {
+                showAlert("Git Push", details: result.output.isEmpty ? "Pushed successfully" : result.output)
+            } else {
+                showAlert("Git Push Failed", details: result.output)
+            }
+        } else {
+            showAlert("No active session", details: "Open a tmux session first to run git commands.")
+        }
     }
 
     private func focusAttachedClient(sessionName: String) -> Bool {
