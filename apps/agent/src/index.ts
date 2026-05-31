@@ -2054,6 +2054,10 @@ function nextReconnectDelay() {
 }
 
 function connect(validatedUrl: URL, token: string) {
+  // Store for network change detection
+  currentUrl = validatedUrl;
+  currentToken = token;
+
   const url = new URL(validatedUrl.toString());
   const wsOptions = {
     headers: { authorization: `Bearer ${token}` },
@@ -2325,6 +2329,22 @@ function connect(validatedUrl: URL, token: string) {
     console.error(`[${tag}] ${msg}`);
   });
 }
+
+// Network change detection for immediate reconnection
+let currentUrl: URL | null = null;
+let currentToken: string | null = null;
+
+process.on("online", () => {
+  console.log(`[${tag}] network connection restored; triggering immediate reconnection`);
+  if (currentUrl && currentToken) {
+    reconnectAttempts = 0; // Reset backoff on network restore
+    connect(currentUrl, currentToken);
+  }
+});
+
+process.on("offline", () => {
+  console.log(`[${tag}] network connection lost`);
+});
 
 const TLS_CERT_ERROR_CODES = new Set([
   "UNABLE_TO_GET_ISSUER_CERT",
