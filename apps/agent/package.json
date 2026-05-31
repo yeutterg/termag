@@ -20,7 +20,8 @@
   ],
   "bin": {
     "termag": "dist/index.js",
-    "termag-agent": "dist/index.js"
+    "termag-agent": "dist/index.js",
+    "termag-cli": "dist/cli.js"
   },
   "files": [
     "dist",
