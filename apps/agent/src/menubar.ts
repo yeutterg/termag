@@ -251,6 +251,11 @@ func connectionStatusEmoji() -> String {
     return status.connected ? "🟢" : "🟡"
 }
 
+// Session list caching to reduce tmux commands
+var cachedSessions: [TmuxSession] = []
+var cacheTimestamp: Date?
+let CACHE_VALIDITY_SECONDS: TimeInterval = 2.0
+
 // Italic ASCII banner + compact context block shown at the top of every
 // fresh shell tmux pane the menu helper spawns. Matches the TS
 // apps/agent/src/banner.ts output so the experience is the same whether
@@ -330,6 +335,7 @@ final class TermagStatusController: NSObject, NSApplicationDelegate, NSMenuDeleg
         NSApp.setActivationPolicy(.accessory)
 
         if let button = statusItem.button {
+            // Use SF Symbols on macOS 11+, fallback to text on older versions
             if #available(macOS 11.0, *) {
                 if let image = NSImage(systemSymbolName: "terminal", accessibilityDescription: "Termag") {
                     image.isTemplate = true
@@ -544,6 +550,11 @@ final class TermagStatusController: NSObject, NSApplicationDelegate, NSMenuDeleg
         if result.status != 0 {
             showAlert("Could not kill session \(sessionName).", details: result.output)
         }
+        
+        // Invalidate cache after killing session
+        cachedSessions = []
+        cacheTimestamp = nil
+        
         rebuildMenu()
     }
 
@@ -624,6 +635,11 @@ final class TermagStatusController: NSObject, NSApplicationDelegate, NSMenuDeleg
 
         _ = runTmux(["set-option", "-t", "=\(name)", "-w", "window-size", "largest"])
         _ = runTmux(["set-option", "-t", "=\(name)", "history-limit", "10000"])
+        
+        // Invalidate cache after creating session
+        cachedSessions = []
+        cacheTimestamp = nil
+        
         rebuildMenu()
     }
 
@@ -875,12 +891,19 @@ final class TermagStatusController: NSObject, NSApplicationDelegate, NSMenuDeleg
     }
 
     private func listSessions() -> [TmuxSession] {
+        // Check cache first
+        if let timestamp = cacheTimestamp,
+           Date().timeIntervalSince(timestamp) < CACHE_VALIDITY_SECONDS {
+            return cachedSessions
+        }
+        
+        // Cache miss or expired, fetch from tmux
         let result = runTmux(["list-sessions", "-F", "#{session_name}\t#{session_path}\t#{session_windows}\t#{session_attached}"])
         if result.status != 0 {
             return []
         }
 
-        return result.output
+        let sessions = result.output
             .split(separator: "\n", omittingEmptySubsequences: true)
             .compactMap { line in
                 let parts = line.split(separator: "\t", omittingEmptySubsequences: false).map(String.init)
@@ -896,6 +919,12 @@ final class TermagStatusController: NSObject, NSApplicationDelegate, NSMenuDeleg
             .sorted { left, right in
                 left.name.localizedCaseInsensitiveCompare(right.name) == .orderedAscending
             }
+        
+        // Update cache
+        cachedSessions = sessions
+        cacheTimestamp = Date()
+        
+        return sessions
     }
 
     private func listWindows(sessionName: String) -> [TmuxWindow] {

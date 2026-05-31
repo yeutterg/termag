@@ -25,6 +25,10 @@ const currentStatus: AgentStatus = {
   activeSessions: 0,
 };
 
+// Debounce status file writes to reduce I/O
+let writeTimeout: ReturnType<typeof setTimeout> | null = null;
+const WRITE_DEBOUNCE_MS = 500; // Debounce writes to 500ms
+
 /**
  * Initialize status file directory
  */
@@ -36,7 +40,7 @@ export function initStatusFile() {
 }
 
 /**
- * Update agent connection status
+ * Update agent connection status (debounced)
  */
 export function updateConnectionStatus(connected: boolean, brokerUrl: string) {
   const now = new Date().toISOString();
@@ -49,24 +53,24 @@ export function updateConnectionStatus(connected: boolean, brokerUrl: string) {
 
   currentStatus.connected = connected;
   currentStatus.brokerUrl = brokerUrl;
-  writeStatus();
+  debouncedWrite();
 }
 
 /**
- * Update current project context
+ * Update current project context (debounced)
  */
 export function updateProjectContext(project: string | null, branch: string | null) {
   currentStatus.currentProject = project;
   currentStatus.currentBranch = branch;
-  writeStatus();
+  debouncedWrite();
 }
 
 /**
- * Update active session count
+ * Update active session count (debounced)
  */
 export function updateActiveSessions(count: number) {
   currentStatus.activeSessions = count;
-  writeStatus();
+  debouncedWrite();
 }
 
 /**
@@ -77,9 +81,9 @@ export function getStatus(): AgentStatus {
 }
 
 /**
- * Write status to file for menubar to read
+ * Write status to file immediately (for shutdown)
  */
-function writeStatus() {
+export function writeStatusSync() {
   try {
     writeFileSync(STATUS_FILE, JSON.stringify(currentStatus, null, 2), { mode: 0o600 });
   } catch (err) {
@@ -88,9 +92,38 @@ function writeStatus() {
 }
 
 /**
+ * Debounced write to reduce I/O
+ */
+function debouncedWrite() {
+  if (writeTimeout) {
+    clearTimeout(writeTimeout);
+  }
+  writeTimeout = setTimeout(() => {
+    try {
+      writeFileSync(STATUS_FILE, JSON.stringify(currentStatus, null, 2), { mode: 0o600 });
+    } catch (err) {
+      // Silently fail - status file is optional
+    }
+    writeTimeout = null;
+  }, WRITE_DEBOUNCE_MS).unref();
+}
+
+/**
+ * Write status to file for menubar to read (legacy, kept for compatibility)
+ */
+function writeStatus() {
+  debouncedWrite();
+}
+
+/**
  * Clean up status file on shutdown
  */
 export function cleanupStatusFile() {
+  if (writeTimeout) {
+    clearTimeout(writeTimeout);
+  }
+  // Write final status before cleanup
+  writeStatusSync();
   try {
     if (existsSync(STATUS_FILE)) {
       unlinkSync(STATUS_FILE);
