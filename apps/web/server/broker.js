@@ -1870,6 +1870,30 @@ function createBroker({ prisma, wss }) {
         timeoutMs
       );
     },
+    async startCaffeinate(userId, deviceName, mode, reason, durationMs) {
+      if (!agentForUser(userId, deviceName)) {
+        throw new Error("Agent offline");
+      }
+      return sendToAgent(
+        userId,
+        deviceName,
+        "caffeinate-start",
+        { mode, reason, durationMs },
+        5000
+      );
+    },
+    async stopCaffeinate(userId, deviceName) {
+      if (!agentForUser(userId, deviceName)) {
+        throw new Error("Agent offline");
+      }
+      return sendToAgent(userId, deviceName, "caffeinate-stop", {}, 5000);
+    },
+    async getCaffeinateStatus(userId, deviceName) {
+      if (!agentForUser(userId, deviceName)) {
+        throw new Error("Agent offline");
+      }
+      return sendToAgent(userId, deviceName, "caffeinate-status", {}, 5000);
+    },
     killTmuxSession(userId, deviceName, tmuxSessionName, timeoutMs = 5000) {
       if (!tmuxSessionName || !agentForUser(userId, deviceName)) {
         return Promise.resolve(false);

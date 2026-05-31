@@ -47,6 +47,18 @@ type Broker = {
     workingDirectory?: string,
     timeoutMs?: number
   ) => Promise<{ output: string; exitCode: number }>;
+  startCaffeinate?: (
+    userId: string,
+    deviceName: string,
+    mode: "while-task" | "lid-closed" | "forever" | "timed",
+    reason: string,
+    durationMs?: number
+  ) => Promise<{ success: boolean; error?: string; state?: CaffeinateState }>;
+  stopCaffeinate?: (
+    userId: string,
+    deviceName: string
+  ) => Promise<{ success: boolean; error?: string; state?: CaffeinateState }>;
+  getCaffeinateStatus?: (userId: string, deviceName: string) => Promise<CaffeinateState | null>;
 };
 
 export type ConnectedDevice = {
@@ -66,6 +78,14 @@ export type ConnectedDevice = {
   // ssh hosts. The CLI uses this to construct the WS attach URL without
   // having to re-resolve the name on the server.
   deviceId?: string | null;
+};
+
+export type CaffeinateState = {
+  mode: string;
+  isActive: boolean;
+  reason: string | null;
+  startTime: string | null;
+  endTime: string | null;
 };
 
 export type DirectoryListing = {
@@ -256,4 +276,49 @@ export async function executeCommandOnDevice(
     throw new Error("Broker offline or does not support command execution");
   }
   return live.executeCommand(userId, deviceName, command, workingDirectory, timeoutMs);
+}
+
+/**
+ * Start caffeinate (prevent sleep) on a device
+ */
+export async function startCaffeinateOnDevice(
+  userId: string,
+  deviceName: string,
+  mode: "while-task" | "lid-closed" | "forever" | "timed",
+  reason: string,
+  durationMs?: number
+): Promise<{ success: boolean; error?: string; state?: CaffeinateState }> {
+  const live = broker();
+  if (!live?.startCaffeinate) {
+    throw new Error("Broker offline or does not support caffeinate");
+  }
+  return live.startCaffeinate(userId, deviceName, mode, reason, durationMs);
+}
+
+/**
+ * Stop caffeinate on a device
+ */
+export async function stopCaffeinateOnDevice(
+  userId: string,
+  deviceName: string
+): Promise<{ success: boolean; error?: string; state?: CaffeinateState }> {
+  const live = broker();
+  if (!live?.stopCaffeinate) {
+    throw new Error("Broker offline or does not support caffeinate");
+  }
+  return live.stopCaffeinate(userId, deviceName);
+}
+
+/**
+ * Get caffeinate status from a device
+ */
+export async function getCaffeinateStatusOnDevice(
+  userId: string,
+  deviceName: string
+): Promise<CaffeinateState | null> {
+  const live = broker();
+  if (!live?.getCaffeinateStatus) {
+    throw new Error("Broker offline or does not support caffeinate");
+  }
+  return live.getCaffeinateStatus(userId, deviceName);
 }
