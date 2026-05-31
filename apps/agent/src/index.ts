@@ -21,6 +21,7 @@ import {
 import { startMacMenuBar, stopMacMenuBar } from "./menubar";
 import { listDirectory } from "./fs";
 import { wrapWithBanner } from "./banner";
+import { initStatusFile, updateConnectionStatus, cleanupStatusFile } from "./agent-status";
 import {
   configPath,
   loadConfig,
@@ -1967,6 +1968,9 @@ async function run() {
   await preflightTmux();
   startMacMenuBar({ tag, agentVersion: pkgVersion, deviceName: Object.keys(roots)[0] });
 
+  // Initialize status file for menubar
+  initStatusFile();
+
   // Record this process as the live agent so future `termag connect`
   // invocations skip spawning a duplicate. Cleanup happens on shutdown +
   // on "replaced" close.
@@ -2081,6 +2085,7 @@ function connect(validatedUrl: URL, token: string) {
   ws.on("open", () => {
     reconnectAttempts = 0;
     lastPongAt = Date.now();
+    updateConnectionStatus(true, validatedUrl.toString());
     console.log(
       `[${tag}] connected to ${validatedUrl.origin}${validatedUrl.pathname} (v${pkgVersion})`
     );
@@ -2274,6 +2279,7 @@ function connect(validatedUrl: URL, token: string) {
 
   ws.on("close", (code: number, reason: Buffer | string) => {
     clearTimers();
+    updateConnectionStatus(false, "");
     // Tear down local stream readers — tmux sessions themselves stay alive
     // so the next agent connection can re-attach.
     for (const stream of [...streams.values()]) {
@@ -2782,6 +2788,7 @@ function shutdown() {
   streams.clear();
   stopMacMenuBar();
   removePidFile();
+  cleanupStatusFile();
   process.exit(0);
 }
 process.on("SIGINT", shutdown);

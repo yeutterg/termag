@@ -1,8 +1,8 @@
-import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
-import { existsSync, mkdirSync, statSync, writeFileSync } from 'node:fs';
-import os from 'node:os';
-import path from 'node:path';
-import { type AgentConfig, loadConfig } from './config';
+import { execFileSync, spawn, type ChildProcess } from "node:child_process";
+import { existsSync, mkdirSync, statSync, writeFileSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { type AgentConfig, loadConfig } from "./config";
 
 type StartMacMenuBarOptions = {
   tag: string;
@@ -14,22 +14,32 @@ let activeMenuBar: ChildProcess | null = null;
 
 const MAC_PATH = [
   process.env.PATH,
-  '/opt/homebrew/bin',
-  '/usr/local/bin',
-  '/usr/bin',
-  '/bin',
-  '/usr/sbin',
-  '/sbin'
-].filter(Boolean).join(':');
+  "/opt/homebrew/bin",
+  "/usr/local/bin",
+  "/usr/bin",
+  "/bin",
+  "/usr/sbin",
+  "/sbin",
+]
+  .filter(Boolean)
+  .join(":");
 
 export function startMacMenuBar(opts: StartMacMenuBarOptions): ChildProcess | null {
-  if (process.platform !== 'darwin') return null;
-  if (process.env.TERMAG_AGENT_FAKE === 'true') return null;
+  if (process.platform !== "darwin") {
+    return null;
+  }
+  if (process.env.TERMAG_AGENT_FAKE === "true") {
+    return null;
+  }
   const config = loadConfig();
-  if (!menuBarEnabled(config)) return null;
-  if (activeMenuBar && !activeMenuBar.killed) return activeMenuBar;
+  if (!menuBarEnabled(config)) {
+    return null;
+  }
+  if (activeMenuBar && !activeMenuBar.killed) {
+    return activeMenuBar;
+  }
 
-  const tmuxPath = resolveCommand('tmux');
+  const tmuxPath = resolveCommand("tmux");
   if (!tmuxPath) {
     console.warn(`[${opts.tag}] mac menu bar disabled: tmux not found.`);
     return null;
@@ -37,7 +47,9 @@ export function startMacMenuBar(opts: StartMacMenuBarOptions): ChildProcess | nu
 
   const scriptPath = writeMenuBarScript();
   const helperPath = compileMenuBarHelper(scriptPath, opts.tag);
-  if (!helperPath) return null;
+  if (!helperPath) {
+    return null;
+  }
 
   const child = spawn(
     helperPath,
@@ -45,13 +57,13 @@ export function startMacMenuBar(opts: StartMacMenuBarOptions): ChildProcess | nu
       String(process.pid),
       tmuxPath,
       terminalApp(config),
-      opts.agentVersion ?? '',
-      opts.deviceName ?? ''
+      opts.agentVersion ?? "",
+      opts.deviceName ?? "",
     ],
     {
       detached: false,
-      stdio: 'ignore',
-      env: { ...process.env, PATH: MAC_PATH }
+      stdio: "ignore",
+      env: { ...process.env, PATH: MAC_PATH },
     }
   );
 
@@ -59,15 +71,21 @@ export function startMacMenuBar(opts: StartMacMenuBarOptions): ChildProcess | nu
   child.unref();
 
   let startupWindow = true;
-  setTimeout(() => { startupWindow = false; }, 3000).unref();
-  child.on('error', (err) => {
-    if (activeMenuBar === child) activeMenuBar = null;
+  setTimeout(() => {
+    startupWindow = false;
+  }, 3000).unref();
+  child.on("error", err => {
+    if (activeMenuBar === child) {
+      activeMenuBar = null;
+    }
     console.warn(`[${opts.tag}] mac menu bar could not start: ${err.message}`);
   });
-  child.on('exit', (code, signal) => {
-    if (activeMenuBar === child) activeMenuBar = null;
-    if (startupWindow && code !== 0 && signal !== 'SIGTERM') {
-      const reason = signal ? `signal ${signal}` : `code ${code ?? 'unknown'}`;
+  child.on("exit", (code, signal) => {
+    if (activeMenuBar === child) {
+      activeMenuBar = null;
+    }
+    if (startupWindow && code !== 0 && signal !== "SIGTERM") {
+      const reason = signal ? `signal ${signal}` : `code ${code ?? "unknown"}`;
       console.warn(`[${opts.tag}] mac menu bar exited during startup (${reason}).`);
     }
   });
@@ -76,9 +94,11 @@ export function startMacMenuBar(opts: StartMacMenuBarOptions): ChildProcess | nu
 }
 
 export function stopMacMenuBar() {
-  if (!activeMenuBar) return;
+  if (!activeMenuBar) {
+    return;
+  }
   try {
-    activeMenuBar.kill('SIGTERM');
+    activeMenuBar.kill("SIGTERM");
   } catch {
     // Already gone.
   }
@@ -86,41 +106,59 @@ export function stopMacMenuBar() {
 }
 
 function menuBarEnabled(config: AgentConfig) {
-  if (process.env.TERMAG_NO_MENUBAR === 'true') return false;
-  if (process.env.TERMAG_MAC_MENUBAR === 'false') return false;
-  if (process.env.TERMAG_MAC_MENUBAR === 'true') return true;
-  if (typeof config.menuBar?.enabled === 'boolean') return config.menuBar.enabled;
-  if (typeof config.macMenuBar === 'boolean') return config.macMenuBar;
+  if (process.env.TERMAG_NO_MENUBAR === "true") {
+    return false;
+  }
+  if (process.env.TERMAG_MAC_MENUBAR === "false") {
+    return false;
+  }
+  if (process.env.TERMAG_MAC_MENUBAR === "true") {
+    return true;
+  }
+  if (typeof config.menuBar?.enabled === "boolean") {
+    return config.menuBar.enabled;
+  }
+  if (typeof config.macMenuBar === "boolean") {
+    return config.macMenuBar;
+  }
   return false;
 }
 
 function terminalApp(config: AgentConfig) {
   return (
-    process.env.TERMAG_TERMINAL_APP?.trim()
-    || config.menuBar?.terminalApp?.trim()
-    || config.terminalApp?.trim()
-    || terminalAppFromTermProgram()
-    || 'Terminal'
+    process.env.TERMAG_TERMINAL_APP?.trim() ||
+    config.menuBar?.terminalApp?.trim() ||
+    config.terminalApp?.trim() ||
+    terminalAppFromTermProgram() ||
+    "Terminal"
   );
 }
 
 function terminalAppFromTermProgram() {
   const value = process.env.TERM_PROGRAM?.toLowerCase();
-  if (value === 'apple_terminal') return 'Terminal';
-  if (value === 'iterm.app' || value === 'iterm2') return 'iTerm2';
-  if (value === 'ghostty') return 'Ghostty';
-  return '';
+  if (value === "apple_terminal") {
+    return "Terminal";
+  }
+  if (value === "iterm.app" || value === "iterm2") {
+    return "iTerm2";
+  }
+  if (value === "ghostty") {
+    return "Ghostty";
+  }
+  return "";
 }
 
-function resolveCommand(command: 'swiftc' | 'tmux'): string | null {
-  const knownPath = command === 'swiftc' ? '/usr/bin/swiftc' : '';
-  if (knownPath && existsSync(knownPath)) return knownPath;
+function resolveCommand(command: "swiftc" | "tmux"): string | null {
+  const knownPath = command === "swiftc" ? "/usr/bin/swiftc" : "";
+  if (knownPath && existsSync(knownPath)) {
+    return knownPath;
+  }
 
   try {
-    const stdout = execFileSync('/bin/sh', ['-lc', `command -v ${command}`], {
-      encoding: 'utf8',
+    const stdout = execFileSync("/bin/sh", ["-lc", `command -v ${command}`], {
+      encoding: "utf8",
       env: { ...process.env, PATH: MAC_PATH },
-      timeout: 2000
+      timeout: 2000,
     }).trim();
     return stdout || null;
   } catch {
@@ -129,39 +167,47 @@ function resolveCommand(command: 'swiftc' | 'tmux'): string | null {
 }
 
 function expandHome(value: string) {
-  if (value === '~') return os.homedir();
-  if (value.startsWith('~/')) return path.join(os.homedir(), value.slice(2));
+  if (value === "~") {
+    return os.homedir();
+  }
+  if (value.startsWith("~/")) {
+    return path.join(os.homedir(), value.slice(2));
+  }
   return value;
 }
 
 function writeMenuBarScript() {
-  const dir = path.join(os.homedir(), '.termag');
+  const dir = path.join(os.homedir(), ".termag");
   mkdirSync(dir, { recursive: true, mode: 0o700 });
-  const scriptPath = path.join(dir, 'termag-menubar.swift');
+  const scriptPath = path.join(dir, "termag-menubar.swift");
   writeFileSync(scriptPath, MAC_MENU_BAR_SWIFT, { mode: 0o600 });
   return scriptPath;
 }
 
 function compileMenuBarHelper(scriptPath: string, tag: string): string | null {
-  const swiftcPath = resolveCommand('swiftc');
+  const swiftcPath = resolveCommand("swiftc");
   if (!swiftcPath) {
-    console.warn(`[${tag}] mac menu bar disabled: swiftc not found. Install Xcode Command Line Tools, or set TERMAG_MAC_MENUBAR=false.`);
+    console.warn(
+      `[${tag}] mac menu bar disabled: swiftc not found. Install Xcode Command Line Tools, or set TERMAG_MAC_MENUBAR=false.`
+    );
     return null;
   }
 
-  const helperPath = path.join(os.homedir(), '.termag', 'termag-menubar');
+  const helperPath = path.join(os.homedir(), ".termag", "termag-menubar");
   try {
     const scriptStat = statSync(scriptPath);
     const helperStat = existsSync(helperPath) ? statSync(helperPath) : null;
     if (!helperStat || helperStat.mtimeMs < scriptStat.mtimeMs) {
-      execFileSync(swiftcPath, [scriptPath, '-o', helperPath], {
+      execFileSync(swiftcPath, [scriptPath, "-o", helperPath], {
         env: { ...process.env, PATH: MAC_PATH },
-        timeout: 60_000
+        timeout: 60_000,
       });
     }
     return helperPath;
   } catch (err) {
-    console.warn(`[${tag}] mac menu bar disabled: could not compile helper: ${err instanceof Error ? err.message : String(err)}`);
+    console.warn(
+      `[${tag}] mac menu bar disabled: could not compile helper: ${err instanceof Error ? err.message : String(err)}`
+    );
     return null;
   }
 }
@@ -177,6 +223,33 @@ let tmuxPath = commandArgs.count > 2 ? commandArgs[2] : "/usr/bin/tmux"
 let requestedTerminalApp = commandArgs.count > 3 ? commandArgs[3] : "Terminal"
 let agentVersion = commandArgs.count > 4 ? commandArgs[4] : ""
 let agentDeviceName = commandArgs.count > 5 ? commandArgs[5] : ""
+
+// Agent status tracking
+struct AgentStatus: Codable {
+    let connected: Bool
+    let brokerUrl: String
+    let currentProject: String?
+    let currentBranch: String?
+    let activeSessions: Int
+}
+
+func readAgentStatus() -> AgentStatus? {
+    let homeDir = FileManager.default.homeDirectoryForCurrentUser
+    let statusFile = homeDir.appendingPathComponent(".termag").appendingPathComponent("agent-status.json")
+    
+    guard let data = try? Data(contentsOf: statusFile),
+          let status = try? JSONDecoder().decode(AgentStatus.self, from: data) else {
+        return nil
+    }
+    return status
+}
+
+func connectionStatusEmoji() -> String {
+    guard let status = readAgentStatus() else {
+        return "🔴"
+    }
+    return status.connected ? "🟢" : "🟡"
+}
 
 // Italic ASCII banner + compact context block shown at the top of every
 // fresh shell tmux pane the menu helper spawns. Matches the TS
@@ -289,9 +362,34 @@ final class TermagStatusController: NSObject, NSApplicationDelegate, NSMenuDeleg
     private func rebuildMenu() {
         menu.removeAllItems()
 
-        let title = NSMenuItem(title: "Termag", action: nil, keyEquivalent: "")
+        let statusEmoji = connectionStatusEmoji()
+        let statusText = statusEmoji + " Termag"
+        
+        let title = NSMenuItem(title: statusText, action: nil, keyEquivalent: "")
         title.isEnabled = false
         menu.addItem(title)
+
+        // Show project and branch if available
+        if let status = readAgentStatus() {
+            var contextParts: [String] = []
+            if let project = status.currentProject {
+                contextParts.append("Project: \(project)")
+            }
+            if let branch = status.currentBranch {
+                contextParts.append("Branch: \(branch)")
+            }
+            if status.activeSessions > 0 {
+                contextParts.append("\(status.activeSessions) session\(status.activeSessions == 1 ? "" : "s")")
+            }
+            
+            if !contextParts.isEmpty {
+                let contextItem = NSMenuItem(title: contextParts.joined(separator: " · "), action: nil, keyEquivalent: "")
+                contextItem.isEnabled = false
+                menu.addItem(contextItem)
+            }
+        }
+
+        menu.addItem(NSMenuItem.separator())
 
         let create = NSMenuItem(title: "New tmux Session...", action: #selector(createSession(_:)), keyEquivalent: "n")
         create.target = self
