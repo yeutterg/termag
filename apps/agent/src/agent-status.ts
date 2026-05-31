@@ -10,6 +10,11 @@ export interface AgentStatus {
   currentProject: string | null;
   currentBranch: string | null;
   activeSessions: number;
+  caffeinate: {
+    mode: string;
+    isActive: boolean;
+    reason: string | null;
+  };
 }
 
 const STATUS_DIR = os.join(homedir(), ".termag");
@@ -23,6 +28,11 @@ const currentStatus: AgentStatus = {
   currentProject: null,
   currentBranch: null,
   activeSessions: 0,
+  caffeinate: {
+    mode: "disabled",
+    isActive: false,
+    reason: null,
+  },
 };
 
 // Debounce status file writes to reduce I/O
@@ -70,6 +80,18 @@ export function updateProjectContext(project: string | null, branch: string | nu
  */
 export function updateActiveSessions(count: number) {
   currentStatus.activeSessions = count;
+  debouncedWrite();
+}
+
+/**
+ * Update caffeinate state (debounced)
+ */
+export function updateCaffeinateState(mode: string, isActive: boolean, reason: string | null) {
+  currentStatus.caffeinate = {
+    mode,
+    isActive,
+    reason,
+  };
   debouncedWrite();
 }
 

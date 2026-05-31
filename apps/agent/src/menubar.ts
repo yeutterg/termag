@@ -231,6 +231,13 @@ struct AgentStatus: Codable {
     let currentProject: String?
     let currentBranch: String?
     let activeSessions: Int
+    let caffeinate: CaffeinateState
+}
+
+struct CaffeinateState: Codable {
+    let mode: String
+    let isActive: Bool
+    let reason: String?
 }
 
 func readAgentStatus() -> AgentStatus? {
@@ -249,6 +256,13 @@ func connectionStatusEmoji() -> String {
         return "🔴"
     }
     return status.connected ? "🟢" : "🟡"
+}
+
+func caffeinateStatusEmoji() -> String {
+    guard let status = readAgentStatus() else {
+        return ""
+    }
+    return status.caffeinate.isActive ? "☕️" : ""
 }
 
 // Session list caching to reduce tmux commands
@@ -413,6 +427,53 @@ final class TermagStatusController: NSObject, NSApplicationDelegate, NSMenuDeleg
             gitPushItem.target = self
             gitPushItem.isEnabled = true
             menu.addItem(gitPushItem)
+        }
+
+        menu.addItem(NSMenuItem.separator())
+
+        // Caffeinate Controls
+        if let status = readAgentStatus() {
+            let caffeineEmoji = caffeinateStatusEmoji()
+            let caffeinateTitle = caffeineEmoji.isEmpty ? "Prevent Sleep" : "☕️ Prevent Sleep (Active)"
+            
+            if status.caffeinate.isActive {
+                let stopCaffeinateItem = NSMenuItem(title: "Stop Preventing Sleep", action: #selector(stopCaffeinate(_:)), keyEquivalent: "c")
+                stopCaffeinateItem.target = self
+                stopCaffeinateItem.isEnabled = true
+                menu.addItem(stopCaffeinateItem)
+                
+                if let reason = status.caffeinate.reason {
+                    let reasonItem = NSMenuItem(title: "  \(reason)", action: nil, keyEquivalent: "")
+                    reasonItem.isEnabled = false
+                    menu.addItem(reasonItem)
+                }
+            } else {
+                let caffeinateMenu = NSMenu()
+                
+                let whileTaskItem = NSMenuItem(title: "While Task Runs", action: #selector(startCaffeinateWhileTask(_:)), keyEquivalent: "")
+                whileTaskItem.target = self
+                whileTaskItem.isEnabled = true
+                caffeinateMenu.addItem(whileTaskItem)
+                
+                let lidClosedItem = NSMenuItem(title: "Even with Lid Closed", action: #selector(startCaffeinateLidClosed(_:)), keyEquivalent: "")
+                lidClosedItem.target = self
+                lidClosedItem.isEnabled = true
+                caffeinateMenu.addItem(lidClosedItem)
+                
+                let foreverItem = NSMenuItem(title: "Forever", action: #selector(startCaffeinateForever(_:)), keyEquivalent: "")
+                foreverItem.target = self
+                foreverItem.isEnabled = true
+                caffeinateMenu.addItem(foreverItem)
+                
+                let timedItem = NSMenuItem(title: "For 1 Hour", action: #selector(startCaffeinate1Hour(_:)), keyEquivalent: "")
+                timedItem.target = self
+                timedItem.isEnabled = true
+                caffeinateMenu.addItem(timedItem)
+                
+                let caffeinateItem = NSMenuItem(title: caffeinateTitle, action: nil, keyEquivalent: "")
+                caffeinateItem.submenu = caffeinateMenu
+                menu.addItem(caffeinateItem)
+            }
         }
 
         menu.addItem(NSMenuItem.separator())
@@ -688,6 +749,52 @@ final class TermagStatusController: NSObject, NSApplicationDelegate, NSMenuDeleg
             }
         } else {
             showAlert("No active session", details: "Open a tmux session first to run git commands.")
+        }
+    }
+
+    @objc private func stopCaffeinate(_ sender: NSMenuItem) {
+        // Kill caffeinate process
+        let result = runProcess("/usr/bin/pkill", args: ["-9", "caffeinate"])
+        if result.status == 0 {
+            showAlert("Sleep Prevention Stopped", details: "System can now sleep normally")
+        } else {
+            showAlert("No active sleep prevention", details: "Caffeinate was not running")
+        }
+    }
+
+    @objc private func startCaffeinateWhileTask(_ sender: NSMenuItem) {
+        let result = runProcess("/usr/bin/caffeinate", args: ["-d", "-u", "-s"])
+        if result.status == 0 {
+            showAlert("Sleep Prevention Started", details: "System will stay awake while this process runs")
+        } else {
+            showAlert("Failed to start sleep prevention", details: result.output)
+        }
+    }
+
+    @objc private func startCaffeinateLidClosed(_ sender: NSMenuItem) {
+        let result = runProcess("/usr/bin/caffeinate", args: ["-d", "-u", "-s", "-i"])
+        if result.status == 0 {
+            showAlert("Sleep Prevention Started", details: "System will stay awake even with lid closed")
+        } else {
+            showAlert("Failed to start sleep prevention", details: result.output)
+        }
+    }
+
+    @objc private func startCaffeinateForever(_ sender: NSMenuItem) {
+        let result = runProcess("/usr/bin/caffeinate", args: ["-d", "-u", "-s", "-w", "caffeinate"])
+        if result.status == 0 {
+            showAlert("Sleep Prevention Started", details: "System will stay awake until manually stopped")
+        } else {
+            showAlert("Failed to start sleep prevention", details: result.output)
+        }
+    }
+
+    @objc private func startCaffeinate1Hour(_ sender: NSMenuItem) {
+        let result = runProcess("/usr/bin/caffeinate", args: ["-d", "-u", "-s", "-t", "3600"])
+        if result.status == 0 {
+            showAlert("Sleep Prevention Started", details: "System will stay awake for 1 hour")
+        } else {
+            showAlert("Failed to start sleep prevention", details: result.output)
         }
     }
 

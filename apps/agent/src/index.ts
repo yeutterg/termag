@@ -21,7 +21,18 @@ import {
 import { startMacMenuBar, stopMacMenuBar } from "./menubar";
 import { listDirectory } from "./fs";
 import { wrapWithBanner } from "./banner";
-import { initStatusFile, updateConnectionStatus, cleanupStatusFile } from "./agent-status";
+import {
+  initStatusFile,
+  updateConnectionStatus,
+  cleanupStatusFile,
+  updateCaffeinateState,
+} from "./agent-status";
+import {
+  startCaffeinate,
+  stopCaffeinate,
+  getCaffeinateState,
+  cleanupCaffeinate,
+} from "./caffeinate";
 import {
   configPath,
   loadConfig,
@@ -2269,6 +2280,34 @@ function connect(validatedUrl: URL, token: string) {
           }
           break;
         }
+        case "caffeinate-start": {
+          const mode = String(msg.mode || "while-task");
+          const reason = String(msg.reason || "User request");
+          const durationMs = typeof msg.durationMs === "number" ? msg.durationMs : undefined;
+
+          const result = startCaffeinate(mode as any, reason, durationMs);
+          updateCaffeinateState(mode, result.success, reason);
+          respond(ws, requestId, {
+            success: result.success,
+            error: result.error,
+            state: getCaffeinateState(),
+          });
+          break;
+        }
+        case "caffeinate-stop": {
+          const result = stopCaffeinate();
+          updateCaffeinateState("disabled", false, null);
+          respond(ws, requestId, {
+            success: result.success,
+            error: result.error,
+            state: getCaffeinateState(),
+          });
+          break;
+        }
+        case "caffeinate-status": {
+          respond(ws, requestId, { state: getCaffeinateState() });
+          break;
+        }
         default:
           if (requestId) {
             respond(ws, requestId, null, `Unknown command: ${type}`);
@@ -2808,6 +2847,7 @@ function shutdown() {
   streams.clear();
   stopMacMenuBar();
   removePidFile();
+  cleanupCaffeinate();
   cleanupStatusFile();
   process.exit(0);
 }
