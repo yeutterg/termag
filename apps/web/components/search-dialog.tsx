@@ -10,6 +10,8 @@ interface SearchDialogProps {
   onSearch?: (query: string) => void;
   onReplace?: (search: string, replace: string) => void;
   mode?: "search" | "replace";
+  sessionId: string;
+  workingDirectory?: string;
   className?: string;
 }
 
@@ -19,6 +21,8 @@ export function SearchDialog({
   onSearch,
   onReplace,
   mode = "search",
+  _sessionId,
+  _workingDirectory,
   className,
 }: SearchDialogProps) {
   const [query, setQuery] = useState("");

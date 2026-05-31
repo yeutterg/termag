@@ -27,7 +27,6 @@ import {
   GitFork,
   RefreshCw,
   Maximize2,
-  Minimize2,
   Layout,
   Pin,
   Download,
@@ -41,10 +40,7 @@ import {
   Monitor,
   Sidebar,
   Square,
-  ChevronRight,
-  ChevronDown,
   GitMerge,
-  CheckSquare,
   Type,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -303,6 +299,8 @@ export function useCommandPalette(_commands: Command[]) {
 
 // Pre-configured command sets for termag
 export function getTermagCommands(options: {
+  sessionId: string;
+  workingDirectory?: string;
   // Project Management
   onCreateProject?: () => void;
   onNewSession?: () => void;
@@ -383,6 +381,8 @@ export function getTermagCommands(options: {
   onOpenHelp?: () => void;
 }): Command[] {
   const {
+    _sessionId,
+    _workingDirectory,
     // Project Management
     onCreateProject,
     onNewSession,
