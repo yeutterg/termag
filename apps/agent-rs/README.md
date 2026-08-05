@@ -31,8 +31,15 @@ Power modes are `off`, `terminals-awake` (`caffeinate -i`), `display-awake` (`ca
 
 ## Footprint targets
 
-- stripped release binary: at most 15 MiB (1.0 MiB measured on Apple Silicon)
+- stripped release binary: at most 15 MiB (1.2 MiB measured on Apple Silicon)
 - idle RSS: at most 20 MiB (6.8 MiB measured while connected with a live HerdR session)
 - idle CPU: below 0.5% when runtimes are quiet; active HerdR event mirroring scales with real state changes
 
-CI builds and tests on macOS and Linux and enforces the binary-size ceiling.
+Inventory collection, runtime mutations, and power commands run on their own
+tasks, so a slow `tmux` or HerdR call cannot stall terminal output, health, or
+WebSocket keepalives. The tmux poll backs off geometrically (to a 60s ceiling)
+while nothing changes and snaps back to `inventoryIntervalMs` on the first
+change, so a quiet machine stops spawning `tmux list-panes` every few seconds.
+
+CI builds and tests on macOS and Linux with `--locked` and enforces the
+binary-size ceiling.

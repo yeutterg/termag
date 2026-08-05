@@ -39,24 +39,30 @@ pub fn resolve_creation_path(
     relative: &str,
 ) -> Result<PathBuf> {
     reject_relative_traversal(relative)?;
-    let candidate = if let Some(key) = root_key {
-        if Path::new(relative).is_absolute() {
-            bail!("path must be relative to the selected root");
-        }
-        let root = config
+    // An absolute path is never accepted from the wire. Previously the
+    // rootless branch passed one straight through, so omitting `rootKey`
+    // was a strictly weaker path than supplying it — the allowlist was the
+    // only remaining check. Resolve rootless requests against the default
+    // root instead so both branches enforce the same containment.
+    if Path::new(relative).is_absolute() {
+        bail!("path must be relative to a configured root");
+    }
+    let root = match root_key {
+        Some(key) => config
             .roots
             .get(key)
-            .with_context(|| format!("unknown root {key:?}"))?;
-        root.join(relative)
-    } else {
-        PathBuf::from(relative)
+            .with_context(|| format!("unknown root {key:?}"))?,
+        None => config
+            .roots
+            .values()
+            .next()
+            .context("no directory roots are configured")?,
     };
+    let candidate = root.join(relative);
     let canonical_parent = canonicalize_with_missing_leaf(&candidate)?;
-    if let Some(key) = root_key {
-        let root = fs::canonicalize(config.roots.get(key).context("unknown root")?)?;
-        if canonical_parent != root && !canonical_parent.starts_with(&root) {
-            bail!("path escapes root {key:?}");
-        }
+    let canonical_root = fs::canonicalize(root)?;
+    if canonical_parent != canonical_root && !canonical_parent.starts_with(&canonical_root) {
+        bail!("path escapes root {:?}", root_key.unwrap_or("(default)"));
     }
     ensure_allowed(config, &canonical_parent)?;
     // Pass the canonicalized path to HerdR/tmux. Returning the original

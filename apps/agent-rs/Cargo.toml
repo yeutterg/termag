@@ -22,6 +22,10 @@ tokio-tungstenite = { version = "0.26", features = ["rustls-tls-native-roots"] }
 [profile.release]
 codegen-units = 1
 lto = true
-opt-level = "z"
+# "s" rather than "z": this daemon spends its time copying terminal bytes and
+# decoding tmux control output, and "z" additionally disables loop
+# vectorization for a fraction of a MiB against a 15 MiB ceiling the binary
+# clears by an order of magnitude.
+opt-level = "s"
 panic = "abort"
 strip = true

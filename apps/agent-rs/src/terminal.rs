@@ -79,15 +79,52 @@ enum StreamCommand {
 }
 
 #[derive(Debug)]
-pub enum StreamEvent {
-    Data {
-        target: Target,
-        bytes: Vec<u8>,
-        full: bool,
-    },
-    Gap(Target),
-    Exit(Target),
-    Controller(Target, bool),
+pub struct StreamEvent {
+    target: Target,
+    generation: u64,
+    kind: StreamEventKind,
+}
+
+#[derive(Debug)]
+enum StreamEventKind {
+    Data { bytes: Vec<u8>, full: bool },
+    Gap,
+    Exit,
+    Controller(bool),
+}
+
+/// Binds a runtime task to the exact `SharedStream` that spawned it. A task
+/// briefly outlives its registry entry when the last viewer detaches, so a
+/// detach immediately followed by a re-attach to the same target leaves a
+/// stale `Exit` queued. Without this tag that `Exit` tears down the freshly
+/// created stream and the reconnecting browser sees a dead terminal.
+#[derive(Clone)]
+struct EventSink {
+    events: mpsc::Sender<StreamEvent>,
+    target: Target,
+    generation: u64,
+}
+
+impl EventSink {
+    fn target(&self) -> &Target {
+        &self.target
+    }
+
+    fn wrap(&self, kind: StreamEventKind) -> StreamEvent {
+        StreamEvent {
+            target: self.target.clone(),
+            generation: self.generation,
+            kind,
+        }
+    }
+
+    fn try_send(&self, kind: StreamEventKind) -> bool {
+        self.events.try_send(self.wrap(kind)).is_ok()
+    }
+
+    async fn send(&self, kind: StreamEventKind) {
+        let _ = self.events.send(self.wrap(kind)).await;
+    }
 }
 
 pub enum Outbound {
@@ -101,6 +138,11 @@ pub enum Outbound {
 }
 
 pub const MAX_TERMINAL_DATA_BYTES: usize = 240 * 1024;
+
+// A runtime task stops polling its command queue while it captures a
+// checkpoint (bounded at 5s). Size the queue so an ordinary paste still fits
+// in that window rather than being rejected as backpressure.
+const COMMAND_QUEUE_DEPTH: usize = 256;
 
 pub fn next_terminal_sequence(sequence: u32) -> u32 {
     sequence.wrapping_add(1).max(1)
@@ -131,6 +173,13 @@ struct SharedStream {
     tx: mpsc::Sender<StreamCommand>,
     subscribers: HashMap<String, Subscriber>,
     driver: Option<String>,
+    // The stream id every binary frame for this target is tagged with. The
+    // broker resolves it to a session and fans the bytes out to all viewers,
+    // so it must stay put while its subscriber is attached: re-picking an
+    // arbitrary `subscribers` key per event can name a viewer the broker has
+    // already dropped, and the broker discards those frames for *everyone*.
+    anchor: String,
+    generation: u64,
     cols: u16,
     rows: u16,
     sequence: u32,
@@ -142,6 +191,7 @@ pub struct Registry {
     by_stream: HashMap<String, Target>,
     event_tx: mpsc::Sender<StreamEvent>,
     event_rx: mpsc::Receiver<StreamEvent>,
+    next_generation: u64,
 }
 
 impl Registry {
@@ -155,10 +205,15 @@ impl Registry {
             by_stream: HashMap::new(),
             event_tx,
             event_rx,
+            next_generation: 0,
         }
     }
 
-    pub async fn attach(
+    // Every method below is deliberately synchronous. The registry only ever
+    // hands work to per-target tasks over bounded queues, so an unresponsive
+    // runtime must never be able to stall the connection's select loop (which
+    // also drives terminal output, health, and WebSocket pings).
+    pub fn attach(
         &mut self,
         stream_id: String,
         target: Target,
@@ -167,20 +222,25 @@ impl Registry {
         read_only: bool,
         request_checkpoint: bool,
     ) -> Result<Vec<Value>> {
-        self.close(&stream_id).await;
+        self.close(&stream_id);
         let already_streaming = self.targets.contains_key(&target);
         if !already_streaming {
-            let (tx, rx) = mpsc::channel(16);
-            let events = self.event_tx.clone();
-            let spawn_target = target.clone();
+            let (tx, rx) = mpsc::channel(COMMAND_QUEUE_DEPTH);
+            self.next_generation += 1;
+            let sink = EventSink {
+                events: self.event_tx.clone(),
+                target: target.clone(),
+                generation: self.next_generation,
+            };
+            let spawn_sink = sink.clone();
             tokio::spawn(async move {
-                let result = if spawn_target.runtime == "herdr" {
-                    run_herdr(spawn_target.clone(), cols, rows, rx, events.clone()).await
+                let result = if spawn_sink.target().runtime == "herdr" {
+                    run_herdr(spawn_sink.clone(), cols, rows, rx).await
                 } else {
-                    run_tmux(spawn_target.clone(), cols, rows, rx, events.clone()).await
+                    run_tmux(spawn_sink.clone(), cols, rows, rx).await
                 };
                 if result.is_err() {
-                    let _ = events.send(StreamEvent::Exit(spawn_target)).await;
+                    spawn_sink.send(StreamEventKind::Exit).await;
                 }
             });
             self.targets.insert(
@@ -189,6 +249,8 @@ impl Registry {
                     tx,
                     subscribers: HashMap::new(),
                     driver: None,
+                    anchor: stream_id.clone(),
+                    generation: sink.generation,
                     cols,
                     rows,
                     sequence: 0,
@@ -206,33 +268,42 @@ impl Registry {
                 last_input: Instant::now() - Duration::from_secs(60),
             },
         );
+        if !shared.subscribers.contains_key(&shared.anchor) {
+            shared.anchor = stream_id.clone();
+        }
         self.by_stream.insert(stream_id.clone(), target.clone());
         if already_streaming && request_checkpoint {
-            let _ = shared.tx.send(StreamCommand::Checkpoint).await;
+            let _ = shared.tx.try_send(StreamCommand::Checkpoint);
         }
-        self.resize_target(&target).await;
+        self.resize_target(&target);
         Ok(self.driver_messages(&target))
     }
 
-    pub async fn input(&mut self, stream_id: &str, data: Vec<u8>) {
+    pub fn input(&mut self, stream_id: &str, data: Vec<u8>) -> Result<()> {
         let Some(target) = self.by_stream.get(stream_id).cloned() else {
-            return;
+            return Ok(());
         };
         let Some(shared) = self.targets.get_mut(&target) else {
-            return;
+            return Ok(());
         };
         let Some(subscriber) = shared.subscribers.get_mut(stream_id) else {
-            return;
+            return Ok(());
         };
         if subscriber.read_only || shared.driver.as_deref() != Some(stream_id) {
-            return;
+            return Ok(());
         }
         subscriber.last_input = Instant::now();
-        let tx = shared.tx.clone();
-        let _ = tx.send(StreamCommand::Input(data)).await;
+        // A full queue means the runtime task has not drained a deep buffer,
+        // which in practice only happens while it is blocked mid-checkpoint.
+        // Report it instead of awaiting: silently reordering the keystroke
+        // behind later input would be worse than an explicit failure.
+        if shared.tx.try_send(StreamCommand::Input(data)).is_err() {
+            bail!("terminal is not accepting input right now");
+        }
+        Ok(())
     }
 
-    pub async fn resize(&mut self, stream_id: &str, cols: u16, rows: u16) {
+    pub fn resize(&mut self, stream_id: &str, cols: u16, rows: u16) {
         let Some(target) = self.by_stream.get(stream_id).cloned() else {
             return;
         };
@@ -244,10 +315,10 @@ impl Registry {
             subscriber.cols = cols;
             subscriber.rows = rows;
         }
-        self.resize_target(&target).await;
+        self.resize_target(&target);
     }
 
-    pub async fn claim(&mut self, stream_id: &str) -> Vec<Value> {
+    pub fn claim(&mut self, stream_id: &str) -> Vec<Value> {
         let Some(target) = self.by_stream.get(stream_id).cloned() else {
             return Vec::new();
         };
@@ -267,42 +338,44 @@ impl Registry {
             shared.rows = subscriber.rows;
             subscriber.last_input = Instant::now();
         }
-        let tx = shared.tx.clone();
-        let _ = tx
-            .send(StreamCommand::Resize(shared.cols, shared.rows))
-            .await;
+        let _ = shared
+            .tx
+            .try_send(StreamCommand::Resize(shared.cols, shared.rows));
         if target.runtime == "herdr" {
-            let _ = tx.send(StreamCommand::TakeControl).await;
+            let _ = shared.tx.try_send(StreamCommand::TakeControl);
         }
         self.driver_messages(&target)
     }
 
-    pub async fn close(&mut self, stream_id: &str) {
+    pub fn close(&mut self, stream_id: &str) {
         let Some(target) = self.by_stream.remove(stream_id) else {
             return;
         };
-        let mut stop = None;
-        let mut release = None;
+        let mut stop = false;
         if let Some(shared) = self.targets.get_mut(&target) {
             shared.subscribers.remove(stream_id);
             if shared.driver.as_deref() == Some(stream_id) {
                 shared.driver = None;
                 if target.runtime == "herdr" && !shared.subscribers.is_empty() {
-                    release = Some(shared.tx.clone());
+                    let _ = shared.tx.try_send(StreamCommand::ReleaseControl);
                 }
             }
-            if shared.subscribers.is_empty() {
-                stop = Some(shared.tx.clone());
+            if shared.anchor == stream_id {
+                if let Some(next) = shared.subscribers.keys().next().cloned() {
+                    shared.anchor = next;
+                }
             }
+            stop = shared.subscribers.is_empty();
         }
-        if let Some(tx) = stop {
-            let _ = tx.send(StreamCommand::Stop).await;
-            self.targets.remove(&target);
-        } else if let Some(tx) = release {
-            let _ = tx.send(StreamCommand::ReleaseControl).await;
-            self.resize_target(&target).await;
+        if stop {
+            // Dropping the SharedStream closes the command channel, which the
+            // runtime task treats exactly like an explicit Stop. Removing the
+            // entry is therefore sufficient even if the queue is saturated.
+            if let Some(shared) = self.targets.remove(&target) {
+                let _ = shared.tx.try_send(StreamCommand::Stop);
+            }
         } else {
-            self.resize_target(&target).await;
+            self.resize_target(&target);
         }
     }
 
@@ -311,18 +384,30 @@ impl Registry {
     }
 
     pub fn handle_event(&mut self, event: StreamEvent) -> Vec<Outbound> {
-        match event {
-            StreamEvent::Data {
-                target,
-                bytes,
-                full,
-            } => {
+        let StreamEvent {
+            target,
+            generation,
+            kind,
+        } = event;
+        // Drop anything emitted by a task whose registry entry has already
+        // been replaced. Its Exit would otherwise close the terminal that just
+        // re-attached to the same pane.
+        if self
+            .targets
+            .get(&target)
+            .is_none_or(|shared| shared.generation != generation)
+        {
+            return Vec::new();
+        }
+        match kind {
+            StreamEventKind::Data { bytes, full } => {
                 let Some(shared) = self.targets.get_mut(&target) else {
                     return Vec::new();
                 };
-                let Some(stream_id) = shared.subscribers.keys().next() else {
+                if !shared.subscribers.contains_key(&shared.anchor) {
                     return Vec::new();
-                };
+                }
+                let stream_id = &shared.anchor;
                 let checkpoint = full || !shared.saw_output;
                 shared.saw_output = true;
                 let first_sequence = next_terminal_sequence(shared.sequence);
@@ -339,7 +424,7 @@ impl Registry {
                     bytes,
                 }]
             }
-            StreamEvent::Controller(target, controlled) => {
+            StreamEventKind::Controller(controlled) => {
                 if !controlled {
                     if let Some(shared) = self.targets.get_mut(&target) {
                         shared.driver = None;
@@ -350,7 +435,7 @@ impl Registry {
                     .map(Outbound::Json)
                     .collect()
             }
-            StreamEvent::Gap(target) => {
+            StreamEventKind::Gap => {
                 let Some(shared) = self.targets.get(&target) else {
                     return Vec::new();
                 };
@@ -362,7 +447,7 @@ impl Registry {
                     })
                     .collect()
             }
-            StreamEvent::Exit(target) => {
+            StreamEventKind::Exit => {
                 let Some(shared) = self.targets.remove(&target) else {
                     return Vec::new();
                 };
@@ -384,7 +469,7 @@ impl Registry {
         self.by_stream.len()
     }
 
-    async fn resize_target(&self, target: &Target) {
+    fn resize_target(&self, target: &Target) {
         let Some(shared) = self.targets.get(target) else {
             return;
         };
@@ -398,16 +483,13 @@ impl Registry {
             .and_then(|id| shared.subscribers.get(id))
             .map(|subscriber| (subscriber.cols, subscriber.rows))
             .unwrap_or((shared.cols, shared.rows));
-        let _ = shared
-            .tx
-            .send(StreamCommand::Resize(
-                cols.clamp(20, 500),
-                rows.clamp(5, 200),
-            ))
-            .await;
+        let _ = shared.tx.try_send(StreamCommand::Resize(
+            cols.clamp(20, 500),
+            rows.clamp(5, 200),
+        ));
     }
 
-    pub async fn expire_drivers(&mut self, max_idle: Duration) -> Vec<Value> {
+    pub fn expire_drivers(&mut self, max_idle: Duration) -> Vec<Value> {
         let mut changed = Vec::new();
         let targets = self.targets.keys().cloned().collect::<Vec<_>>();
         for target in targets {
@@ -424,7 +506,7 @@ impl Registry {
             }
             shared.driver = None;
             if target.runtime == "herdr" {
-                let _ = shared.tx.send(StreamCommand::ReleaseControl).await;
+                let _ = shared.tx.try_send(StreamCommand::ReleaseControl);
             }
             changed.extend(self.driver_messages(&target));
         }
@@ -452,12 +534,12 @@ pub fn terminal_frame(stream_id: &str, sequence: u32, flags: u8, data: &[u8]) ->
 }
 
 async fn run_tmux(
-    target: Target,
+    sink: EventSink,
     _cols: u16,
     _rows: u16,
     mut rx: mpsc::Receiver<StreamCommand>,
-    events: mpsc::Sender<StreamEvent>,
 ) -> Result<()> {
+    let target = sink.target().clone();
     let tmux_session = target
         .tmux_session
         .clone()
@@ -499,14 +581,13 @@ async fn run_tmux(
             &mut reader,
             &pane_id,
             false,
-            &events,
+            &sink,
             &mut output_gap,
-            &target,
         ),
     )
     .await
     .context("tmux checkpoint timed out")??;
-    emit_terminal_data(&events, &mut output_gap, &target, checkpoint, true);
+    emit_terminal_data(&sink, &mut output_gap, checkpoint, true);
 
     let mut line = Vec::with_capacity(32 * 1024);
     loop {
@@ -516,7 +597,7 @@ async fn run_tmux(
                     break;
                 }
                 if let Some(bytes) = tmux_control_output(&line, &pane_id) {
-                    emit_terminal_data(&events, &mut output_gap, &target, bytes, false);
+                    emit_terminal_data(&sink, &mut output_gap, bytes, false);
                 }
             }
             command = rx.recv() => match command {
@@ -535,22 +616,21 @@ async fn run_tmux(
                             &mut reader,
                             &pane_id,
                             true,
-                            &events,
+                            &sink,
                             &mut output_gap,
-                            &target,
                         ),
                     ).await.context("tmux checkpoint timed out")??;
-                    emit_terminal_data(&events, &mut output_gap, &target, checkpoint, true);
+                    emit_terminal_data(&sink, &mut output_gap, checkpoint, true);
                 }
                 Some(StreamCommand::Stop) | None => { let _ = child.start_kill(); break; }
             },
-            _ = gap_tick.tick(), if output_gap => retry_terminal_gap(&events, &mut output_gap, &target),
+            _ = gap_tick.tick(), if output_gap => retry_terminal_gap(&sink, &mut output_gap),
             _ = child.wait() => break,
         }
     }
     let _ = child.start_kill();
     let _ = child.wait().await;
-    let _ = events.send(StreamEvent::Exit(target)).await;
+    sink.send(StreamEventKind::Exit).await;
     Ok(())
 }
 
@@ -630,9 +710,8 @@ async fn capture_tmux_control_checkpoint(
     reader: &mut BufReader<ChildStdout>,
     pane_id: &str,
     forward_prior_output: bool,
-    events: &mpsc::Sender<StreamEvent>,
+    sink: &EventSink,
     output_gap: &mut bool,
-    target: &Target,
 ) -> Result<Vec<u8>> {
     let marker = format!(
         "TERMAG_CHECKPOINT_{}_{}",
@@ -672,7 +751,12 @@ async fn capture_tmux_control_checkpoint(
                 bail!("tmux could not capture pane {pane_id}");
             }
             checkpoint.extend_from_slice(&line);
-            checkpoint.push(b'\n');
+            // capture-pane emits bare lines and read_tmux_control_line strips
+            // the control protocol's CR. The browser terminal runs with
+            // convertEol disabled (a raw byte sink), so a lone LF moves down
+            // without returning to column 0 and the restored screen stair-
+            // steps. Re-add the carriage return the pane itself would have.
+            checkpoint.extend_from_slice(b"\r\n");
             trim_tmux_checkpoint(&mut checkpoint, MAX_CHECKPOINT_BYTES, CHECKPOINT_TRIM_SLOP);
             continue;
         }
@@ -699,7 +783,7 @@ async fn capture_tmux_control_checkpoint(
 
         if forward_prior_output && active_guard.is_none() {
             if let Some(bytes) = tmux_control_output(&line, pane_id) {
-                emit_terminal_data(events, output_gap, target, bytes, false);
+                emit_terminal_data(sink, output_gap, bytes, false);
             }
         }
     }
@@ -811,31 +895,18 @@ async fn send_tmux_input(stdin: &mut ChildStdin, pane_id: &str, data: &[u8]) -> 
     Ok(())
 }
 
-fn emit_terminal_data(
-    events: &mpsc::Sender<StreamEvent>,
-    output_gap: &mut bool,
-    target: &Target,
-    bytes: Vec<u8>,
-    full: bool,
-) {
+fn emit_terminal_data(sink: &EventSink, output_gap: &mut bool, bytes: Vec<u8>, full: bool) {
     // Never block the runtime reader on cloud/network backpressure: doing so
     // can fill its command queue and deadlock keyboard input. If the bounded
     // event queue is full, explicitly invalidate replay and let the browser
     // reconnect for a fresh checkpoint.
     if *output_gap {
-        if events.try_send(StreamEvent::Gap(target.clone())).is_err() {
+        if !sink.try_send(StreamEventKind::Gap) {
             return;
         }
         *output_gap = false;
     }
-    if events
-        .try_send(StreamEvent::Data {
-            target: target.clone(),
-            bytes,
-            full,
-        })
-        .is_err()
-    {
+    if !sink.try_send(StreamEventKind::Data { bytes, full }) {
         *output_gap = true;
     }
 }
@@ -846,8 +917,8 @@ fn gap_retry_interval() -> Interval {
     tick
 }
 
-fn retry_terminal_gap(events: &mpsc::Sender<StreamEvent>, output_gap: &mut bool, target: &Target) {
-    if events.try_send(StreamEvent::Gap(target.clone())).is_ok() {
+fn retry_terminal_gap(sink: &EventSink, output_gap: &mut bool) {
+    if sink.try_send(StreamEventKind::Gap) {
         *output_gap = false;
     }
 }
@@ -896,12 +967,12 @@ async fn spawn_herdr(
 }
 
 async fn run_herdr_cli(
-    target: Target,
+    sink: EventSink,
     mut cols: u16,
     mut rows: u16,
     mut rx: mpsc::Receiver<StreamCommand>,
-    events: mpsc::Sender<StreamEvent>,
 ) -> Result<()> {
+    let target = sink.target().clone();
     let mut helper = spawn_herdr(&target, cols, rows, false).await?;
     let mut output_gap = false;
     let mut gap_tick = gap_retry_interval();
@@ -913,7 +984,7 @@ async fn run_herdr_cli(
                     if value.get("type").and_then(Value::as_str) == Some("terminal.frame") {
                         if let Some(bytes) = value.get("bytes").and_then(Value::as_str).and_then(|v| BASE64.decode(v).ok()) {
                             let full = value.get("full").and_then(Value::as_bool).unwrap_or(false);
-                            emit_terminal_data(&events, &mut output_gap, &target, bytes, full);
+                            emit_terminal_data(&sink, &mut output_gap, bytes, full);
                         }
                     } else if value.get("type").and_then(Value::as_str) == Some("terminal.closed") { break; }
                 }
@@ -938,7 +1009,7 @@ async fn run_herdr_cli(
                 Some(StreamCommand::TakeControl) if !helper.controller => {
                     let _ = helper.child.start_kill(); let _ = helper.child.wait().await;
                     helper = spawn_herdr(&target, cols, rows, true).await?;
-                    let _ = events.send(StreamEvent::Controller(target.clone(), true)).await;
+                    sink.send(StreamEventKind::Controller(true)).await;
                 }
                 Some(StreamCommand::TakeControl) => {}
                 Some(StreamCommand::ReleaseControl) if helper.controller => {
@@ -948,7 +1019,7 @@ async fn run_herdr_cli(
                     }
                     let _ = helper.child.start_kill(); let _ = helper.child.wait().await;
                     helper = spawn_herdr(&target, cols, rows, false).await?;
-                    let _ = events.send(StreamEvent::Controller(target.clone(), false)).await;
+                    sink.send(StreamEventKind::Controller(false)).await;
                 }
                 Some(StreamCommand::ReleaseControl) => {}
                 Some(StreamCommand::Checkpoint) => {
@@ -964,25 +1035,24 @@ async fn run_herdr_cli(
                 }
                 Some(StreamCommand::Input(_)) => {}
             },
-            _ = gap_tick.tick(), if output_gap => retry_terminal_gap(&events, &mut output_gap, &target),
+            _ = gap_tick.tick(), if output_gap => retry_terminal_gap(&sink, &mut output_gap),
             _ = helper.child.wait() => break,
         }
     }
-    let _ = events.send(StreamEvent::Exit(target)).await;
+    sink.send(StreamEventKind::Exit).await;
     Ok(())
 }
 
 async fn run_herdr(
-    target: Target,
+    sink: EventSink,
     cols: u16,
     rows: u16,
     rx: mpsc::Receiver<StreamCommand>,
-    events: mpsc::Sender<StreamEvent>,
 ) -> Result<()> {
     // Keep HerdR behind its public process boundary. One helper is shared by
     // every browser viewing this target and exists only while that target is
     // open in the cloud; idle inventory never retains a helper process.
-    run_herdr_cli(target, cols, rows, rx, events).await
+    run_herdr_cli(sink, cols, rows, rx).await
 }
 
 #[cfg(test)]
@@ -999,11 +1069,12 @@ mod tests {
         }
     }
 
-    #[test]
-    fn large_checkpoints_are_chunked_with_explicit_boundaries() {
-        let mut registry = Registry::new();
-        let target = test_target();
-        let (tx, _rx) = mpsc::channel(1);
+    fn seed(
+        registry: &mut Registry,
+        target: &Target,
+        generation: u64,
+    ) -> mpsc::Receiver<StreamCommand> {
+        let (tx, rx) = mpsc::channel(1);
         registry.targets.insert(
             target.clone(),
             SharedStream {
@@ -1018,18 +1089,42 @@ mod tests {
                     },
                 )]),
                 driver: None,
+                anchor: "stream-1".to_owned(),
+                generation,
                 cols: 80,
                 rows: 24,
                 sequence: 0,
                 saw_output: false,
             },
         );
+        registry
+            .by_stream
+            .insert("stream-1".to_owned(), target.clone());
+        rx
+    }
 
-        let frames = registry.handle_event(StreamEvent::Data {
-            target,
-            bytes: vec![b'x'; 300 * 1024],
-            full: true,
-        });
+    fn event(target: &Target, generation: u64, kind: StreamEventKind) -> StreamEvent {
+        StreamEvent {
+            target: target.clone(),
+            generation,
+            kind,
+        }
+    }
+
+    #[test]
+    fn large_checkpoints_are_chunked_with_explicit_boundaries() {
+        let mut registry = Registry::new();
+        let target = test_target();
+        let _rx = seed(&mut registry, &target, 1);
+
+        let frames = registry.handle_event(event(
+            &target,
+            1,
+            StreamEventKind::Data {
+                bytes: vec![b'x'; 300 * 1024],
+                full: true,
+            },
+        ));
         assert_eq!(frames.len(), 1);
         let Outbound::Terminal {
             first_sequence,
@@ -1054,20 +1149,104 @@ mod tests {
     #[test]
     fn full_output_queue_becomes_an_explicit_gap() {
         let target = test_target();
-        let (tx, mut rx) = mpsc::channel(1);
-        tx.try_send(StreamEvent::Data {
+        let (events, mut rx) = mpsc::channel(1);
+        let sink = EventSink {
+            events,
             target: target.clone(),
+            generation: 1,
+        };
+        assert!(sink.try_send(StreamEventKind::Data {
             bytes: vec![1],
             full: false,
-        })
-        .unwrap();
+        }));
         let mut gap = false;
-        emit_terminal_data(&tx, &mut gap, &target, vec![2], false);
+        emit_terminal_data(&sink, &mut gap, vec![2], false);
         assert!(gap);
         let _ = rx.try_recv().unwrap();
-        retry_terminal_gap(&tx, &mut gap, &target);
+        retry_terminal_gap(&sink, &mut gap);
         assert!(!gap);
-        assert!(matches!(rx.try_recv(), Ok(StreamEvent::Gap(_))));
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(StreamEvent {
+                kind: StreamEventKind::Gap,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn stale_exit_cannot_close_a_reattached_stream() {
+        let mut registry = Registry::new();
+        let target = test_target();
+        let _rx = seed(&mut registry, &target, 7);
+
+        // The detached task from generation 6 reports its exit after the
+        // browser has already re-attached under generation 7.
+        assert!(registry
+            .handle_event(event(&target, 6, StreamEventKind::Exit))
+            .is_empty());
+        assert!(registry.targets.contains_key(&target));
+        assert!(registry.by_stream.contains_key("stream-1"));
+
+        // The live generation still tears the stream down as usual.
+        let closed = registry.handle_event(event(&target, 7, StreamEventKind::Exit));
+        assert_eq!(closed.len(), 1);
+        assert!(!registry.targets.contains_key(&target));
+    }
+
+    #[test]
+    fn frames_are_tagged_with_a_stable_anchor() {
+        let mut registry = Registry::new();
+        let target = test_target();
+        let _rx = seed(&mut registry, &target, 1);
+        for index in 0..8 {
+            let id = format!("stream-{}", index + 2);
+            registry
+                .targets
+                .get_mut(&target)
+                .unwrap()
+                .subscribers
+                .insert(
+                    id.clone(),
+                    Subscriber {
+                        read_only: true,
+                        cols: 80,
+                        rows: 24,
+                        last_input: Instant::now(),
+                    },
+                );
+            registry.by_stream.insert(id, target.clone());
+        }
+        for _ in 0..4 {
+            let frames = registry.handle_event(event(
+                &target,
+                1,
+                StreamEventKind::Data {
+                    bytes: vec![b'x'],
+                    full: false,
+                },
+            ));
+            let Outbound::Terminal { stream_id, .. } = &frames[0] else {
+                panic!("expected terminal output")
+            };
+            assert_eq!(stream_id, "stream-1");
+        }
+
+        // Losing the anchor promotes a surviving subscriber rather than
+        // leaving frames addressed to a stream the broker has dropped.
+        registry.close("stream-1");
+        let frames = registry.handle_event(event(
+            &target,
+            1,
+            StreamEventKind::Data {
+                bytes: vec![b'x'],
+                full: false,
+            },
+        ));
+        let Outbound::Terminal { stream_id, .. } = &frames[0] else {
+            panic!("expected terminal output")
+        };
+        assert_ne!(stream_id, "stream-1");
     }
 
     #[test]

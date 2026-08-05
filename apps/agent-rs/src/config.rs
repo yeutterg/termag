@@ -130,14 +130,37 @@ fn expand_home(value: &str, home: &Path) -> PathBuf {
 }
 
 fn validate_url(url: &str) -> Result<()> {
-    let secure = url.starts_with("wss://");
-    let local = url.starts_with("ws://localhost")
-        || url.starts_with("ws://127.0.0.1")
-        || url.starts_with("ws://[::1]");
-    if !secure && !local {
-        bail!("TERMAG_URL must use wss:// unless it points to localhost");
+    if url.starts_with("wss://") {
+        return Ok(());
     }
-    Ok(())
+    // A prefix test is not enough: "ws://localhost.example.com" starts with
+    // "ws://localhost" yet resolves to an attacker-controlled host, which
+    // would put the bearer token on the wire in plaintext. Compare the host
+    // component exactly.
+    let Some(authority) = url.strip_prefix("ws://") else {
+        bail!("TERMAG_URL must use wss:// unless it points to localhost");
+    };
+    let authority = authority
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or_default()
+        .rsplit('@')
+        .next()
+        .unwrap_or_default();
+    let host = match authority.strip_prefix('[') {
+        // IPv6 literal. Only a port may follow the closing bracket, so
+        // "[::1].example.com" must not be read as the loopback address.
+        Some(rest) => match rest.split_once(']') {
+            Some((host, "")) => host,
+            Some((host, port)) if port.starts_with(':') => host,
+            _ => bail!("TERMAG_URL has a malformed IPv6 host"),
+        },
+        None => authority.split(':').next().unwrap_or_default(),
+    };
+    if matches!(host, "localhost" | "127.0.0.1" | "::1") {
+        return Ok(());
+    }
+    bail!("TERMAG_URL must use wss:// unless it points to localhost");
 }
 
 fn env_bool(name: &str) -> Option<bool> {
@@ -154,6 +177,19 @@ mod tests {
     fn rejects_plaintext_remote_broker() {
         assert!(validate_url("ws://example.com/api/ws/agent").is_err());
         assert!(validate_url("ws://localhost:3000/api/ws/agent").is_ok());
+        assert!(validate_url("ws://127.0.0.1/api/ws/agent").is_ok());
+        assert!(validate_url("ws://[::1]:3000/api/ws/agent").is_ok());
         assert!(validate_url("wss://example.com/api/ws/agent").is_ok());
+    }
+
+    #[test]
+    fn loopback_prefixes_do_not_authorize_remote_hosts() {
+        // Each of these begins with a loopback spelling but resolves
+        // elsewhere; sending the agent token to them unencrypted would leak
+        // it to whoever controls that DNS name.
+        assert!(validate_url("ws://localhost.example.com/api/ws/agent").is_err());
+        assert!(validate_url("ws://127.0.0.1.example.com/api/ws/agent").is_err());
+        assert!(validate_url("ws://localhost@example.com/api/ws/agent").is_err());
+        assert!(validate_url("ws://[::1].example.com/api/ws/agent").is_err());
     }
 }
