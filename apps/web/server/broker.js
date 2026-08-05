@@ -6,7 +6,7 @@ const { createSshStreamRegistry } = require("./ssh-session-stream");
 const { reconcileInventory } = require("./inventory-v2");
 
 // Wire-protocol constant shared with the agent. Keep in sync with
-// apps/agent/src/index.ts → WS_REPLACED_REASON.
+// Keep this in sync with the Rust agent's replacement close handling.
 const WS_REPLACED_REASON = "replaced";
 // Real agent tokens are `tmag_` + 43-char base64url(32) = 48 chars. Floor
 // of 32 / cap of 256 keeps a generous band while preventing blind probes
@@ -483,7 +483,7 @@ function createBroker({ prisma, wss }) {
   }
   // A window whose last output is younger than this counts as actively
   // working — fresh output beats a stale bell flag. Env-overridable to match
-  // the HEALTH_INTERVAL_MS tuning pattern over in apps/agent/src/index.ts.
+  // the health interval used by the Rust agent.
   const WORKING_THRESHOLD_SEC = Number(process.env.TERMAG_WORKING_THRESHOLD_SEC) || 8;
   // How long a PTY-reported status stays authoritative before the poll
   // classifier takes back over (the PTY path stops refreshing on output stop).

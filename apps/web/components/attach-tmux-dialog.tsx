@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Check, Copy, RefreshCw, Search } from "lucide-react";
+import { RefreshCw, Search } from "lucide-react";
 
 type TmuxWindow = {
   index: number;
@@ -34,7 +34,6 @@ export function AttachTmuxDialog({ open, onOpenChange, onAttach }: AttachTmuxDia
   const [error, setError] = useState("");
   const [attaching, setAttaching] = useState("");
   const [query, setQuery] = useState("");
-  const [copied, setCopied] = useState("");
 
   const groups = useMemo(() => {
     const next = new Map<string, TmuxSession[]>();
@@ -99,23 +98,6 @@ export function AttachTmuxDialog({ open, onOpenChange, onAttach }: AttachTmuxDia
     onOpenChange(false);
   }
 
-  async function copyText(id: string, value: string) {
-    try {
-      await navigator.clipboard.writeText(value);
-    } catch {
-      const textarea = document.createElement("textarea");
-      textarea.value = value;
-      textarea.style.position = "fixed";
-      textarea.style.opacity = "0";
-      document.body.appendChild(textarea);
-      textarea.select();
-      document.execCommand("copy");
-      document.body.removeChild(textarea);
-    }
-    setCopied(id);
-    window.setTimeout(() => setCopied(current => (current === id ? "" : current)), 1500);
-  }
-
   if (!open) {
     return null;
   }
@@ -133,19 +115,6 @@ export function AttachTmuxDialog({ open, onOpenChange, onAttach }: AttachTmuxDia
             </p>
           </div>
           <div className="flex shrink-0 items-center gap-1">
-            <button
-              type="button"
-              className="inline-flex h-8 items-center gap-1.5 rounded-md border border-line bg-bg px-2 text-xs text-muted hover:bg-panel2 hover:text-text"
-              onClick={() => copyText("adopt", "termag adopt")}
-              title="Copy shell command to connect the current tmux session"
-            >
-              {copied === "adopt" ? (
-                <Check className="h-3.5 w-3.5" />
-              ) : (
-                <Copy className="h-3.5 w-3.5" />
-              )}
-              {copied === "adopt" ? "Copied" : "termag adopt"}
-            </button>
             <button
               type="button"
               className="grid h-8 w-8 place-items-center rounded-md text-muted hover:bg-panel2 hover:text-text disabled:opacity-50"

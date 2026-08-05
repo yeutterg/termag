@@ -4,14 +4,13 @@
 const customJestConfig = {
   setupFilesAfterEnv: ['<rootDir>/jest.setup.cjs'],
   testEnvironment: 'node',
-  roots: ['<rootDir>/apps/web/lib', '<rootDir>/apps/agent/src'],
+  roots: ['<rootDir>/apps/web/lib'],
   moduleNameMapper: {
     '^@/(.*)$': '<rootDir>/apps/web/$1',
     '^@termag/web/(.*)$': '<rootDir>/apps/web/$1',
   },
   collectCoverageFrom: [
     'apps/web/lib/**/*.{js,jsx,ts,tsx}',
-    'apps/agent/src/**/*.{js,jsx,ts,tsx}',
     '!**/*.d.ts',
     '!**/*.config.{js,ts}',
     '!**/node_modules/**',
@@ -26,7 +25,6 @@ const customJestConfig = {
     '<rootDir>/.next/',
     '<rootDir>/node_modules/',
     '<rootDir>/apps/web/.next/',
-    '<rootDir>/apps/agent/dist/',
   ],
   preset: 'ts-jest',
   transform: {

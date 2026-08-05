@@ -1,22 +1,18 @@
 class TermagAgent < Formula
-  desc "Outbound termag laptop agent for tmux-backed remote coding sessions"
+  desc "Low-footprint Termag agent for mirrored HerdR and tmux sessions"
   homepage "https://github.com/yeutterg/termag-next"
-  # The release script (apps/agent/scripts/release.sh) prints the new url +
-  # sha256 after each `npm publish`. Paste them here, commit, push your tap.
-  url "https://registry.npmjs.org/termag-agent/-/termag-agent-0.1.1.tgz"
-  sha256 "b42fdff914fc134f571c2d487328f9d71aec08574ecef0dc83af7b7538793eba"
+  head "https://github.com/yeutterg/termag-next.git", branch: "master"
   license "MIT"
 
-  depends_on "node"
-  depends_on "tmux"
+  depends_on "rust" => :build
 
   def install
-    system "npm", "install", *std_npm_args
-    bin.install_symlink Dir["#{libexec}/bin/*"]
+    system "cargo", "install", "--locked", "--root", prefix, "--path", "apps/agent-rs"
+    bin.install_symlink "termag-agent" => "termag"
   end
 
   service do
-    run [opt_bin/"termag"]
+    run [opt_bin/"termag-agent"]
     keep_alive true
     log_path var/"log/termag-agent.log"
     error_log_path var/"log/termag-agent.log"
@@ -26,6 +22,6 @@ class TermagAgent < Formula
   end
 
   test do
-    assert_match version.to_s, shell_output("#{bin}/termag --version")
+    assert_match "termag-agent", shell_output("#{bin}/termag --version")
   end
 end

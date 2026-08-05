@@ -71,7 +71,7 @@ In a separate terminal:
 export TERMAG_URL=ws://localhost:3000/api/ws/agent
 export TERMAG_AGENT_TOKEN=<token-from-web-ui>
 export TERMAG_AGENT_ROOTS='{"local":"~/Projects"}'
-npm run agent
+cargo run --manifest-path apps/agent-rs/Cargo.toml
 ```
 
 ## Project Structure
@@ -224,14 +224,6 @@ Create `.vscode/launch.json`:
       "program": "${workspaceFolder}/node_modules/.bin/next",
       "args": ["dev"],
       "cwd": "${workspaceFolder}/apps/web"
-    },
-    {
-      "type": "node",
-      "request": "launch",
-      "name": "Agent: debug",
-      "program": "${workspaceFolder}/node_modules/.bin/tsx",
-      "args": ["src/index.ts"],
-      "cwd": "${workspaceFolder}/apps/agent"
     }
   ]
 }

@@ -4,14 +4,12 @@
   "version": "0.1.0",
   "type": "module",
   "workspaces": [
-    "apps/web",
-    "apps/agent"
+    "apps/web"
   ],
   "scripts": {
     "dev": "npm run dev -w apps/web",
-    "build": "npm run build -w apps/web && npm run build -w apps/agent",
+    "build": "npm run build -w apps/web",
     "start": "npm run start -w apps/web",
-    "agent": "npm run dev -w apps/agent",
     "db:generate": "npm run db:generate -w apps/web",
     "db:migrate": "npm run db:migrate -w apps/web",
     "db:backup": "./scripts/backup-db.sh",
@@ -20,11 +18,11 @@
     "test": "jest",
     "test:watch": "jest --watch",
     "test:coverage": "jest --coverage",
-    "lint": "npm run lint -w apps/web && npm run lint -w apps/agent",
-    "lint:fix": "npm run lint:fix -w apps/web && npm run lint:fix -w apps/agent",
+    "lint": "npm run lint -w apps/web",
+    "lint:fix": "npm run lint:fix -w apps/web",
     "format": "prettier --write \"apps/**/*.{ts,tsx,js,jsx,json,css,md}\"",
     "format:check": "prettier --check \"apps/**/*.{ts,tsx,js,jsx,json,css,md}\"",
-    "typecheck": "npm run typecheck -w apps/web && npm run typecheck -w apps/agent",
+    "typecheck": "npm run typecheck -w apps/web",
     "prepare": "husky"
   },
   "engines": {

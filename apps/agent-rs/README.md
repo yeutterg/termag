@@ -13,6 +13,11 @@ cargo build --release --manifest-path apps/agent-rs/Cargo.toml
 ./apps/agent-rs/target/release/termag-agent
 ```
 
+The same binary provides the `termag bootstrap`, `termag config`, `termag
+list`, and `termag attach` workflows when installed with the `termag` symlink.
+It intentionally has no `connect`, `new`, `adopt`, or arbitrary command mode:
+protocol v2 discovers sessions continuously and mutations are typed.
+
 The agent reads the existing `~/.termag/config.json` keys (`url`, `agentToken`, and `agentRoots`) and the existing `TERMAG_URL`, `TERMAG_AGENT_TOKEN`, and `TERMAG_AGENT_ROOTS` overrides.
 
 Creation and browsing are restricted to the user's home directory by default. Configure `allowDirectories` with absolute paths, or set `allowAllDirectories: true` explicitly:

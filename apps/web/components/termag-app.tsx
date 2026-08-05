@@ -4,13 +4,11 @@ import { Fragment, lazy, Suspense, useCallback, useEffect, useMemo, useRef, useS
 import {
   Bell,
   BellOff,
-  Check,
   ChevronLeft,
   ChevronRight,
   ChevronsLeft,
   ChevronsRight,
   Command as CommandIcon,
-  Copy,
   ExternalLink,
   FolderPlus,
   Laptop,
@@ -211,14 +209,6 @@ function normalizeTmuxWindows(input: unknown): TmuxWindow[] {
     .filter(window => window.target || window.id || window.name);
 }
 
-function shellArg(value: string) {
-  return `"${value.replace(/["\\$`]/g, "\\$&")}"`;
-}
-
-function connectCommand(projectName: string, wholeSession = false) {
-  return `termag connect -p ${shellArg(projectName)}${wholeSession ? " --session" : ""}`;
-}
-
 type AuthMode = "oauth" | "password" | "trusted";
 type DeviceToken = {
   id: string;
@@ -269,7 +259,6 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
   const [caffeinateActiveState, setCaffeinateActive] = useState(false);
   const [caffeinateStatusDevice, setCaffeinateStatusDevice] = useState<string | null>(null);
   const [caffeinateLeaseDevice, setCaffeinateLeaseDevice] = useState<string | null>(null);
-  const [copiedCommand, setCopiedCommand] = useState("");
   // Live xterm titles keyed by sessionId. Tools inside the terminal can set
   // a title via OSC 0/2; we mirror it onto the corresponding tab label.
   const [liveTitles, setLiveTitles] = useState<Record<string, string>>({});
@@ -871,28 +860,6 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
     [reloadProjects]
   );
 
-  const copyText = useCallback(
-    async (id: string, value: string) => {
-      try {
-        await navigator.clipboard.writeText(value);
-      } catch {
-        const textarea = document.createElement("textarea");
-        textarea.value = value;
-        textarea.style.position = "fixed";
-        textarea.style.opacity = "0";
-        document.body.appendChild(textarea);
-        textarea.select();
-        document.execCommand("copy");
-        document.body.removeChild(textarea);
-      }
-      setCopiedCommand(id);
-      window.setTimeout(() => {
-        setCopiedCommand(current => (current === id ? "" : current));
-      }, 1500);
-    },
-    [setCopiedCommand]
-  );
-
   const renameProject = useCallback(
     async (projectId: string, name: string) => {
       const trimmed = name.trim();
@@ -1382,35 +1349,6 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
                     <Network className="h-3.5 w-3.5" />
                     <span className="whitespace-nowrap">New SSH host</span>
                   </button>
-                  <div className="my-1 h-px bg-line" />
-                  <button
-                    type="button"
-                    className="flex h-8 w-full items-center gap-2 rounded px-2 text-left text-sm text-muted hover:bg-panel2 hover:text-text"
-                    onClick={() => copyText("quick-new-session", "termag new")}
-                  >
-                    {copiedCommand === "quick-new-session" ? (
-                      <Check className="h-3.5 w-3.5" />
-                    ) : (
-                      <Copy className="h-3.5 w-3.5" />
-                    )}
-                    <span className="truncate">
-                      {copiedCommand === "quick-new-session" ? "Copied" : "Copy termag new"}
-                    </span>
-                  </button>
-                  <button
-                    type="button"
-                    className="flex h-8 w-full items-center gap-2 rounded px-2 text-left text-sm text-muted hover:bg-panel2 hover:text-text"
-                    onClick={() => copyText("quick-adopt-session", "termag adopt")}
-                  >
-                    {copiedCommand === "quick-adopt-session" ? (
-                      <Check className="h-3.5 w-3.5" />
-                    ) : (
-                      <Copy className="h-3.5 w-3.5" />
-                    )}
-                    <span className="truncate">
-                      {copiedCommand === "quick-adopt-session" ? "Copied" : "Copy termag adopt"}
-                    </span>
-                  </button>
                 </div>
               )}
               <button
@@ -1630,45 +1568,6 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
                                   <Plus className="h-3.5 w-3.5" />
                                   <span className="flex-1">New tab</span>
                                   <Shortcut keys={["mod", "enter"]} />
-                                </button>
-                                <button
-                                  type="button"
-                                  className="flex h-8 w-full items-center gap-2 rounded px-2 text-left text-sm text-muted hover:bg-panel2 hover:text-text"
-                                  onClick={() =>
-                                    copyText(`connect:${project.id}`, connectCommand(project.name))
-                                  }
-                                >
-                                  {copiedCommand === `connect:${project.id}` ? (
-                                    <Check className="h-3.5 w-3.5" />
-                                  ) : (
-                                    <Copy className="h-3.5 w-3.5" />
-                                  )}
-                                  <span className="truncate">
-                                    {copiedCommand === `connect:${project.id}`
-                                      ? "Copied"
-                                      : "Copy connect command"}
-                                  </span>
-                                </button>
-                                <button
-                                  type="button"
-                                  className="flex h-8 w-full items-center gap-2 rounded px-2 text-left text-sm text-muted hover:bg-panel2 hover:text-text"
-                                  onClick={() =>
-                                    copyText(
-                                      `connect-session:${project.id}`,
-                                      connectCommand(project.name, true)
-                                    )
-                                  }
-                                >
-                                  {copiedCommand === `connect-session:${project.id}` ? (
-                                    <Check className="h-3.5 w-3.5" />
-                                  ) : (
-                                    <Copy className="h-3.5 w-3.5" />
-                                  )}
-                                  <span className="truncate">
-                                    {copiedCommand === `connect-session:${project.id}`
-                                      ? "Copied"
-                                      : "Copy session command"}
-                                  </span>
                                 </button>
                               </div>
                             )}
@@ -2088,28 +1987,25 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
             ) : (
               <div className="grid flex-1 place-items-center rounded-lg border border-dashed border-line bg-panel px-4">
                 <div className="w-full max-w-lg text-sm">
-                  <div className="mb-2 font-medium text-text">
-                    Start or connect a tmux workspace.
-                  </div>
+                  <div className="mb-2 font-medium text-text">No mirrored terminals yet.</div>
                   <div className="mb-3 text-muted">
-                    Create a device token, then run a shell command or use the + menu.
+                    Bootstrap the lightweight agent. Running HerdR and tmux sessions appear here
+                    automatically.
                   </div>
-                  <div className="flex items-center gap-2 rounded-md border border-line bg-bg p-2">
-                    <code className="min-w-0 flex-1 truncate font-mono text-xs text-muted">
-                      termag new
-                    </code>
+                  <div className="flex flex-wrap items-center gap-2">
                     <button
                       type="button"
-                      className="grid h-7 w-7 shrink-0 place-items-center rounded-md text-muted hover:bg-panel2 hover:text-text"
-                      title="Copy new-session command"
-                      aria-label="Copy new-session command"
-                      onClick={() => copyText("empty-connect", "termag new")}
+                      className="inline-flex h-9 items-center rounded-md bg-accent px-3 text-xs font-medium text-black hover:brightness-110"
+                      onClick={() => setBootstrapOpen(true)}
                     >
-                      {copiedCommand === "empty-connect" ? (
-                        <Check className="h-3.5 w-3.5" />
-                      ) : (
-                        <Copy className="h-3.5 w-3.5" />
-                      )}
+                      Bootstrap a device
+                    </button>
+                    <button
+                      type="button"
+                      className="inline-flex h-9 items-center rounded-md border border-line bg-bg px-3 text-xs text-muted hover:bg-panel2 hover:text-text"
+                      onClick={() => setAttachTmuxOpen(true)}
+                    >
+                      Connect discovered tmux
                     </button>
                   </div>
                   <a

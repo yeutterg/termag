@@ -19,7 +19,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.82.0
         with:
           components: rustfmt, clippy
 
@@ -131,16 +131,12 @@ jobs:
           NEXTAUTH_URL: "http://localhost:3000"
           NEXTAUTH_SECRET: "test-secret-for-build"
 
-      - name: Build agent
-        run: npm run build -w apps/agent
-
       - name: Upload build artifacts
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: build-artifacts
           path: |
             apps/web/.next
-            apps/agent/dist
           retention-days: 7
 
   security-scan:

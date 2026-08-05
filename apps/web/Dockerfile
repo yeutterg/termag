@@ -8,7 +8,6 @@ RUN apt-get update \
   && rm -rf /var/lib/apt/lists/*
 COPY package.json package-lock.json* ./
 COPY apps/web/package.json apps/web/package.json
-COPY apps/agent/package.json apps/agent/package.json
 RUN npm install
 
 FROM node:22-bookworm-slim AS builder

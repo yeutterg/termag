@@ -44,8 +44,7 @@ The agent always dials out to the web app. You do not need to expose HerdR, tmux
 ## Components
 
 - `apps/web`: the Next.js app. It includes the browser UI, route handlers, WebSocket broker, Prisma, and SQLite database.
-- `apps/agent-rs`: the protocol-v2, low-footprint Rust daemon that discovers HerdR and tmux and streams terminals on demand over one outbound WebSocket.
-- `apps/agent`: the protocol-v1 Node CLI, retained for one transition release. Its macOS menu-bar helper has been removed.
+- `apps/agent-rs`: the protocol-v2, low-footprint Rust daemon and CLI. It discovers HerdR and tmux and streams terminals on demand over one outbound WebSocket.
 - `infra`: Docker Compose and Caddy files for running the web app on a small VPS.
 
 The user-facing shape is:
@@ -195,22 +194,22 @@ Creation and browsing are restricted to the home directory by default; see
 [`apps/agent-rs/README.md`](apps/agent-rs/README.md) for allowlist and power
 configuration.
 
-The existing Homebrew and npm packages remain the protocol-v1 transition client
-until native release packaging is published. That agent needs Node.js and tmux;
-Homebrew is preferred on macOS:
+The Homebrew formula builds the native agent from source until tagged native
+artifacts are published:
 
 ```bash
-brew install yeutterg/tap/termag-agent
+brew install --HEAD yeutterg/tap/termag-agent
 ```
 
-npm works anywhere Node.js and tmux are available:
+The fastest setup is the web UI's **Bootstrap device** flow. It gives you a
+one-time command that writes a mode-0600 config file:
 
 ```bash
-npm install -g termag-agent
+termag bootstrap https://termag.example.com/api/bootstrap/claim/...
 ```
 
-Configure either agent with the broker URL and token (the roots variable shown
-here is the protocol-v1 shape):
+You can also configure the broker URL, token, and named roots with environment
+variables:
 
 ```bash
 export TERMAG_URL=wss://termag.example.com/api/ws/agent
@@ -224,16 +223,16 @@ Use your broker URL for `TERMAG_URL`; examples are below. The key in `TERMAG_AGE
 export TERMAG_AGENT_ROOTS='{"workstation":"~/Projects"}'
 ```
 
-Run it:
+Run the daemon (or install its Homebrew service):
 
 ```bash
-termag
+termag-agent
 ```
 
-When testing an unreleased checkout of termag-next, run the agent from this repo instead of a globally installed Homebrew/npm copy:
+When testing an unreleased checkout, run the release binary from this repo:
 
 ```bash
-npm run agent
+cargo run --release --manifest-path apps/agent-rs/Cargo.toml
 ```
 
 `TERMAG_URL` always includes the port unless you're using a default-port reverse proxy. Common shapes:
@@ -254,21 +253,12 @@ TERMAG_URL=wss://localhost/api/ws/agent
 
 `ws://` (no TLS) is only accepted when the hostname is `localhost`, `127.0.0.1`, or `::1`. Anything else must be `wss://` or the agent refuses to connect.
 
-If you are using the local Docker stack at `wss://localhost`, Caddy serves a local certificate that Node may not trust. For that local-only case, add:
-
-```bash
-export TERMAG_TLS_INSECURE_SKIP_VERIFY=true
-```
-
-Do not use that setting for public or remote hosts.
-
 A complete local Docker agent config looks like:
 
 ```bash
 export TERMAG_URL=wss://localhost/api/ws/agent
 export TERMAG_AGENT_TOKEN=tmag_...
 export TERMAG_AGENT_ROOTS='{"workstation":"~/Projects"}'
-export TERMAG_TLS_INSECURE_SKIP_VERIFY=true
 ```
 
 Add more devices by creating one token per device, installing the agent on that device, and giving it a named root. The root key is the device label in the sidebar.
@@ -281,25 +271,17 @@ Sessions map to tmux sessions. Each terminal tab maps to a tmux window in the sa
 
 To bind Termag to work you already have running, click `+` -> **Connect tmux session**. The dialog lists unattached tmux sessions from every connected device. Pick a session and Termag adds one terminal tab for each tmux window. Existing attached windows are treated as external: deleting the Termag project detaches from them instead of killing the tmux session. New tabs you add later inside that attached project are Termag-created tmux windows in the same session.
 
-You can also publish from the device itself:
+The protocol-v2 agent discovers sessions continuously. No per-session publish
+command is required. Its one-shot CLI commands are:
 
 ```bash
-termag new            # fresh tmux-backed shell here
-termag connect        # publish this tmux window, or create one if outside tmux
-termag adopt          # publish every window in the current tmux session
-# explicit project/tab override:
-termag connect --project Restful-ESP32 --tab codex
-# equivalent shorthand:
-termag -p Restful-ESP32 -t codex
+termag list
+termag attach workstation:Restful-ESP32
+termag config show
 ```
 
-With no flags, `new` and `connect` infer the project from the current git repo or directory name. That creates or updates the project in the browser and adds the current tmux window as a terminal tab. To publish every window in the current tmux session:
-
-```bash
-termag adopt Restful-ESP32
-```
-
-These commands use the same `TERMAG_URL` and `TERMAG_AGENT_TOKEN` exports as the long-running agent. If a command runs outside tmux, Termag creates or reuses a detached tmux session named after the project and a window named after `--tab`, starts the background websocket agent, then attaches your local terminal to the tmux session. A normal Terminal or iTerm shell cannot be moved into tmux after it has already started, so this fallback starts a new shell at the current directory. Use `--no-attach` to publish without attaching locally, or `--no-agent` if you already manage the long-running agent separately.
+Create cloud sessions from the web UI inside an allowlisted root. Existing
+HerdR and tmux sessions are mirrored automatically.
 
 ## Local Development
 
@@ -324,7 +306,7 @@ export TERMAG_AGENT_ROOTS='{"local":"~/Projects"}'
 Run it:
 
 ```bash
-npm run agent
+cargo run --manifest-path apps/agent-rs/Cargo.toml
 ```
 
 Preview the UI without tmux:
@@ -335,18 +317,7 @@ DATABASE_URL='file:./dev.db' npm run preview:seed -w apps/web
 npm run dev
 ```
 
-Then configure the fake agent in another shell:
-
-```bash
-export TERMAG_URL='ws://localhost:3000/api/ws/agent'
-export TERMAG_AGENT_TOKEN="$TERMAG_PREVIEW_AGENT_TOKEN"
-```
-
-Run it:
-
-```bash
-npm run fake -w apps/agent
-```
+Then bootstrap or configure the Rust agent in another shell with the preview token.
 
 ## Useful Commands
 
@@ -354,5 +325,5 @@ npm run fake -w apps/agent
 npm run typecheck
 npm run build
 npm run dev
-npm run agent
+cargo run --manifest-path apps/agent-rs/Cargo.toml
 ```

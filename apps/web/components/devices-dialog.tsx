@@ -316,8 +316,6 @@ export function DevicesDialog({
                 "export TERMAG_AGENT_TOKEN=tmag_REPLACE_WITH_DEVICE_TOKEN",
                 `export TERMAG_AGENT_ROOTS='${shellSingleQuoteContent(rootsJson)}'`,
               ].join("\n");
-              const connectCommand = `termag new`;
-              const sessionCommand = `termag adopt`;
               return (
                 <div
                   key={name}
@@ -599,18 +597,6 @@ export function DevicesDialog({
                       onClick={() => copyText(`env:${name}`, envTemplate)}
                       title="Copy TERMAG_URL / TOKEN / ROOTS exports"
                     />
-                    <CopyButton
-                      label="New shell"
-                      copied={copied === `connect:${name}`}
-                      onClick={() => copyText(`connect:${name}`, connectCommand)}
-                      title="termag new publishes a shell in this directory"
-                    />
-                    <CopyButton
-                      label="Adopt tmux"
-                      copied={copied === `session:${name}`}
-                      onClick={() => copyText(`session:${name}`, sessionCommand)}
-                      title="termag adopt publishes every window in this tmux session"
-                    />
                   </div>
                 </div>
               );
@@ -632,8 +618,8 @@ export function DevicesDialog({
           <div className="mt-4 rounded-md border border-line bg-bg p-3 text-xs text-muted">
             <div className="mb-2 font-medium text-text">Setup</div>
             <p>
-              Install the agent on each device, export its token and roots, then run connect from
-              any terminal to publish a tmux workspace or start a new tmux-backed shell.
+              Install and bootstrap the Rust agent on each device. It continuously discovers HerdR
+              and tmux; no per-session publish command is needed.
             </p>
             <a
               href="https://github.com/yeutterg/termag-next#quick-setup"

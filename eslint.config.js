@@ -14,8 +14,7 @@ export default [
       "*.config.mjs",
       "coverage/**",
       "apps/web/.next/**",
-      "apps/web/next-env.d.ts",
-      "apps/agent/dist/**"
+      "apps/web/next-env.d.ts"
     ]
   },
   {
@@ -70,13 +69,6 @@ export default [
       react: {
         version: "detect"
       }
-    }
-  },
-  {
-    files: ["apps/agent/src/index.ts"],
-    rules: {
-      "no-console": "off",
-      "@typescript-eslint/no-require-imports": "off"
     }
   },
   {

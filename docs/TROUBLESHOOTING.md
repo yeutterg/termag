@@ -283,7 +283,7 @@ curl -v http://localhost:3000/api/health
 node --version
 
 # Run agent in debug mode
-TERMAG_AGENT_DEBUG=true npm run agent
+RUST_BACKTRACE=1 cargo run --manifest-path apps/agent-rs/Cargo.toml
 ```
 
 ### Agent Can't Find tmux
