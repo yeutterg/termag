@@ -1,12 +1,13 @@
 use anyhow::{bail, Context, Result};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
     env, fs,
+    io::Write,
     path::{Path, PathBuf},
 };
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct FileConfig {
     url: Option<String>,
@@ -108,6 +109,119 @@ impl Config {
             inventory_interval_ms,
         })
     }
+}
+
+pub fn config_path() -> Result<PathBuf> {
+    let home = home_dir()?;
+    Ok(env::var_os("TERMAG_CONFIG")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home.join(".termag/config.json")))
+}
+
+pub fn save_credentials(url: &str, token: &str) -> Result<PathBuf> {
+    let path = config_path()?;
+    let mut file = load_file(&path)?;
+    file.url = Some(url.trim().to_owned());
+    file.agent_token = Some(token.trim().to_owned());
+    save_file(&path, &file)?;
+    Ok(path)
+}
+
+pub fn set_roots(raw: &str) -> Result<PathBuf> {
+    let roots: BTreeMap<String, String> =
+        serde_json::from_str(raw).context("roots must be a JSON object of name-to-path strings")?;
+    if roots.is_empty()
+        || roots
+            .iter()
+            .any(|(name, path)| name.trim().is_empty() || path.trim().is_empty())
+    {
+        bail!("roots must contain at least one non-empty name and path");
+    }
+    let path = config_path()?;
+    let mut file = load_file(&path)?;
+    file.agent_roots = Some(roots);
+    save_file(&path, &file)?;
+    Ok(path)
+}
+
+pub fn describe() -> Result<String> {
+    let path = config_path()?;
+    let file = load_file(&path)?;
+    let resolved = Config::load();
+    let (url, token, roots) = match resolved {
+        Ok(config) => (Some(config.url), Some(config.token), config.roots),
+        Err(_) => {
+            let roots = file
+                .agent_roots
+                .clone()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|(name, value)| (name, PathBuf::from(value)))
+                .collect();
+            (file.url.clone(), file.agent_token.clone(), roots)
+        }
+    };
+    let masked = token
+        .as_deref()
+        .map(mask_token)
+        .unwrap_or_else(|| "(unset)".to_owned());
+    let roots = if roots.is_empty() {
+        "(none)".to_owned()
+    } else {
+        serde_json::to_string(
+            &roots
+                .into_iter()
+                .map(|(name, path)| (name, path.to_string_lossy().into_owned()))
+                .collect::<BTreeMap<_, _>>(),
+        )?
+    };
+    Ok(format!(
+        "config file: {}\n  exists:    {}\n\nresolved (env > file):\n  url:       {}\n  token:     {}\n  roots:     {}",
+        path.display(),
+        if path.exists() { "yes" } else { "no" },
+        url.as_deref().unwrap_or("(unset)"),
+        masked,
+        roots
+    ))
+}
+
+fn load_file(path: &Path) -> Result<FileConfig> {
+    match fs::read_to_string(path) {
+        Ok(raw) => serde_json::from_str(&raw)
+            .with_context(|| format!("could not parse {}", path.display())),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(FileConfig::default()),
+        Err(err) => Err(err).with_context(|| format!("could not read {}", path.display())),
+    }
+}
+
+fn save_file(path: &Path, config: &FileConfig) -> Result<()> {
+    let parent = path.parent().context("config path has no parent")?;
+    fs::create_dir_all(parent).with_context(|| format!("could not create {}", parent.display()))?;
+    let mut options = fs::OpenOptions::new();
+    options.create(true).truncate(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        options.mode(0o600);
+        let _ = fs::set_permissions(parent, fs::Permissions::from_mode(0o700));
+    }
+    let mut handle = options
+        .open(path)
+        .with_context(|| format!("could not write {}", path.display()))?;
+    handle.write_all(serde_json::to_string_pretty(config)?.as_bytes())?;
+    handle.write_all(b"\n")?;
+    handle.sync_all()?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(())
+}
+
+fn mask_token(token: &str) -> String {
+    let prefix: String = token.chars().take(13).collect();
+    format!("{prefix}…")
 }
 
 pub fn home_dir() -> Result<PathBuf> {

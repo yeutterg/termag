@@ -2,6 +2,7 @@
 name = "termag-agent"
 version = "0.2.0"
 edition = "2021"
+rust-version = "1.82"
 license = "MIT"
 description = "Low-footprint outbound agent for Termag"
 
@@ -16,7 +17,7 @@ futures-util = "0.3"
 libc = "0.2"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-tokio = { version = "1.45", features = ["io-util", "macros", "net", "process", "rt", "signal", "sync", "time"] }
+tokio = { version = "1.45", features = ["io-std", "io-util", "macros", "net", "process", "rt", "signal", "sync", "time"] }
 tokio-tungstenite = { version = "0.26", features = ["rustls-tls-native-roots"] }
 
 [profile.release]
