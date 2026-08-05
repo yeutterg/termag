@@ -31,6 +31,7 @@ import { TabLabel } from "./tab-label";
 import { useTabHistory } from "./use-tab-history";
 import type { AgentDeviceStatus, Project, Tab, TmuxDeviceSession, TmuxWindow } from "./types";
 import type { Platform } from "@/lib/platform";
+import type { GitOperation, GitOperationResult } from "@/lib/broker";
 import { cn, statusDot } from "@/lib/utils";
 import { HerdrStatusIcon } from "./herdr-status-icon";
 import { MirroredTerminalLayout } from "./mirrored-terminal-layout";
@@ -237,6 +238,12 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
   const [sidebarOpen, setSidebarOpen] = useState(platform.showShortcuts);
   const [showCtrl, setShowCtrl] = useState(true);
   const [paletteOpen, setPaletteOpen] = useState(false);
+  const [gitBusy, setGitBusy] = useState(false);
+  const [gitResult, setGitResult] = useState<{
+    title: string;
+    ok: boolean;
+    output: string;
+  } | null>(null);
   const [searchOpen, setSearchOpen] = useState(false);
   const [devicesOpen, setDevicesOpen] = useState(false);
   const [focusedDevice, setFocusedDevice] = useState<string | null>(null);
@@ -341,6 +348,11 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
     activeAgentDevice.kind !== "ssh" &&
     (activeAgentDevice.protocolVersion ?? 1) >= 2 &&
     activeAgentDevice.capabilities?.powerPolicy
+  );
+  const gitSupported = Boolean(
+    activeAgentDevice &&
+    activeAgentDevice.kind !== "ssh" &&
+    activeAgentDevice.capabilities?.gitOperations
   );
   const ownsCurrentPowerLease = Boolean(
     powerSupported && activeProject && caffeinateLeaseDevice === activeProject.rootKey
@@ -1247,6 +1259,70 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
     }
   }, [activeTab]);
 
+  const onGitOperation = useCallback(
+    async (operation: GitOperation) => {
+      if (!activeProject || gitBusy) {
+        return;
+      }
+      let input: Record<string, unknown> = {};
+      if (operation === "git.commit") {
+        const message = window.prompt("Commit message");
+        if (!message?.trim()) {
+          return;
+        }
+        input = { message: message.trim() };
+      } else if (operation === "git.branch") {
+        const branch = window.prompt("Existing branch to switch to");
+        if (!branch?.trim()) {
+          return;
+        }
+        input = { branch: branch.trim() };
+      } else if (operation === "git.stage") {
+        const value = window.prompt("Relative paths to stage (comma-separated)", ".");
+        if (!value?.trim()) {
+          return;
+        }
+        const paths = value
+          .split(",")
+          .map(path => path.trim())
+          .filter(Boolean);
+        if (paths.length === 0) {
+          return;
+        }
+        input = { paths };
+      }
+
+      setGitBusy(true);
+      try {
+        const response = await fetch("/api/git", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ projectId: activeProject.id, operation, ...input }),
+        });
+        const result = (await response.json()) as GitOperationResult & { error?: string };
+        if (!response.ok) {
+          throw new Error(result.error || "Git operation failed");
+        }
+        setGitResult({
+          title: operation.replace("git.", "Git "),
+          ok: result.ok,
+          output:
+            result.output ||
+            (result.ok ? "Operation completed successfully." : `Git exited ${result.exitCode}.`),
+        });
+      } catch (error) {
+        setGitResult({
+          title: operation.replace("git.", "Git "),
+          ok: false,
+          output: error instanceof Error ? error.message : "Git operation failed",
+        });
+      } finally {
+        setGitBusy(false);
+      }
+    },
+    [activeProject, gitBusy, setGitBusy, setGitResult]
+  );
+
   const openDevices = useCallback(
     (deviceName?: string) => {
       setFocusedDevice(deviceName ?? null);
@@ -2056,9 +2132,44 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
               // owns the dialog state). Open Devices first; the SSH add
               // button is one click away.
               onAddSshHost={() => openDevices()}
+              onGitOperation={
+                gitSupported && activeProject && !gitBusy ? onGitOperation : undefined
+              }
               authMode={authMode}
             />
           </Suspense>
+        )}
+        {gitResult && (
+          <div className="fixed inset-0 z-[60] grid place-items-center bg-black/60 p-4">
+            <div
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="git-result-title"
+              className="flex max-h-[min(80dvh,640px)] w-full max-w-2xl flex-col overflow-hidden rounded-xl border border-border bg-panel shadow-2xl"
+            >
+              <div className="flex min-h-14 items-center justify-between gap-3 border-b border-border px-4">
+                <div>
+                  <h2 id="git-result-title" className="font-medium capitalize">
+                    {gitResult.title}
+                  </h2>
+                  <p className={gitResult.ok ? "text-xs text-green-400" : "text-xs text-red-400"}>
+                    {gitResult.ok ? "Completed" : "Git reported an error"}
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  className="grid h-11 w-11 place-items-center rounded-md text-muted hover:bg-panel2 hover:text-text"
+                  onClick={() => setGitResult(null)}
+                  aria-label="Close git result"
+                >
+                  ×
+                </button>
+              </div>
+              <pre className="min-h-0 flex-1 overflow-auto whitespace-pre-wrap break-words p-4 font-mono text-xs leading-relaxed text-text">
+                {gitResult.output}
+              </pre>
+            </div>
+          </div>
         )}
         {searchOpen && (
           <Suspense fallback={null}>

@@ -10,36 +10,25 @@ on disk is not counted as a feature.
 
 ## Shipped and wired
 
-| Feature                         | Where                                             |
-| ------------------------------- | ------------------------------------------------- |
-| Keyboard shortcut help          | `components/termag-app.tsx`                       |
-| Project and tab reordering      | `components/termag-app.tsx`                       |
-| Theme and font controls         | `app/globals.css`, `tailwind.config.ts`           |
-| Terminal touch/swipe navigation | `components/terminal/terminal-pane.tsx`           |
-| Accessible labels and dialogs   | live components under `components/`               |
-| Runtime-safe command palette    | `components/command-palette.tsx`, navigation only |
-
-## Present but not fully integrated
-
-These have a module and no complete path from the UI, or depend on the v1-only
-command channel:
-
-| Feature           | Where                      | Blocker                     |
-| ----------------- | -------------------------- | --------------------------- |
-| Command snippets  | `lib/command-snippets.ts`  | not surfaced in the palette |
-| Session bookmarks | `lib/session-bookmarks.ts` | not surfaced in the palette |
-| Session templates | `lib/session-templates.ts` | no live creation UI         |
-| Session history   | `lib/session-history.ts`   | no live recovery UI         |
-| Clipboard history | `lib/clipboard-history.ts` | no live dialog              |
+| Feature                         | Where                                                    |
+| ------------------------------- | -------------------------------------------------------- |
+| Keyboard shortcut help          | `components/termag-app.tsx`                              |
+| Project and tab reordering      | `components/termag-app.tsx`                              |
+| Theme and font controls         | `app/globals.css`, `tailwind.config.ts`                  |
+| Terminal touch/swipe navigation | `components/terminal/terminal-pane.tsx`                  |
+| Accessible labels and dialogs   | live components under `components/`                      |
+| Runtime-safe command palette    | `components/command-palette.tsx`, navigation + typed git |
 
 ## Retired scaffolding
 
 The old example command-palette execution tree, arbitrary shell-command
 facade, unmounted toast/dialog tree, duplicate touch hook, and standalone
-observability experiments were deleted. They had no importer from the live
-application and several referenced database fields that no longer exist.
-Future git or filesystem actions must use typed Protocol v2 operations rather
-than reviving the arbitrary `execute-command` channel.
+observability experiments were deleted. The same cleanup removed the unused
+snippet, bookmark, template, history, and clipboard-storage modules after
+their last placeholder palette references disappeared. They had no importer
+from the live application and several referenced database fields that no
+longer exist. Future git or filesystem actions must use typed Protocol v2
+operations rather than reviving the arbitrary `execute-command` channel.
 
 ## Not implemented
 

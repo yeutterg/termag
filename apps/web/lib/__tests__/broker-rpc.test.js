@@ -48,6 +48,18 @@ describe("broker RPC facade", () => {
     expect(sendToAgent).toHaveBeenCalledTimes(1);
   });
 
+  test("allows only typed git operations", async () => {
+    const { rpc, sendToAgent } = makeRpc();
+
+    await expect(
+      rpc.gitOperation("u1", "laptop", "git.status", { rootKey: "laptop" })
+    ).resolves.toEqual({ ok: true });
+    await expect(rpc.gitOperation("u1", "laptop", "git.shell", {})).rejects.toThrow(
+      "Unsupported git operation"
+    );
+    expect(sendToAgent).toHaveBeenCalledTimes(1);
+  });
+
   test("merges local-agent and SSH tmux inventories", async () => {
     const { rpc } = makeRpc();
 

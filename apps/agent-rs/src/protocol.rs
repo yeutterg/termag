@@ -13,6 +13,7 @@ pub struct CapabilitySet {
     pub tmux: bool,
     pub directory_policy: bool,
     pub power_policy: bool,
+    pub git_operations: bool,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]

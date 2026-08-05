@@ -11,6 +11,15 @@ const RUNTIME_OPERATIONS = new Set([
   "runtime.close-session",
 ]);
 
+const GIT_OPERATIONS = new Set([
+  "git.status",
+  "git.branch",
+  "git.commit",
+  "git.push",
+  "git.pull",
+  "git.stage",
+]);
+
 function createBrokerRpc({
   WebSocket,
   agentsForUser,
@@ -81,6 +90,16 @@ function createBrokerRpc({
     async mutateRuntime(userId, deviceName, operation, payload = {}, timeoutMs = 10_000) {
       if (!RUNTIME_OPERATIONS.has(operation)) {
         throw new Error("Unsupported runtime operation");
+      }
+      if (!agentForUser(userId, deviceName)) {
+        throw new Error("Agent offline");
+      }
+      return sendToAgent(userId, deviceName, operation, payload, timeoutMs);
+    },
+
+    async gitOperation(userId, deviceName, operation, payload = {}, timeoutMs = 35_000) {
+      if (!GIT_OPERATIONS.has(operation)) {
+        throw new Error("Unsupported git operation");
       }
       if (!agentForUser(userId, deviceName)) {
         throw new Error("Agent offline");

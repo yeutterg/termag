@@ -1,6 +1,7 @@
 mod cli;
 mod config;
 mod fs_policy;
+mod git;
 mod herdr;
 mod inventory;
 mod power;
@@ -349,6 +350,10 @@ async fn handle_request(
                 let listing = fs_policy::list_directory(config, &root, &relative)?;
                 Ok((serde_json::to_value(listing)?, Vec::new()))
             }
+            kind if kind.starts_with("git.") => {
+                let cwd = request_cwd(config, &incoming)?;
+                Ok((git::execute(kind, &cwd, &incoming).await?, Vec::new()))
+            }
             kind if kind.starts_with("power.") || kind.starts_with("caffeinate-") => {
                 handle_power_request(power, &incoming).await
             }
@@ -642,6 +647,7 @@ fn inventory_message(snapshot: &InventorySnapshot) -> Value {
         tmux: inventory::runtime_available(snapshot, "tmux"),
         directory_policy: true,
         power_policy: cfg!(target_os = "macos"),
+        git_operations: true,
     };
     json!({
         "type": "inventory.snapshot", "protocolVersion": PROTOCOL_VERSION,

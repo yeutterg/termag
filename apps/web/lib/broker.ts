@@ -73,6 +73,13 @@ type Broker = {
     payload: Record<string, unknown>,
     timeoutMs?: number
   ) => Promise<Record<string, unknown>>;
+  gitOperation?: (
+    userId: string,
+    deviceName: string,
+    operation: GitOperation,
+    payload: Record<string, unknown>,
+    timeoutMs?: number
+  ) => Promise<GitOperationResult>;
 };
 
 export type RuntimeOperation =
@@ -86,6 +93,21 @@ export type RuntimeOperation =
   | "runtime.close-pane"
   | "runtime.close-space"
   | "runtime.close-session";
+
+export type GitOperation =
+  | "git.status"
+  | "git.branch"
+  | "git.commit"
+  | "git.push"
+  | "git.pull"
+  | "git.stage";
+
+export type GitOperationResult = {
+  ok: boolean;
+  exitCode: number | null;
+  output: string;
+  truncated?: boolean;
+};
 
 export type ConnectedDevice = {
   name: string;
@@ -274,6 +296,20 @@ export async function mutateRuntime(
     throw new Error("Agent offline or does not support runtime mutations");
   }
   return live.mutateRuntime(userId, deviceName, operation, payload, timeoutMs);
+}
+
+export async function runGitOperation(
+  userId: string,
+  deviceName: string,
+  operation: GitOperation,
+  payload: Record<string, unknown>,
+  timeoutMs = 35_000
+): Promise<GitOperationResult> {
+  const live = broker();
+  if (!live?.gitOperation) {
+    throw new Error("Agent offline or does not support git operations");
+  }
+  return live.gitOperation(userId, deviceName, operation, payload, timeoutMs);
 }
 
 /**
