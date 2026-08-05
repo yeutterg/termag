@@ -1,6 +1,6 @@
-'use client';
+"use client";
 
-import { type FormEvent, useEffect, useRef, useState } from 'react';
+import { type FormEvent, useEffect, useRef, useState } from "react";
 
 type SshConfigEntry = {
   name: string;
@@ -23,16 +23,37 @@ export type SshHost = {
 // A small fixed palette keeps the picker simple and avoids the user
 // choosing colors that don't read against the dashboard theme. Stored as
 // short tokens — UI components map them to actual CSS colors.
-export const HOST_COLOR_PALETTE = ['red', 'orange', 'amber', 'green', 'teal', 'blue', 'indigo', 'violet', 'pink'] as const;
+export const HOST_COLOR_PALETTE = [
+  "red",
+  "orange",
+  "amber",
+  "green",
+  "teal",
+  "blue",
+  "indigo",
+  "violet",
+  "pink",
+] as const;
 
 export function colorToCss(color: string | null | undefined): string | undefined {
-  if (!color) return undefined;
+  if (!color) {
+    return undefined;
+  }
   // Hex passthrough.
-  if (color.startsWith('#')) return color;
+  if (color.startsWith("#")) {
+    return color;
+  }
   // Palette names → conservative HSL values that read well on both themes.
   const map: Record<string, string> = {
-    red: '#ef4444', orange: '#f97316', amber: '#f59e0b', green: '#22c55e',
-    teal: '#14b8a6', blue: '#3b82f6', indigo: '#6366f1', violet: '#a855f7', pink: '#ec4899'
+    red: "#ef4444",
+    orange: "#f97316",
+    amber: "#f59e0b",
+    green: "#22c55e",
+    teal: "#14b8a6",
+    blue: "#3b82f6",
+    indigo: "#6366f1",
+    violet: "#a855f7",
+    pink: "#ec4899",
   };
   return map[color];
 }
@@ -45,68 +66,85 @@ interface NewSshHostDialogProps {
 
 export function NewSshHostDialog({ open, onOpenChange, onCreated }: NewSshHostDialogProps) {
   const [submitting, setSubmitting] = useState(false);
-  const [error, setError] = useState('');
-  const [color, setColor] = useState<string>('');
+  const [error, setError] = useState("");
+  const [color, setColor] = useState<string>("");
   const [configEntries, setConfigEntries] = useState<SshConfigEntry[]>([]);
-  const [configNote, setConfigNote] = useState<string>('');
+  const [configNote, setConfigNote] = useState<string>("");
   const formRef = useRef<HTMLFormElement>(null);
 
   // Pre-load the broker's ~/.ssh/config so the picker has options ready
   // when the user opens the dialog. Failures (no config, permissions)
   // just fall back to manual entry — `configNote` surfaces the reason.
   useEffect(() => {
-    if (!open) return;
+    if (!open) {
+      return;
+    }
     let cancelled = false;
-    fetch('/api/ssh-config')
-      .then((res) => res.json().catch(() => ({})))
-      .then((body) => {
-        if (cancelled) return;
-        if (Array.isArray(body?.entries)) setConfigEntries(body.entries);
-        if (typeof body?.note === 'string') setConfigNote(body.note);
-        else setConfigNote('');
+    fetch("/api/ssh-config")
+      .then(res => res.json().catch(() => ({})))
+      .then(body => {
+        if (cancelled) {
+          return;
+        }
+        if (Array.isArray(body?.entries)) {
+          setConfigEntries(body.entries);
+        }
+        if (typeof body?.note === "string") {
+          setConfigNote(body.note);
+        } else {
+          setConfigNote("");
+        }
       })
       .catch(() => {
-        if (!cancelled) setConfigEntries([]);
+        if (!cancelled) {
+          setConfigEntries([]);
+        }
       });
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+    };
   }, [open]);
 
   function applyConfigEntry(entry: SshConfigEntry) {
     const form = formRef.current;
-    if (!form) return;
-    (form.elements.namedItem('name') as HTMLInputElement | null)?.setAttribute('value', '');
+    if (!form) {
+      return;
+    }
+    (form.elements.namedItem("name") as HTMLInputElement | null)?.setAttribute("value", "");
     const set = (name: string, value: string) => {
       const el = form.elements.namedItem(name) as HTMLInputElement | null;
-      if (el) el.value = value;
+      if (el) {
+        el.value = value;
+      }
     };
-    set('name', entry.name);
-    set('host', entry.hostname);
-    set('user', entry.user || '');
-    set('port', String(entry.port ?? 22));
+    set("name", entry.name);
+    set("host", entry.hostname);
+    set("user", entry.user || "");
+    set("port", String(entry.port ?? 22));
   }
 
   async function createHost(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    setError('');
+    setError("");
     const form = event.currentTarget;
     const data = new FormData(form);
     const payload = {
-      name: String(data.get('name') || '').trim(),
-      host: String(data.get('host') || '').trim(),
-      port: Number(data.get('port') || '22') || 22,
-      user: String(data.get('user') || '').trim(),
-      color: color || null
+      name: String(data.get("name") || "").trim(),
+      host: String(data.get("host") || "").trim(),
+      port: Number(data.get("port") || "22") || 22,
+      user: String(data.get("user") || "").trim(),
+      color: color || null,
     };
     if (!payload.name || !payload.host || !payload.user) {
-      setError('Name, host, and user are required.');
+      setError("Name, host, and user are required.");
       return;
     }
     setSubmitting(true);
     try {
-      const res = await fetch('/api/ssh-hosts', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify(payload)
+      const res = await fetch("/api/ssh-hosts", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(payload),
       });
       const body = await res.json().catch(() => ({}));
       if (!res.ok) {
@@ -117,21 +155,29 @@ export function NewSshHostDialog({ open, onOpenChange, onCreated }: NewSshHostDi
       form.reset();
       onOpenChange(false);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Could not add host');
+      setError(err instanceof Error ? err.message : "Could not add host");
     } finally {
       setSubmitting(false);
     }
   }
 
-  if (!open) return null;
+  if (!open) {
+    return null;
+  }
   return (
     <div className="fixed inset-0 z-50 bg-black/35 p-4" onClick={() => onOpenChange(false)}>
-      <section className="mx-auto mt-[10vh] max-w-lg rounded-lg border border-line bg-panel p-4 shadow-2xl" onClick={(event) => event.stopPropagation()}>
+      <section
+        className="mx-auto mt-[10vh] max-w-lg rounded-lg border border-line bg-panel p-4 shadow-2xl"
+        onClick={event => event.stopPropagation()}
+      >
         <div className="mb-4">
           <h2 className="text-base font-semibold">Add SSH host</h2>
           <p className="mt-1 text-sm text-muted">
-            The broker connects with your machine&apos;s <code className="font-mono text-xs">ssh-agent</code> + <code className="font-mono text-xs">~/.ssh/config</code>.
-            Make sure you can run <code className="font-mono text-xs">ssh user@host</code> from the broker non-interactively first.
+            The broker connects with your machine&apos;s{" "}
+            <code className="font-mono text-xs">ssh-agent</code> +{" "}
+            <code className="font-mono text-xs">~/.ssh/config</code>. Make sure you can run{" "}
+            <code className="font-mono text-xs">ssh user@host</code> from the broker
+            non-interactively first.
           </p>
         </div>
         {configEntries.length > 0 && (
@@ -141,18 +187,24 @@ export function NewSshHostDialog({ open, onOpenChange, onCreated }: NewSshHostDi
               <select
                 className="mt-1 h-8 w-full rounded-md border border-line bg-panel px-2 text-sm outline-none focus:border-accent"
                 defaultValue=""
-                onChange={(event) => {
-                  const entry = configEntries.find((e) => e.name === event.target.value);
-                  if (entry) applyConfigEntry(entry);
+                onChange={event => {
+                  const entry = configEntries.find(e => e.name === event.target.value);
+                  if (entry) {
+                    applyConfigEntry(entry);
+                  }
                   // Reset back to placeholder so the same entry can be
                   // re-selected after manual edits.
-                  event.target.value = '';
+                  event.target.value = "";
                 }}
               >
-                <option value="" disabled>Choose a host to pre-fill…</option>
-                {configEntries.map((entry) => (
+                <option value="" disabled>
+                  Choose a host to pre-fill…
+                </option>
+                {configEntries.map(entry => (
                   <option key={entry.name} value={entry.name}>
-                    {entry.name} {entry.hostname && entry.hostname !== entry.name ? `→ ${entry.hostname}` : ''}{entry.user ? ` as ${entry.user}` : ''}
+                    {entry.name}{" "}
+                    {entry.hostname && entry.hostname !== entry.name ? `→ ${entry.hostname}` : ""}
+                    {entry.user ? ` as ${entry.user}` : ""}
                   </option>
                 ))}
               </select>
@@ -160,7 +212,9 @@ export function NewSshHostDialog({ open, onOpenChange, onCreated }: NewSshHostDi
           </div>
         )}
         {configEntries.length === 0 && configNote && (
-          <div className="mb-3 rounded-md border border-line bg-bg p-2 text-xs text-muted">{configNote}</div>
+          <div className="mb-3 rounded-md border border-line bg-bg p-2 text-xs text-muted">
+            {configNote}
+          </div>
         )}
         <form ref={formRef} onSubmit={createHost} className="space-y-3">
           <label className="block">
@@ -208,18 +262,20 @@ export function NewSshHostDialog({ open, onOpenChange, onCreated }: NewSshHostDi
             />
           </label>
           <fieldset>
-            <legend className="mb-1 block text-xs font-medium text-muted">Color (helps distinguish hosts at a glance)</legend>
+            <legend className="mb-1 block text-xs font-medium text-muted">
+              Color (helps distinguish hosts at a glance)
+            </legend>
             <div className="flex flex-wrap items-center gap-2">
               <button
                 type="button"
-                onClick={() => setColor('')}
+                onClick={() => setColor("")}
                 aria-label="No color"
-                aria-pressed={color === ''}
-                className={`h-6 w-6 rounded-md border ${color === '' ? 'border-accent ring-2 ring-accent' : 'border-line'} bg-bg`}
+                aria-pressed={color === ""}
+                className={`h-6 w-6 rounded-md border ${color === "" ? "border-accent ring-2 ring-accent" : "border-line"} bg-bg`}
               >
                 <span className="block h-full w-full text-[10px] text-muted">∅</span>
               </button>
-              {HOST_COLOR_PALETTE.map((name) => {
+              {HOST_COLOR_PALETTE.map(name => {
                 const css = colorToCss(name)!;
                 const active = color === name;
                 return (
@@ -230,14 +286,18 @@ export function NewSshHostDialog({ open, onOpenChange, onCreated }: NewSshHostDi
                     aria-label={name}
                     aria-pressed={active}
                     title={name}
-                    className={`h-6 w-6 rounded-md border ${active ? 'border-accent ring-2 ring-accent' : 'border-line'}`}
+                    className={`h-6 w-6 rounded-md border ${active ? "border-accent ring-2 ring-accent" : "border-line"}`}
                     style={{ backgroundColor: css }}
                   />
                 );
               })}
             </div>
           </fieldset>
-          {error && <div className="rounded-md border border-bad/30 bg-bad/10 px-3 py-2 text-xs text-bad">{error}</div>}
+          {error && (
+            <div className="rounded-md border border-bad/30 bg-bad/10 px-3 py-2 text-xs text-bad">
+              {error}
+            </div>
+          )}
           <div className="flex justify-end gap-2 pt-1">
             <button
               type="button"
@@ -251,7 +311,7 @@ export function NewSshHostDialog({ open, onOpenChange, onCreated }: NewSshHostDi
               disabled={submitting}
               className="h-9 rounded-md bg-text px-3 text-sm font-medium text-bg disabled:opacity-60"
             >
-              {submitting ? 'Adding…' : 'Add host'}
+              {submitting ? "Adding…" : "Add host"}
             </button>
           </div>
         </form>

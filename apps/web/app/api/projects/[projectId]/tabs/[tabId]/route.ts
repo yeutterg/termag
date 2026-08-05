@@ -14,9 +14,13 @@ const updateSchema = z.object({
 export const PATCH = withAuth(async (user, request: Request, { params }: Params) => {
   const { projectId, tabId } = await params;
   const bodyResult = await readJsonBody(request);
-  if (!bodyResult.ok) return bodyResult.response;
+  if (!bodyResult.ok) {
+    return bodyResult.response;
+  }
   const parsed = updateSchema.safeParse(bodyResult.data);
-  if (!parsed.success) return NextResponse.json({ error: "Invalid tab payload" }, { status: 400 });
+  if (!parsed.success) {
+    return NextResponse.json({ error: "Invalid tab payload" }, { status: 400 });
+  }
   const tab = await prisma.tab.findFirst({
     where: { id: tabId, project: { id: projectId, userId: user.id } },
     include: {
@@ -31,7 +35,9 @@ export const PATCH = withAuth(async (user, request: Request, { params }: Params)
       },
     },
   });
-  if (!tab) return NextResponse.json({ error: "Not found" }, { status: 404 });
+  if (!tab) {
+    return NextResponse.json({ error: "Not found" }, { status: 404 });
+  }
   if (tab.project.mirrored && tab.project.runtimeSessionId && tab.runtimeTabId) {
     const renamePane =
       parsed.data.scope === "pane" && tab.project.runtime === "herdr" && tab.runtimePaneId;
@@ -100,7 +106,9 @@ export const DELETE = withAuth(async (user, request: Request, { params }: Params
       },
     },
   });
-  if (!tab) return NextResponse.json({ error: "Not found" }, { status: 404 });
+  if (!tab) {
+    return NextResponse.json({ error: "Not found" }, { status: 404 });
+  }
   if (tab.project.mirrored && tab.project.runtimeSessionId && tab.runtimeTabId) {
     const paneCount = await prisma.tab.count({
       where: {

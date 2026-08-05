@@ -46,7 +46,9 @@ export const GET = withAuth(async user => {
 
 export const POST = withAuth(async (user, request: Request) => {
   const bodyResult = await readJsonBody(request);
-  if (!bodyResult.ok) return bodyResult.response;
+  if (!bodyResult.ok) {
+    return bodyResult.response;
+  }
   const parsed = createSchema.safeParse(bodyResult.data);
   if (!parsed.success) {
     return NextResponse.json({ error: "Invalid project payload" }, { status: 400 });

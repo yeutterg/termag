@@ -1,10 +1,8 @@
 import { z } from "zod";
 
 // Common validation patterns
-const emailSchema = z.string().email("Invalid email address");
 const cuidSchema = z.string().cuid("Invalid ID format");
 const nonEmptyString = z.string().min(1, "Cannot be empty");
-const urlSchema = z.string().url("Invalid URL format");
 
 // Agent token validation
 export const agentTokenSchema = z.object({

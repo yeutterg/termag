@@ -1,5 +1,5 @@
 // broker is CommonJS because it is loaded by the custom Next.js server.
-// eslint-disable-next-line @typescript-eslint/no-require-imports
+
 const { parseAgentTerminalFrame } = require("../../server/broker");
 
 describe("binary terminal frame", () => {

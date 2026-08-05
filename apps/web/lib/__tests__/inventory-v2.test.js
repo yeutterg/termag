@@ -1,5 +1,5 @@
 // inventory-v2 is intentionally CommonJS because it is loaded by the custom broker.
-// eslint-disable-next-line @typescript-eslint/no-require-imports
+
 const { normalizeSnapshot, reconcileInventory } = require("../../server/inventory-v2");
 
 describe("protocol-v2 inventory normalization", () => {

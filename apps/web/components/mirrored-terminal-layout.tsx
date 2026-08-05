@@ -14,11 +14,17 @@ type HerdrLayout = {
 };
 
 function parseLayout(value?: string | null): HerdrLayout | null {
-  if (!value) return null;
+  if (!value) {
+    return null;
+  }
   try {
     const layout = JSON.parse(value) as Partial<HerdrLayout>;
-    if (!layout.area || !Array.isArray(layout.panes)) return null;
-    if (layout.area.width <= 0 || layout.area.height <= 0) return null;
+    if (!layout.area || !Array.isArray(layout.panes)) {
+      return null;
+    }
+    if (layout.area.width <= 0 || layout.area.height <= 0) {
+      return null;
+    }
     return layout as HerdrLayout;
   } catch {
     return null;
@@ -60,7 +66,9 @@ export function MirroredTerminalLayout({
       tabs.find(item => item.runtimePaneId === layout?.focused_pane_id) ??
       tabs.find(item => item.focused) ??
       tabs[0];
-    if (!tab?.session) return null;
+    if (!tab?.session) {
+      return null;
+    }
     return (
       <TerminalPane
         key={tab.session.id}
@@ -78,7 +86,9 @@ export function MirroredTerminalLayout({
     <div className="relative min-h-0 flex-1 bg-line">
       {visiblePanes.map(pane => {
         const tab = paneById.get(pane.pane_id);
-        if (!tab?.session) return null;
+        if (!tab?.session) {
+          return null;
+        }
         return (
           <div
             key={pane.pane_id}

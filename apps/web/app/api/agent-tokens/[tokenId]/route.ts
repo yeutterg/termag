@@ -1,9 +1,9 @@
-import { NextResponse } from 'next/server';
-import { z } from 'zod';
-import { readJsonBody, withAuth } from '@/lib/auth';
-import { prisma } from '@/lib/prisma';
-import { logAudit } from '@/lib/audit';
-import { disconnectAgentToken } from '@/lib/broker';
+import { NextResponse } from "next/server";
+import { z } from "zod";
+import { readJsonBody, withAuth } from "@/lib/auth";
+import { prisma } from "@/lib/prisma";
+import { logAudit } from "@/lib/audit";
+import { disconnectAgentToken } from "@/lib/broker";
 
 const tokenView = {
   id: true,
@@ -12,90 +12,102 @@ const tokenView = {
   createdAt: true,
   lastUsedAt: true,
   defaultRootKey: true,
-  defaultRelativePath: true
+  defaultRelativePath: true,
 } as const;
 
 const patchSchema = z.object({
   defaultRootKey: z.union([z.string().trim().min(1).max(120), z.null()]).optional(),
-  defaultRelativePath: z.union([z.string().trim().max(512), z.null()]).optional()
+  defaultRelativePath: z.union([z.string().trim().max(512), z.null()]).optional(),
 });
 
 function normalizeRelative(value: string | null | undefined): string | null {
-  if (value == null) return null;
-  // eslint-disable-next-line no-control-regex
-  if (/[\x00-\x1F\x7F]/.test(value) || value.split(/[\\/]+/).some((part) => part === '..')) {
-    throw new Error('Default path must stay inside the device root');
+  if (value === null || value === undefined) {
+    return null;
+  }
+
+  if (/[\x00-\x1F\x7F]/.test(value) || value.split(/[\\/]+/).some(part => part === "..")) {
+    throw new Error("Default path must stay inside the device root");
   }
   const cleaned = value
-    .replace(/\\/g, '/')
-    .replace(/\/+/g, '/')
-    .replace(/^\/+/, '')
-    .replace(/\/+$/, '')
-    .split('/')
-    .filter((part) => part && part !== '.' && part !== '..')
-    .join('/');
+    .replace(/\\/g, "/")
+    .replace(/\/+/g, "/")
+    .replace(/^\/+/, "")
+    .replace(/\/+$/, "")
+    .split("/")
+    .filter(part => part && part !== "." && part !== "..")
+    .join("/");
   return cleaned;
 }
 
-export const DELETE = withAuth(async (user, request: Request, { params }: { params: Promise<{ tokenId: string }> }) => {
-  const { tokenId } = await params;
-  const existing = await prisma.agentToken.findFirst({ where: { id: tokenId, userId: user.id } });
-  if (!existing) return NextResponse.json({ error: 'Not found' }, { status: 404 });
-  await prisma.agentToken.update({
-    where: { id: tokenId },
-    data: { revokedAt: new Date() }
-  });
-  disconnectAgentToken(user.id, tokenId);
-  logAudit({
-    userId: user.id,
-    action: 'revoke-token',
-    subjectType: 'token',
-    subjectId: tokenId,
-    deviceName: existing.name,
-    request,
-    payload: { name: existing.name, prefix: existing.tokenPrefix }
-  });
-  return NextResponse.json({ ok: true });
-});
-
-export const PATCH = withAuth(async (user, request: Request, { params }: { params: Promise<{ tokenId: string }> }) => {
-  const { tokenId } = await params;
-  const existing = await prisma.agentToken.findFirst({ where: { id: tokenId, userId: user.id } });
-  if (!existing) return NextResponse.json({ error: 'Not found' }, { status: 404 });
-
-  const bodyResult = await readJsonBody(request);
-  if (!bodyResult.ok) return bodyResult.response;
-  const parsed = patchSchema.safeParse(bodyResult.data);
-  if (!parsed.success) {
-    return NextResponse.json({ error: 'Invalid token payload' }, { status: 400 });
-  }
-  const data: { defaultRootKey?: string | null; defaultRelativePath?: string | null } = {};
-  if ('defaultRootKey' in parsed.data) {
-    data.defaultRootKey = parsed.data.defaultRootKey ?? null;
-  }
-  if ('defaultRelativePath' in parsed.data) {
-    try {
-      data.defaultRelativePath = normalizeRelative(parsed.data.defaultRelativePath ?? null);
-    } catch (error) {
-      return NextResponse.json(
-        { error: error instanceof Error ? error.message : 'Invalid default path' },
-        { status: 400 }
-      );
+export const DELETE = withAuth(
+  async (user, request: Request, { params }: { params: Promise<{ tokenId: string }> }) => {
+    const { tokenId } = await params;
+    const existing = await prisma.agentToken.findFirst({ where: { id: tokenId, userId: user.id } });
+    if (!existing) {
+      return NextResponse.json({ error: "Not found" }, { status: 404 });
     }
+    await prisma.agentToken.update({
+      where: { id: tokenId },
+      data: { revokedAt: new Date() },
+    });
+    disconnectAgentToken(user.id, tokenId);
+    logAudit({
+      userId: user.id,
+      action: "revoke-token",
+      subjectType: "token",
+      subjectId: tokenId,
+      deviceName: existing.name,
+      request,
+      payload: { name: existing.name, prefix: existing.tokenPrefix },
+    });
+    return NextResponse.json({ ok: true });
   }
-  const updated = await prisma.agentToken.update({
-    where: { id: tokenId },
-    data,
-    select: tokenView
-  });
-  logAudit({
-    userId: user.id,
-    action: 'update-token',
-    subjectType: 'token',
-    subjectId: tokenId,
-    deviceName: updated.name,
-    request,
-    payload: { changed: Object.keys(data) }
-  });
-  return NextResponse.json(updated);
-});
+);
+
+export const PATCH = withAuth(
+  async (user, request: Request, { params }: { params: Promise<{ tokenId: string }> }) => {
+    const { tokenId } = await params;
+    const existing = await prisma.agentToken.findFirst({ where: { id: tokenId, userId: user.id } });
+    if (!existing) {
+      return NextResponse.json({ error: "Not found" }, { status: 404 });
+    }
+
+    const bodyResult = await readJsonBody(request);
+    if (!bodyResult.ok) {
+      return bodyResult.response;
+    }
+    const parsed = patchSchema.safeParse(bodyResult.data);
+    if (!parsed.success) {
+      return NextResponse.json({ error: "Invalid token payload" }, { status: 400 });
+    }
+    const data: { defaultRootKey?: string | null; defaultRelativePath?: string | null } = {};
+    if ("defaultRootKey" in parsed.data) {
+      data.defaultRootKey = parsed.data.defaultRootKey ?? null;
+    }
+    if ("defaultRelativePath" in parsed.data) {
+      try {
+        data.defaultRelativePath = normalizeRelative(parsed.data.defaultRelativePath ?? null);
+      } catch (error) {
+        return NextResponse.json(
+          { error: error instanceof Error ? error.message : "Invalid default path" },
+          { status: 400 }
+        );
+      }
+    }
+    const updated = await prisma.agentToken.update({
+      where: { id: tokenId },
+      data,
+      select: tokenView,
+    });
+    logAudit({
+      userId: user.id,
+      action: "update-token",
+      subjectType: "token",
+      subjectId: tokenId,
+      deviceName: updated.name,
+      request,
+      payload: { changed: Object.keys(data) },
+    });
+    return NextResponse.json(updated);
+  }
+);

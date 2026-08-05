@@ -9,7 +9,7 @@ export async function GET() {
         "Content-Type": "text/plain",
       },
     });
-  } catch (error) {
+  } catch {
     return NextResponse.json({ error: "Failed to collect metrics" }, { status: 500 });
   }
 }

@@ -12,7 +12,7 @@ export type Platform = {
  * as Macintosh — which is fine: same Mac glyphs, same showShortcuts.
  */
 export function detectPlatformFromUserAgent(ua: string | null | undefined): Platform {
-  const userAgent = ua ?? '';
+  const userAgent = ua ?? "";
   const isIPhone = /iPhone|iPod/.test(userAgent);
   const isAndroidMobile = /Android/.test(userAgent) && /Mobile/.test(userAgent);
   const isMobile = isIPhone || isAndroidMobile;

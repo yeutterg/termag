@@ -1,7 +1,7 @@
-'use client';
+"use client";
 
-import { useState } from 'react';
-import { cn } from '@/lib/utils';
+import { useState } from "react";
+import { cn } from "@/lib/utils";
 
 interface TabLabelProps {
   name: string;
@@ -17,10 +17,12 @@ export function TabLabel({ name, liveTitle, className, onRename }: TabLabelProps
   if (!editing || !onRename) {
     return (
       <span
-        className={cn(className, onRename && 'cursor-text')}
-        title={onRename ? 'Double-click to rename' : undefined}
-        onDoubleClick={(event) => {
-          if (!onRename) return;
+        className={cn(className, onRename && "cursor-text")}
+        title={onRename ? "Double-click to rename" : undefined}
+        onDoubleClick={event => {
+          if (!onRename) {
+            return;
+          }
           event.stopPropagation();
           event.preventDefault();
           setEditing(true);
@@ -33,7 +35,9 @@ export function TabLabel({ name, liveTitle, className, onRename }: TabLabelProps
 
   const commit = (value: string) => {
     const trimmed = value.trim();
-    if (trimmed && trimmed !== name) onRename!(trimmed);
+    if (trimmed && trimmed !== name) {
+      onRename!(trimmed);
+    }
     setEditing(false);
   };
 
@@ -41,22 +45,25 @@ export function TabLabel({ name, liveTitle, className, onRename }: TabLabelProps
     <input
       autoFocus
       defaultValue={name}
-      onFocus={(event) => event.currentTarget.select()}
-      onClick={(event) => event.stopPropagation()}
-      onMouseDown={(event) => event.stopPropagation()}
-      onKeyDown={(event) => {
-        if (event.key === 'Enter') {
+      onFocus={event => event.currentTarget.select()}
+      onClick={event => event.stopPropagation()}
+      onMouseDown={event => event.stopPropagation()}
+      onKeyDown={event => {
+        if (event.key === "Enter") {
           event.preventDefault();
           commit((event.target as HTMLInputElement).value);
-        } else if (event.key === 'Escape') {
+        } else if (event.key === "Escape") {
           event.preventDefault();
           setEditing(false);
         } else {
           event.stopPropagation();
         }
       }}
-      onBlur={(event) => commit(event.currentTarget.value)}
-      className={cn(className, '-mx-1 -my-0.5 min-w-0 rounded-sm bg-bg px-1 outline outline-1 outline-accent')}
+      onBlur={event => commit(event.currentTarget.value)}
+      className={cn(
+        className,
+        "-mx-1 -my-0.5 min-w-0 rounded-sm bg-bg px-1 outline outline-1 outline-accent"
+      )}
     />
   );
 }

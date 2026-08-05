@@ -1,5 +1,6 @@
 import typescriptEslint from "@typescript-eslint/eslint-plugin";
 import typescriptParser from "@typescript-eslint/parser";
+import next from "@next/eslint-plugin-next";
 import react from "eslint-plugin-react";
 import reactHooks from "eslint-plugin-react-hooks";
 
@@ -38,6 +39,7 @@ export default [
     },
     plugins: {
       "@typescript-eslint": typescriptEslint,
+      "@next/next": next,
       react: react,
       "react-hooks": reactHooks
     },
@@ -45,6 +47,8 @@ export default [
       ...typescriptEslint.configs["recommended"].rules,
       ...react.configs.recommended.rules,
       ...reactHooks.configs.recommended.rules,
+      ...next.configs.recommended.rules,
+      ...next.configs["core-web-vitals"].rules,
       
       "@typescript-eslint/no-unused-vars": ["warn", { 
         "argsIgnorePattern": "^_",

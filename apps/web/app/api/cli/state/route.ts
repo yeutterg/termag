@@ -1,8 +1,8 @@
-import { NextResponse } from 'next/server';
-import { withAuth } from '@/lib/auth';
-import { prisma } from '@/lib/prisma';
-import { listProjects } from '@/lib/projects';
-import { listConnectedDevices, listTmuxSessions, refreshSshHostsForUser } from '@/lib/broker';
+import { NextResponse } from "next/server";
+import { withAuth } from "@/lib/auth";
+import { prisma } from "@/lib/prisma";
+import { listProjects } from "@/lib/projects";
+import { listConnectedDevices, listTmuxSessions, refreshSshHostsForUser } from "@/lib/broker";
 
 // JSON shape consumed by `termag list` and `termag attach` resolution. Keep
 // the per-device structure stable — both CLI subcommands key off it. We use
@@ -16,7 +16,7 @@ type CliState = {
     // "agent" or "ssh" — lets `termag list` label ssh hosts distinctly.
     // Field is optional/defaulted so older CLIs keep working with newer
     // brokers (and vice versa).
-    kind?: 'agent' | 'ssh';
+    kind?: "agent" | "ssh";
     lastError?: string | null;
     // SshHost.id for ssh devices; needed by the CLI to construct the WS
     // attach URL. Null for agent-backed devices (those route by name).
@@ -38,23 +38,26 @@ type CliState = {
   }>;
 };
 
-export const GET = withAuth(async (user) => {
+export const GET = withAuth(async user => {
   await refreshSshHostsForUser(user.id, { broadcast: false });
   const projects = await listProjects(user.id);
   const tokens = await prisma.agentToken.findMany({
     where: { userId: user.id, revokedAt: null },
-    select: { name: true }
+    select: { name: true },
   });
 
-  const tmuxByDevice = new Map<string, Array<{ name: string; windowCount: number; path: string | null }>>();
+  const tmuxByDevice = new Map<
+    string,
+    Array<{ name: string; windowCount: number; path: string | null }>
+  >();
   try {
     const raw = await listTmuxSessions(user.id);
     for (const session of raw) {
       const bucket = tmuxByDevice.get(session.rootKey) ?? [];
       bucket.push({
         name: session.name,
-        windowCount: typeof session.windowCount === 'number' ? session.windowCount : 0,
-        path: session.path ?? null
+        windowCount: typeof session.windowCount === "number" ? session.windowCount : 0,
+        path: session.path ?? null,
       });
       tmuxByDevice.set(session.rootKey, bucket);
     }
@@ -68,42 +71,42 @@ export const GET = withAuth(async (user) => {
   // results and missed this case.)
   const liveDevices = listConnectedDevices(user.id);
   const deviceNames = new Set<string>([
-    ...tokens.map((token) => token.name),
-    ...projects.map((project) => project.rootKey),
-    ...liveDevices.map((device) => device.name)
+    ...tokens.map(token => token.name),
+    ...projects.map(project => project.rootKey),
+    ...liveDevices.map(device => device.name),
   ]);
 
   const state: CliState = {
-    devices: [...deviceNames].sort().map((name) => {
-      const live = liveDevices.find((device) => device.name === name);
+    devices: [...deviceNames].sort().map(name => {
+      const live = liveDevices.find(device => device.name === name);
       return {
         name,
         connected: Boolean(live?.connected),
         version: live?.version ?? null,
-        kind: live?.kind || 'agent',
+        kind: live?.kind || "agent",
         lastError: live?.lastError ?? null,
         deviceId: live?.deviceId ?? null,
         projects: projects
-          .filter((project) => project.rootKey === name)
-          .map((project) => ({
+          .filter(project => project.rootKey === name)
+          .map(project => ({
             id: project.id,
             name: project.name,
             rootKey: project.rootKey,
             relativePath: project.relativePath,
             status: project.status,
-            tabs: project.tabs.map((tab) => ({
+            tabs: project.tabs.map(tab => ({
               id: tab.id,
               name: tab.name,
               status: tab.status,
-              sessionId: tab.session?.id ?? null
-            }))
+              sessionId: tab.session?.id ?? null,
+            })),
           })),
         rawTmuxSessions: filterTermagManagedOut(
           tmuxByDevice.get(name) ?? [],
-          projects.filter((project) => project.rootKey === name)
-        )
+          projects.filter(project => project.rootKey === name)
+        ),
       };
-    })
+    }),
   };
 
   return NextResponse.json(state);
@@ -115,8 +118,8 @@ function filterTermagManagedOut(
 ): Array<{ name: string; windowCount: number; path: string | null }> {
   const managed = new Set(
     projects
-      .map((project) => project.tmuxSessionName?.trim())
+      .map(project => project.tmuxSessionName?.trim())
       .filter((value): value is string => Boolean(value))
   );
-  return raw.filter((session) => !managed.has(session.name));
+  return raw.filter(session => !managed.has(session.name));
 }

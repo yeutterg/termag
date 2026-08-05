@@ -1,5 +1,5 @@
 // scrollback is intentionally CommonJS because it is loaded by the custom broker.
-// eslint-disable-next-line @typescript-eslint/no-require-imports
+
 const { createScrollbackStore } = require("../../server/scrollback");
 
 // `clock` fixes createdAt for every row, reproducing the case the seq column

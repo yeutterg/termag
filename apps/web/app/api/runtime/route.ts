@@ -23,10 +23,13 @@ const schema = z.object({
 
 export const POST = withAuth(async (user, request: Request) => {
   const body = await readJsonBody(request);
-  if (!body.ok) return body.response;
+  if (!body.ok) {
+    return body.response;
+  }
   const parsed = schema.safeParse(body.data);
-  if (!parsed.success)
+  if (!parsed.success) {
     return NextResponse.json({ error: "Invalid runtime operation" }, { status: 400 });
+  }
   try {
     const result = await mutateRuntime(
       user.id,

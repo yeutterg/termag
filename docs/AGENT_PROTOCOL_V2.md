@@ -48,4 +48,8 @@ Protocol-v2 power requests are renewable, client-scoped leases. The strongest li
 
 ## Compatibility and limits
 
-The Node agent remains protocol-v1 compatible for one transition release, but its menu-bar helper is removed. Protocol v2 deliberately has no arbitrary command-execution message; cloud mutations use an allowlisted operation vocabulary. HerdR is optional—when absent, all local tmux sessions still appear and can be managed independently.
+The Rust daemon is the only supported device agent; the protocol-v1 Node package and menu-bar helper
+have been retired. Protocol v2 deliberately has no arbitrary command-execution message. Runtime,
+power, and git mutations use an allowlisted operation vocabulary with agent-side argument and path
+validation. HerdR is optional—when absent, all local tmux sessions still appear and can be managed
+independently.

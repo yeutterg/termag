@@ -8,7 +8,9 @@ export const POST = withAuth(
   async (user, _request: Request, { params }: { params: Promise<{ projectId: string }> }) => {
     const { projectId } = await params;
     const project = await prisma.project.findFirst({ where: { id: projectId, userId: user.id } });
-    if (!project) return NextResponse.json({ error: "Not found" }, { status: 404 });
+    if (!project) {
+      return NextResponse.json({ error: "Not found" }, { status: 404 });
+    }
     if (project.mirrored && project.runtimeSessionId && project.externalId) {
       try {
         await mutateRuntime(user.id, project.rootKey, "runtime.create-tab", {

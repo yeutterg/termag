@@ -18,10 +18,13 @@ type Params = { params: Promise<{ projectId: string }> };
 export const PATCH = withAuth(async (user, request: Request, { params }: Params) => {
   const { projectId } = await params;
   const bodyResult = await readJsonBody(request);
-  if (!bodyResult.ok) return bodyResult.response;
+  if (!bodyResult.ok) {
+    return bodyResult.response;
+  }
   const parsed = updateSchema.safeParse(bodyResult.data);
-  if (!parsed.success)
+  if (!parsed.success) {
     return NextResponse.json({ error: "Invalid project payload" }, { status: 400 });
+  }
   const body = parsed.data;
   // Reject path traversal before normalization (see the matching guard in
   // POST /api/projects).
@@ -36,10 +39,14 @@ export const PATCH = withAuth(async (user, request: Request, { params }: Params)
       where: { userId: user.id, name: body.rootKey, revokedAt: null },
       select: { id: true },
     });
-    if (!tokenRoot) return NextResponse.json({ error: "Unknown device root" }, { status: 400 });
+    if (!tokenRoot) {
+      return NextResponse.json({ error: "Unknown device root" }, { status: 400 });
+    }
   }
   const existing = await prisma.project.findFirst({ where: { id: projectId, userId: user.id } });
-  if (!existing) return NextResponse.json({ error: "Not found" }, { status: 404 });
+  if (!existing) {
+    return NextResponse.json({ error: "Not found" }, { status: 404 });
+  }
   if (existing.mirrored) {
     if (!body.name || Object.keys(body).some(key => key !== "name")) {
       return NextResponse.json(
@@ -72,10 +79,18 @@ export const PATCH = withAuth(async (user, request: Request, { params }: Params)
     return NextResponse.json({ error: "Project path is required" }, { status: 400 });
   }
   const data: z.infer<typeof updateSchema> = {};
-  if (body.name !== undefined) data.name = body.name;
-  if (body.rootKey !== undefined) data.rootKey = body.rootKey;
-  if (relativePath !== undefined) data.relativePath = relativePath;
-  if (body.agentSpawnCommand !== undefined) data.agentSpawnCommand = body.agentSpawnCommand;
+  if (body.name !== undefined) {
+    data.name = body.name;
+  }
+  if (body.rootKey !== undefined) {
+    data.rootKey = body.rootKey;
+  }
+  if (relativePath !== undefined) {
+    data.relativePath = relativePath;
+  }
+  if (body.agentSpawnCommand !== undefined) {
+    data.agentSpawnCommand = body.agentSpawnCommand;
+  }
 
   try {
     const project = await prisma.project.update({
@@ -121,7 +136,9 @@ export const DELETE = withAuth(async (user, request: Request, { params }: Params
       sessions: { select: { tmuxName: true, tmuxManaged: true } },
     },
   });
-  if (!existing) return NextResponse.json({ error: "Not found" }, { status: 404 });
+  if (!existing) {
+    return NextResponse.json({ error: "Not found" }, { status: 404 });
+  }
   if (existing.mirrored && existing.runtimeSessionId) {
     try {
       await mutateRuntime(

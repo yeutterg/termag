@@ -1,5 +1,5 @@
 // This module is intentionally CommonJS because it is loaded by the custom broker.
-// eslint-disable-next-line @typescript-eslint/no-require-imports
+
 const { StringDecoder } = require("node:string_decoder");
 
 const DEFAULT_MAX_LINES = 2500;
@@ -354,6 +354,7 @@ async function pruneExpiredScrollback(prisma) {
     where: { createdAt: { lt: cutoff } },
   });
   if (result.count > 0) {
+    // eslint-disable-next-line no-console -- successful maintenance belongs in operational logs
     console.log(`[scrollback] pruned ${result.count} chunk(s) older than ${ttlDays()}d`);
   }
   return result.count;

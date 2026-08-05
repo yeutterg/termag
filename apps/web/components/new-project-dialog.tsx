@@ -109,7 +109,7 @@ export function NewProjectDialog({
         return devices[0] ?? "";
       });
     });
-  }, [open, selectedDevice, devices.join("\0")]);
+  }, [open, selectedDevice, devices]);
 
   const currentDevice = useMemo(
     () => agentDevices.find(device => device.name === deviceName) || null,
@@ -161,7 +161,7 @@ export function NewProjectDialog({
       );
       setError("");
     });
-  }, [open, deviceName, tokensLoaded, defaultRootKey, defaultRelativePath]);
+  }, [open, tokensLoaded, defaultRootKey, defaultRelativePath, deviceRoots]);
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
