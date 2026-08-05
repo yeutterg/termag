@@ -1,5 +1,4 @@
 import { spawn, ChildProcess } from "node:child_process";
-import { writeFileSync } from "node:fs";
 
 export type CaffeinateMode = "disabled" | "while-task" | "lid-closed" | "forever" | "timed";
 
@@ -34,21 +33,27 @@ export function startCaffeinate(
     stopCaffeinate();
   }
 
-  const args: string[] = ["caffeinate", "-d", "-u", "-s"]; // Prevent system sleep, display sleep, disk sleep
+  // `-i` prevents idle system sleep without forcing the display awake. Screen
+  // lock and display sleep therefore continue to work while terminals remain
+  // reachable. Keep options before any utility; the previous leading
+  // "caffeinate" accidentally made a second caffeinate process the utility.
+  const args: string[] = ["-i"];
 
   // Add mode-specific arguments
   switch (mode) {
     case "while-task":
-      // Default behavior - caffeinate until process ends
+      args.push("-w", String(process.pid));
       break;
     case "lid-closed":
-      args.push("-i"); // Prevent idle sleep even with lid closed
+      // Retained as a protocol-v1 alias. macOS still sleeps when a laptop lid
+      // is physically closed unless normal clamshell requirements are met.
+      args.push("-w", String(process.pid));
       break;
     case "forever":
-      args.push("-w", "caffeinate"); // Wait for caffeinate command itself (never exits)
+      // The owned child itself is the lifetime boundary.
       break;
     case "timed":
-      if (!durationMs) {
+      if (!durationMs || !Number.isFinite(durationMs) || durationMs <= 0) {
         return { success: false, error: "Duration required for timed mode" };
       }
       args.push("-t", Math.floor(durationMs / 1000).toString());
@@ -58,24 +63,27 @@ export function startCaffeinate(
   }
 
   try {
-    caffeinateProcess = spawn("caffeinate", args, {
+    const child = spawn("caffeinate", args, {
       detached: false,
       stdio: "ignore",
     });
+    caffeinateProcess = child;
 
     // Handle process errors
-    caffeinateProcess.on("error", err => {
+    child.on("error", err => {
       console.error(`[caffeinate] Failed to start: ${err.message}`);
-      caffeinateProcess = null;
-      currentState.isActive = false;
-      currentState.mode = "disabled";
+      if (caffeinateProcess === child) {
+        caffeinateProcess = null;
+        currentState.isActive = false;
+        currentState.mode = "disabled";
+      }
     });
 
-    caffeinateProcess.on("exit", (code, signal) => {
+    child.on("exit", (code, signal) => {
       console.log(`[caffeinate] Exited (code: ${code}, signal: ${signal})`);
-      caffeinateProcess = null;
-      currentState.isActive = false;
-      if (mode === "timed") {
+      if (caffeinateProcess === child) {
+        caffeinateProcess = null;
+        currentState.isActive = false;
         currentState.mode = "disabled";
       }
     });
@@ -119,13 +127,14 @@ export function stopCaffeinate(): { success: boolean; error?: string } {
   }
 
   try {
-    caffeinateProcess.kill("SIGTERM");
+    const child = caffeinateProcess;
+    caffeinateProcess = null;
+    child.kill("SIGTERM");
     // Wait a bit for graceful shutdown
     setTimeout(() => {
-      if (caffeinateProcess && !caffeinateProcess.killed) {
-        caffeinateProcess.kill("SIGKILL");
+      if (child.exitCode === null && child.signalCode === null) {
+        child.kill("SIGKILL");
       }
-      caffeinateProcess = null;
     }, 1000).unref();
 
     currentState.isActive = false;

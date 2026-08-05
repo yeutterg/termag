@@ -1,5 +1,7 @@
 # termag CLI
 
+> Protocol v1 transition client. New daemon deployments should use the lightweight Rust agent on `port/rust-agent`; this package remains for CLI compatibility during the rollout. The macOS menu-bar helper has been removed.
+
 Outbound laptop agent for [termag-next](https://github.com/yeutterg/termag-next). Bridges tmux sessions and windows on your machine to the termag broker over a single WebSocket. No inbound port, no public tmux surface.
 
 The agent is intentionally tiny: it owns Termag-created tmux sessions on the local box, runs a real tmux client in a PTY so browser rendering matches a local terminal, and forwards terminal I/O over WebSocket. It reconnects on its own, supervises a heartbeat, reports existing tmux sessions for attach workflows, and never creates new project windows outside the named roots you configure.
@@ -45,37 +47,16 @@ For local Docker previews at `wss://localhost`, Caddy serves a local certificate
 export TERMAG_TLS_INSECURE_SKIP_VERIFY=true
 ```
 
-| Variable | Purpose | Default |
-| --- | --- | --- |
-| `TERMAG_URL` | Broker WebSocket URL | (required) |
-| `TERMAG_AGENT_TOKEN` | Bearer token from the web New Device dialog | (required) |
-| `TERMAG_AGENT_ROOTS` | JSON map of device labels to root paths | none; configure explicitly |
-| `TERMAG_TLS_INSECURE_SKIP_VERIFY` | Allow self-signed `wss://localhost` certs only | `false` |
-| `TERMAG_RECONNECT_MS` | Initial reconnect delay (ms) | `1000` |
-| `TERMAG_RECONNECT_MAX_MS` | Max reconnect delay (ms) | `30000` |
-| `TERMAG_MAC_MENUBAR` | Enable the macOS menu bar helper. Set `true` to enable. | `false` |
-| `TERMAG_TERMINAL_APP` | Terminal app used by the menu helper: `Terminal`, `iTerm2`, `Ghostty`, or `auto`. | inferred, then `Terminal` |
-| `TERMAG_CONFIG` | Local config file path. | `~/.termag/config.json` |
-| `TERMAG_AGENT_FAKE` | Run a no-tmux fake stream for UI preview | `false` |
-
-## macOS Menu Bar
-
-On macOS, the foreground agent can start a small status item. It lists local tmux sessions, can create a new detached tmux session (with a Finder folder picker to choose the starting directory), can focus or attach an existing session, and can quit Termag without killing tmux sessions.
-
-You can configure it with environment variables or `~/.termag/config.json`:
-
-```json
-{
-  "menuBar": {
-    "enabled": true,
-    "terminalApp": "Terminal"
-  }
-}
-```
-
-Environment variables take precedence. Use `TERMAG_MAC_MENUBAR=true` for a one-off enable.
-
-Focus behavior is terminal-specific. Terminal.app and iTerm2 are matched by tmux client TTY and can select the existing attached tab/session. Ghostty can be opened or activated, but exact selection of an already-attached tab is best-effort because it does not expose the same AppleScript session API.
+| Variable                          | Purpose                                        | Default                    |
+| --------------------------------- | ---------------------------------------------- | -------------------------- |
+| `TERMAG_URL`                      | Broker WebSocket URL                           | (required)                 |
+| `TERMAG_AGENT_TOKEN`              | Bearer token from the web New Device dialog    | (required)                 |
+| `TERMAG_AGENT_ROOTS`              | JSON map of device labels to root paths        | none; configure explicitly |
+| `TERMAG_TLS_INSECURE_SKIP_VERIFY` | Allow self-signed `wss://localhost` certs only | `false`                    |
+| `TERMAG_RECONNECT_MS`             | Initial reconnect delay (ms)                   | `1000`                     |
+| `TERMAG_RECONNECT_MAX_MS`         | Max reconnect delay (ms)                       | `30000`                    |
+| `TERMAG_CONFIG`                   | Local config file path.                        | `~/.termag/config.json`    |
+| `TERMAG_AGENT_FAKE`               | Run a no-tmux fake stream for UI preview       | `false`                    |
 
 ## Subcommands
 

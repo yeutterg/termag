@@ -18,7 +18,6 @@ import {
   killTmuxWindow,
   renameTmuxWindow,
 } from "./streams";
-import { startMacMenuBar, stopMacMenuBar } from "./menubar";
 import { listDirectory } from "./fs";
 import { wrapWithBanner } from "./banner";
 import {
@@ -28,6 +27,7 @@ import {
   updateCaffeinateState,
 } from "./agent-status";
 import {
+  type CaffeinateMode,
   startCaffeinate,
   stopCaffeinate,
   getCaffeinateState,
@@ -186,8 +186,6 @@ Environment overrides:
                             allow self-signed localhost TLS only (default false)
   TERMAG_RECONNECT_MS       initial reconnect delay (default 1000)
   TERMAG_RECONNECT_MAX_MS   max reconnect delay (default 30000)
-  TERMAG_MAC_MENUBAR        macOS menu bar helper toggle (default false)
-  TERMAG_TERMINAL_APP       Terminal, iTerm2, Ghostty, or auto for menu actions
   TERMAG_CONFIG             config file path (default ~/.termag/config.json)
 `);
 }
@@ -1977,9 +1975,7 @@ async function run() {
   }
 
   await preflightTmux();
-  startMacMenuBar({ tag, agentVersion: pkgVersion, deviceName: Object.keys(roots)[0] });
-
-  // Initialize status file for menubar
+  // Initialize the compatibility status file used by the legacy CLI.
   initStatusFile();
 
   // Record this process as the live agent so future `termag connect`
@@ -2281,11 +2277,20 @@ function connect(validatedUrl: URL, token: string) {
           break;
         }
         case "caffeinate-start": {
-          const mode = String(msg.mode || "while-task");
+          const requestedMode = String(msg.mode || "while-task");
+          const mode: CaffeinateMode = [
+            "disabled",
+            "while-task",
+            "lid-closed",
+            "forever",
+            "timed",
+          ].includes(requestedMode)
+            ? (requestedMode as CaffeinateMode)
+            : "while-task";
           const reason = String(msg.reason || "User request");
           const durationMs = typeof msg.durationMs === "number" ? msg.durationMs : undefined;
 
-          const result = startCaffeinate(mode as any, reason, durationMs);
+          const result = startCaffeinate(mode, reason, durationMs);
           updateCaffeinateState(mode, result.success, reason);
           respond(ws, requestId, {
             success: result.success,
@@ -2335,7 +2340,6 @@ function connect(validatedUrl: URL, token: string) {
     const reasonText = Buffer.isBuffer(reason) ? reason.toString() : String(reason || "");
     if (code === 1000 && reasonText === WS_REPLACED_REASON) {
       console.log(`[${tag}] connection replaced by another agent process; exiting.`);
-      stopMacMenuBar();
       removePidFile();
       process.exit(0);
     }
@@ -2349,7 +2353,6 @@ function connect(validatedUrl: URL, token: string) {
       console.error(
         `[${tag}] check TERMAG_AGENT_TOKEN — was the device token revoked or replaced?`
       );
-      stopMacMenuBar();
       removePidFile();
       process.exit(1);
     }
@@ -2845,7 +2848,6 @@ function shutdown() {
     stream.close();
   }
   streams.clear();
-  stopMacMenuBar();
   removePidFile();
   cleanupCaffeinate();
   cleanupStatusFile();

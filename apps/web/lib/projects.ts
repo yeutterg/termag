@@ -33,9 +33,13 @@ function isUniqueConstraintError(error: unknown): boolean {
  * later). Same intent as the explicit guard on POST /api/projects.
  */
 function rejectPathTraversal(value: string | undefined | null): void {
-  if (!value) return;
-  // eslint-disable-next-line no-control-regex
-  if (/[\x00-\x1F\x7F]/.test(value)) throw new Error("Path contains illegal control characters");
+  if (!value) {
+    return;
+  }
+
+  if (/[\x00-\x1F\x7F]/.test(value)) {
+    throw new Error("Path contains illegal control characters");
+  }
   const parts = value.split(/[\\/]+/);
   if (parts.some(part => part === "..")) {
     throw new Error('Path must not contain ".." segments');
@@ -53,7 +57,10 @@ export async function listProjects(userId: string) {
         orderBy: { ordinal: "asc" },
         include: { session: true },
       },
-      sessions: { where: { archivedAt: null } },
+      // Agent sessions are already nested under tabs. The top-level list is
+      // used only for the optional ctrl shell, so avoid returning a duplicate
+      // copy of every mirrored pane in each project payload.
+      sessions: { where: { archivedAt: null, kind: "ctrl" } },
     },
     orderBy: [{ position: { sort: "asc", nulls: "last" } }, { name: "asc" }],
   });
@@ -93,7 +100,9 @@ export async function createProject(input: {
 }) {
   rejectPathTraversal(input.relativePath);
   const relativePath = normalizeRelativePath(input.relativePath);
-  if (!relativePath) throw new Error("Project path is required");
+  if (!relativePath) {
+    throw new Error("Project path is required");
+  }
   const agents = input.agents?.length
     ? input.agents
     : [{ agentType: input.agentType ?? "codex", agentSpawnCommand: input.agentSpawnCommand }];
@@ -136,7 +145,9 @@ export async function createProject(input: {
 
 export async function ensureCtrlSession(projectId: string) {
   const existing = await prisma.session.findFirst({ where: { projectId, kind: "ctrl" } });
-  if (existing) return existing;
+  if (existing) {
+    return existing;
+  }
   const project = await prisma.project.findUnique({
     where: { id: projectId },
     select: { tmuxSessionName: true, tmuxManaged: true },
@@ -207,7 +218,9 @@ export async function createTab(
         return tx.tab.findUnique({ where: { id: tab.id }, include: { session: true } });
       });
     } catch (error) {
-      if (attempt < 2 && isUniqueConstraintError(error)) continue;
+      if (attempt < 2 && isUniqueConstraintError(error)) {
+        continue;
+      }
       throw error;
     }
   }
@@ -222,7 +235,9 @@ export async function createAttachedTmuxProject(input: {
   windows: AttachedTmuxWindow[];
 }) {
   const windows = input.windows.filter(window => window.target.trim());
-  if (windows.length === 0) throw new Error("No tmux windows to attach");
+  if (windows.length === 0) {
+    throw new Error("No tmux windows to attach");
+  }
   const name = await uniqueProjectName(input.userId, input.sessionName.trim() || "tmux session");
   // Reject path traversal before normalization. normalizeRelativePath
   // silently strips '..' segments, which would let a compromised agent
@@ -291,10 +306,14 @@ export async function publishTmuxProject(input: {
   windows: AttachedTmuxWindow[];
 }) {
   const windows = input.windows.filter(window => window.target.trim());
-  if (windows.length === 0) throw new Error("No tmux windows to publish");
+  if (windows.length === 0) {
+    throw new Error("No tmux windows to publish");
+  }
   const projectName = input.projectName.trim();
   const sessionName = input.sessionName.trim();
-  if (!projectName || !sessionName) throw new Error("Project and tmux session are required");
+  if (!projectName || !sessionName) {
+    throw new Error("Project and tmux session are required");
+  }
 
   try {
     return await prisma.$transaction(async tx => {
@@ -416,10 +435,14 @@ async function uniqueProjectName(userId: string, preferred: string) {
     select: { name: true },
   });
   const names = new Set(existing.map(project => project.name));
-  if (!names.has(base)) return base;
+  if (!names.has(base)) {
+    return base;
+  }
   for (let suffix = 2; suffix < 1000; suffix += 1) {
     const candidate = `${base} ${suffix}`;
-    if (!names.has(candidate)) return candidate;
+    if (!names.has(candidate)) {
+      return candidate;
+    }
   }
   return `${base} ${Date.now()}`;
 }
@@ -437,7 +460,9 @@ function normalizeAgent(agent: ProjectAgent) {
 
 function labelFromCommand(command: string) {
   const executable = command.trim().split(/\s+/)[0]?.split("/").filter(Boolean).at(-1);
-  if (!executable) return "Custom agent";
+  if (!executable) {
+    return "Custom agent";
+  }
   return executable
     .replace(/\.(js|ts|mjs|cjs|sh|bash|zsh)$/i, "")
     .replace(/[-_]+/g, " ")

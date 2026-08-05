@@ -2,6 +2,8 @@ import { Registry, Counter, Histogram, Gauge, collectDefaultMetrics } from "prom
 
 // Create a registry for custom metrics
 const register = new Registry();
+let previousCpuUsage = process.cpuUsage();
+let previousCpuAt = process.hrtime.bigint();
 
 // Enable default metrics (CPU, memory, etc.)
 collectDefaultMetrics({ register });
@@ -128,6 +130,9 @@ export const agentConnections = new Gauge({
  * Get metrics in Prometheus format
  */
 export async function getMetrics(): Promise<string> {
+  updateMemoryMetrics();
+  updateCpuMetrics();
+  measureEventLoopLag();
   return await register.metrics();
 }
 
@@ -202,11 +207,13 @@ export function updateMemoryMetrics(): void {
  * Update CPU metrics (simplified)
  */
 export function updateCpuMetrics(): void {
-  // This is a simplified version. For accurate CPU metrics, consider using a dedicated library
-  const cpuUsage = process.cpuUsage();
-  // Convert to percentage (simplified calculation)
-  const usage = (cpuUsage.user + cpuUsage.system) / 1000000; // Convert microseconds to seconds
-  cpuUsage.set(usage);
+  const now = process.hrtime.bigint();
+  const elapsedMicros = Number(now - previousCpuAt) / 1000;
+  const next = process.cpuUsage();
+  const usedMicros = next.user - previousCpuUsage.user + (next.system - previousCpuUsage.system);
+  cpuUsage.set(elapsedMicros > 0 ? (usedMicros / elapsedMicros) * 100 : 0);
+  previousCpuUsage = next;
+  previousCpuAt = now;
 }
 
 /**
@@ -233,13 +240,4 @@ export function measureEventLoopLag(): void {
     const lag = Number(process.hrtime.bigint() - start) / 1e9; // Convert to seconds
     eventLoopLag.observe(lag);
   });
-}
-
-// Start periodic metric collection
-if (typeof setInterval !== "undefined") {
-  setInterval(() => {
-    updateMemoryMetrics();
-    updateCpuMetrics();
-    measureEventLoopLag();
-  }, 5000); // Update every 5 seconds
 }

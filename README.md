@@ -1,10 +1,10 @@
 # termag-next
 
-termag-next is a browser-based tmux workspace for coding agents on remote machines.
+termag-next is a browser-based remote terminal workspace for coding agents across your machines.
 
-It is a Next.js fork and rebuild of the original [termag](https://github.com/yeutterg/termag) project. The idea is simple: run one web app somewhere reachable, run a small outbound agent on each machine that has projects, then use one browser to open the tmux sessions from all of those machines.
+It is a Next.js fork and rebuild of the original [termag](https://github.com/yeutterg/termag) project. Run one web app somewhere reachable and a very small outbound agent on each machine. If HerdR is running, Termag mirrors its sessions, spaces, tabs, panes, ordering, and status iconography. Without HerdR, Termag exposes local tmux sessions directly.
 
-That browser can be on your laptop, a tablet, or a phone on a cellular connection. Your real work still happens inside tmux on the remote device, but the UI follows you.
+The browser can be on your laptop, a tablet, or a phone on a cellular connection. Your real work remains in HerdR or tmux on the remote device, while the same terminal organization follows you to the cloud.
 
 ![termag-next dark-mode browser UI with projects, tabs, and code visible in split tmux panes](docs/images/termag-ui.png)
 
@@ -26,9 +26,11 @@ flowchart LR
 
   subgraph Machines["Remote machines"]
     direction TB
-    AgentA["termag<br/>MacBook"] --> TmuxA["tmux<br/>sessions = projects<br/>windows = terminal tabs"]
-    AgentB["termag<br/>homelab"] --> TmuxB["tmux<br/>sessions = projects<br/>windows = terminal tabs"]
-    AgentC["termag<br/>VPS"] --> TmuxC["tmux<br/>sessions = projects<br/>windows = terminal tabs"]
+    AgentA["termag agent<br/>MacBook"] --> HerdRA["HerdR, when present<br/>sessions → spaces → tabs → panes"]
+    AgentA --> TmuxA["tmux fallback<br/>sessions → panes"]
+    AgentB["termag agent<br/>homelab"] --> HerdRB["HerdR, when present"]
+    AgentB --> TmuxB["tmux fallback"]
+    AgentC["termag agent<br/>VPS"] --> TmuxC["tmux sessions"]
   end
 
   Browser <-->|HTTPS + WebSocket| Next
@@ -37,20 +39,23 @@ flowchart LR
   Broker <-->|outbound WSS| AgentC
 ```
 
-The agent always dials out to the web app. You do not need to expose tmux, SSH, or a laptop port to the internet.
+The agent always dials out to the web app. You do not need to expose HerdR, tmux, SSH, or a laptop port to the internet.
 
 ## Components
 
 - `apps/web`: the Next.js app. It includes the browser UI, route handlers, WebSocket broker, Prisma, and SQLite database.
-- `apps/agent`: the small daemon that runs beside tmux on each remote device and bridges a PTY-backed tmux client back to the browser.
+- `apps/agent`: the protocol-v1 compatibility agent.
+- `apps/agent-rs` (on `port/rust-agent`): the protocol-v2 Rust daemon that discovers HerdR and tmux and streams terminals on demand.
 - `infra`: Docker Compose and Caddy files for running the web app on a small VPS.
 
 The user-facing shape is:
 
 - Device: a machine running `termag`. Create one device token per machine.
-- Project: a tmux session on that device. A new project creates a Termag-managed tmux session; attaching an existing tmux session imports it as a project.
-- Terminal tab: one tmux window inside that project/session, running Claude Code, Codex, a YOLO variant, another CLI command, or an existing tmux window.
-- Ctrl shell: a regular tmux window for git, tests, and quick commands in Termag-managed projects.
+- Machine: a computer running the lightweight Termag agent.
+- HerdR session: a live HerdR runtime discovered without modifying or owning HerdR.
+- Space: a mirrored HerdR space. Its tabs, panes, order, layout, and statuses remain authoritative in HerdR.
+- tmux session: the fallback workspace when HerdR is absent, or an independently managed session alongside HerdR.
+- Terminal tab/pane: a stable HerdR or tmux terminal target streamed only while a cloud viewer is attached.
 
 ## Security Model
 

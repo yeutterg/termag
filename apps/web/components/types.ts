@@ -81,6 +81,8 @@ export type AgentDeviceStatus = {
   streamCount?: number;
   uptimeSec?: number;
   memMb?: number;
+  memPeakMb?: number;
+  kind?: "agent" | "ssh";
   lastSeenAt?: string | null;
   roots?: Record<string, string>;
   tmuxSessions?: TmuxDeviceSession[];

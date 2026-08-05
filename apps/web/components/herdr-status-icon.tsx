@@ -1,11 +1,14 @@
 import { cn } from "@/lib/utils";
 
 const STATUS = {
-  blocked: { dot: "●", symbol: "×", color: "text-bad", label: "Blocked" },
-  working: { dot: "●", symbol: "◐", color: "text-warn", label: "Working" },
-  done: { dot: "●", symbol: "✓", color: "text-done", label: "Done" },
-  idle: { dot: "○", symbol: "○", color: "text-good", label: "Idle" },
-  unknown: { dot: "·", symbol: "·", color: "text-muted", label: "Unknown" },
+  // Match HerdR's state_dot / agent_icon glyphs. The working symbol is the
+  // first frame of HerdR's Braille spinner; keeping it static avoids one
+  // timer and rerender per status icon in large mirrored sidebars.
+  blocked: { dot: "●", symbol: "◉", color: "text-bad", label: "Blocked" },
+  working: { dot: "●", symbol: "⠋", color: "text-warn", label: "Working" },
+  done: { dot: "●", symbol: "●", color: "text-done", label: "Done" },
+  idle: { dot: "○", symbol: "✓", color: "text-good", label: "Idle" },
+  unknown: { dot: "·", symbol: "○", color: "text-muted", label: "Unknown" },
   offline: { dot: "·", symbol: "·", color: "text-muted", label: "Offline" },
 } as const;
 

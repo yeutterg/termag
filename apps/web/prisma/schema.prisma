@@ -127,8 +127,10 @@ model Tab {
 
   session Session?
 
-  @@unique([projectId, ordinal])
   @@unique([projectId, runtimePaneId])
+  // Mirrored runtimes can reuse an ordinal after a pane closes; archived
+  // rows intentionally retain identity/history, so ordinal cannot be unique.
+  @@index([projectId, ordinal])
   @@index([projectId])
   @@index([projectId, runtimeTabId, runtimePaneIndex])
 }

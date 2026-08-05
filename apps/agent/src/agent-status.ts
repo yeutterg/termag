@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, writeFileSync, readFileSync, unlinkSync } from "node:fs";
+import { existsSync, mkdirSync, unlinkSync, writeFileSync } from "node:fs";
 import os from "node:path";
 import { homedir } from "node:os";
 
@@ -108,7 +108,7 @@ export function getStatus(): AgentStatus {
 export function writeStatusSync() {
   try {
     writeFileSync(STATUS_FILE, JSON.stringify(currentStatus, null, 2), { mode: 0o600 });
-  } catch (err) {
+  } catch {
     // Silently fail - status file is optional
   }
 }
@@ -123,7 +123,7 @@ function debouncedWrite() {
   writeTimeout = setTimeout(() => {
     try {
       writeFileSync(STATUS_FILE, JSON.stringify(currentStatus, null, 2), { mode: 0o600 });
-    } catch (err) {
+    } catch {
       // Silently fail - status file is optional
     }
     writeTimeout = null;
@@ -131,7 +131,7 @@ function debouncedWrite() {
 }
 
 /**
- * Write status to file for menubar to read (legacy, kept for compatibility)
+ * Write status for the legacy command-line status command.
  */
 function writeStatus() {
   debouncedWrite();

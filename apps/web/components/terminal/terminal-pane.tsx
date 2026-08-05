@@ -53,6 +53,97 @@ const LIGHT_THEME: ITheme = {
   brightWhite: "#09090B",
 };
 
+const PAGE_SUSPEND_MS = 90_000;
+const MAX_INPUT_CHARS = 32 * 1024;
+const XTERM_WRITE_PAUSE_BYTES = 1024 * 1024;
+const XTERM_WRITE_RESUME_BYTES = 256 * 1024;
+const pageActivityListeners = new Set<(active: boolean) => void>();
+let pageVisibilityTimer: ReturnType<typeof setTimeout> | null = null;
+let pageVisibilityBound = false;
+let pageIsActive = true;
+
+function publishPageActivity(active: boolean) {
+  pageIsActive = active;
+  for (const listener of pageActivityListeners) {
+    listener(active);
+  }
+}
+
+function onPageVisibilityChange() {
+  if (pageVisibilityTimer) {
+    clearTimeout(pageVisibilityTimer);
+    pageVisibilityTimer = null;
+  }
+  if (document.visibilityState === "visible") {
+    publishPageActivity(true);
+    return;
+  }
+  pageVisibilityTimer = setTimeout(() => {
+    pageVisibilityTimer = null;
+    publishPageActivity(false);
+  }, PAGE_SUSPEND_MS);
+}
+
+function subscribePageActivity(listener: (active: boolean) => void) {
+  pageActivityListeners.add(listener);
+  listener(pageIsActive);
+  if (!pageVisibilityBound) {
+    document.addEventListener("visibilitychange", onPageVisibilityChange);
+    pageVisibilityBound = true;
+    onPageVisibilityChange();
+  }
+  return () => {
+    pageActivityListeners.delete(listener);
+    if (pageActivityListeners.size === 0 && pageVisibilityBound) {
+      document.removeEventListener("visibilitychange", onPageVisibilityChange);
+      pageVisibilityBound = false;
+      if (pageVisibilityTimer) {
+        clearTimeout(pageVisibilityTimer);
+      }
+      pageVisibilityTimer = null;
+    }
+  };
+}
+
+const themeListeners = new Set<(theme: ITheme) => void>();
+let sharedThemeObserver: MutationObserver | null = null;
+
+function subscribeTheme(listener: (theme: ITheme) => void) {
+  themeListeners.add(listener);
+  if (!sharedThemeObserver) {
+    sharedThemeObserver = new MutationObserver(() => {
+      const theme = currentTheme();
+      for (const notify of themeListeners) {
+        notify(theme);
+      }
+    });
+    sharedThemeObserver.observe(document.documentElement, {
+      attributes: true,
+      attributeFilter: ["class"],
+    });
+  }
+  return () => {
+    themeListeners.delete(listener);
+    if (themeListeners.size === 0) {
+      sharedThemeObserver?.disconnect();
+      sharedThemeObserver = null;
+    }
+  };
+}
+
+function sendTerminalInput(ws: WebSocket, data: string) {
+  for (let start = 0; start < data.length; ) {
+    let end = Math.min(data.length, start + MAX_INPUT_CHARS);
+    // Do not divide a UTF-16 surrogate pair. A 32K-character chunk is at
+    // most 128 KiB of UTF-8, comfortably below the broker/agent input cap.
+    if (end < data.length && /[\uD800-\uDBFF]/.test(data[end - 1])) {
+      end -= 1;
+    }
+    ws.send(JSON.stringify({ type: "input", data: data.slice(start, end) }));
+    start = end;
+  }
+}
+
 function currentTheme(): ITheme {
   return document.documentElement.classList.contains("dark") ? DARK_THEME : LIGHT_THEME;
 }
@@ -110,17 +201,31 @@ function TerminalPaneImpl({
   const [driverState, setDriverState] = useState<{ driver: boolean; readOnly: boolean } | null>(
     null
   );
+  const [pageActive, setPageActive] = useState(true);
+  const sshHostId = ssh?.hostId;
+  const sshTmuxName = ssh?.tmuxName;
+  const shareCode = share?.code;
   // Capture latest onTitleChange so the xterm listener (set up once) always
   // invokes the current callback without rebinding the terminal.
   const onTitleChangeRef = useRef(onTitleChange);
-  onTitleChangeRef.current = onTitleChange;
   // Same trick for the subscriber-count callback so the WS message
   // handler (set up once) always sees the latest callback.
   const onSubscriberCountRef = useRef(onSubscriberCount);
-  onSubscriberCountRef.current = onSubscriberCount;
 
   useEffect(() => {
-    if (!active || !hostRef.current) return;
+    onTitleChangeRef.current = onTitleChange;
+  }, [onTitleChange]);
+
+  useEffect(() => {
+    onSubscriberCountRef.current = onSubscriberCount;
+  }, [onSubscriberCount]);
+
+  useEffect(() => subscribePageActivity(setPageActive), []);
+
+  useEffect(() => {
+    if (!active || !pageActive || !hostRef.current) {
+      return;
+    }
     let disposed = false;
     let term: XTerm | null = null;
     let fitAddon: { fit: () => void } | null = null;
@@ -129,17 +234,60 @@ function TerminalPaneImpl({
     let observer: ResizeObserver | null = null;
     let onKill: ((event: Event) => void) | null = null;
     let onVisibilityRef: (() => void) | null = null;
-    let themeObserverRef: MutationObserver | null = null;
+    let unsubscribeTheme: (() => void) | null = null;
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+    let titleTimer: ReturnType<typeof setTimeout> | null = null;
+    let pendingTitle = "";
     let reconnectAttempts = 0;
     let fatalMessage = "";
+    let resyncRequested = false;
+    let queuedWriteBytes = 0;
+    let parserPaused = false;
+    let visibilityPaused = document.visibilityState === "hidden";
+    let brokerPaused = false;
+
+    function syncBrokerPause() {
+      const ws = wsRef.current;
+      if (ws?.readyState !== WebSocket.OPEN) {
+        return;
+      }
+      const shouldPause = visibilityPaused || parserPaused;
+      if (shouldPause === brokerPaused) {
+        return;
+      }
+      brokerPaused = shouldPause;
+      ws.send(JSON.stringify({ type: shouldPause ? "pause" : "resume" }));
+    }
+
+    function writeTerminal(data: string | Uint8Array) {
+      if (!term || disposed) {
+        return;
+      }
+      const byteCount = typeof data === "string" ? data.length * 2 : data.byteLength;
+      queuedWriteBytes += byteCount;
+      if (!parserPaused && queuedWriteBytes >= XTERM_WRITE_PAUSE_BYTES) {
+        parserPaused = true;
+        syncBrokerPause();
+      }
+      term.write(data, () => {
+        queuedWriteBytes = Math.max(0, queuedWriteBytes - byteCount);
+        if (parserPaused && queuedWriteBytes <= XTERM_WRITE_RESUME_BYTES) {
+          parserPaused = false;
+          if (!disposed) {
+            syncBrokerPause();
+          }
+        }
+      });
+    }
 
     // WebSocket lifecycle is its own function so we can re-run it on disconnect.
     // All input sites (term.onData, onKill, onVisibility, ResizeObserver) read
     // wsRef.current at call time so they always target the latest socket — no
     // stale closure over a closed WS after a reconnect.
     function connectWS() {
-      if (disposed || !term) return;
+      if (disposed || !term) {
+        return;
+      }
       if (reconnectTimer) {
         clearTimeout(reconnectTimer);
         reconnectTimer = null;
@@ -156,18 +304,20 @@ function TerminalPaneImpl({
       // + tmuxName; everything else is sessionId-keyed. The on-wire
       // protocol is identical from this point on (binary frames for
       // output, JSON for control), so nothing else here has to branch.
-      const wsUrl = share
-        ? `${protocol}//${window.location.host}/api/ws/share-terminal?code=${encodeURIComponent(share.code)}&cols=${term.cols}&rows=${term.rows}`
-        : ssh
-          ? `${protocol}//${window.location.host}/api/ws/ssh-terminal?hostId=${encodeURIComponent(ssh.hostId)}&tmuxName=${encodeURIComponent(ssh.tmuxName)}&cols=${term.cols}&rows=${term.rows}`
+      const wsUrl = shareCode
+        ? `${protocol}//${window.location.host}/api/ws/share-terminal?code=${encodeURIComponent(shareCode)}&cols=${term.cols}&rows=${term.rows}`
+        : sshHostId && sshTmuxName
+          ? `${protocol}//${window.location.host}/api/ws/ssh-terminal?hostId=${encodeURIComponent(sshHostId)}&tmuxName=${encodeURIComponent(sshTmuxName)}&cols=${term.cols}&rows=${term.rows}`
           : `${protocol}//${window.location.host}/api/ws/terminal?sessionId=${sessionId}&cols=${term.cols}&rows=${term.rows}${saveDataHint}`;
       const ws = new WebSocket(wsUrl);
       ws.binaryType = "arraybuffer";
       wsRef.current = ws;
 
       ws.onopen = () => {
+        brokerPaused = false;
+        visibilityPaused = document.visibilityState === "hidden";
         if (reconnectAttempts > 0) {
-          term!.write("\r\n\x1b[2m[reconnected]\x1b[0m\r\n");
+          writeTerminal("\r\n\x1b[2m[reconnected]\x1b[0m\r\n");
         }
         const justReconnected = reconnectAttempts > 0;
         reconnectAttempts = 0;
@@ -182,18 +332,18 @@ function TerminalPaneImpl({
         // already fired before the WS was open and was dropped. Send the
         // pause now so the broker isn't burning bandwidth on an offscreen
         // viewer.
-        if (document.visibilityState === "hidden") {
-          ws.send(JSON.stringify({ type: "pause" }));
-        }
+        syncBrokerPause();
         // Only steal focus on the initial connect — yanking focus mid-typing
         // when the broker hiccups would be infuriating.
-        if (!justReconnected) term!.focus();
+        if (!justReconnected) {
+          term!.focus();
+        }
       };
       ws.onmessage = event => {
         // Binary frames carry raw terminal output (no JSON wrapper). Text
         // frames carry control messages — ready/sleeping/exit/refresh.
         if (typeof event.data !== "string") {
-          term!.write(new Uint8Array(event.data as ArrayBuffer));
+          writeTerminal(new Uint8Array(event.data as ArrayBuffer));
           return;
         }
         let msg: { type?: string; data?: string; message?: string };
@@ -202,12 +352,29 @@ function TerminalPaneImpl({
         } catch {
           return;
         }
-        if (msg.type === "output") term!.write(msg.data ?? ""); // legacy/control fallback
-        if (msg.type === "sleeping") term!.write(`\r\n${msg.message ?? "Agent sleeping"}\r\n`);
-        if (msg.type === "exit") term!.write("\r\n[session ended]\r\n");
+        if (msg.type === "output") {
+          writeTerminal(msg.data ?? "");
+        } // legacy/control fallback
+        // Queue RIS through xterm's parser so bytes already waiting in its
+        // write buffer cannot land after a synchronous reset and corrupt the
+        // newly-arriving full checkpoint.
+        if (msg.type === "checkpoint") {
+          writeTerminal("\x1bc");
+        }
+        if (msg.type === "resync") {
+          resyncRequested = true;
+          writeTerminal(`\x1bc\x1b[2m[${msg.message ?? "refreshing terminal state"}]\x1b[0m\r\n`);
+          ws.close(1012, "terminal resync");
+        }
+        if (msg.type === "sleeping") {
+          writeTerminal(`\r\n${msg.message ?? "Agent sleeping"}\r\n`);
+        }
+        if (msg.type === "exit") {
+          writeTerminal("\r\n[session ended]\r\n");
+        }
         if (msg.type === "fatal") {
           fatalMessage = msg.message || "terminal unavailable";
-          term!.write(`\r\n\x1b[31m[${fatalMessage}]\x1b[0m\r\n`);
+          writeTerminal(`\r\n\x1b[31m[${fatalMessage}]\x1b[0m\r\n`);
           try {
             ws.close(1008, "terminal unavailable");
           } catch {}
@@ -226,20 +393,37 @@ function TerminalPaneImpl({
         }
       };
       ws.onclose = event => {
-        if (disposed) return;
+        if (disposed) {
+          return;
+        }
+        // Ignore a delayed close from a superseded socket. Letting it schedule
+        // another reconnect would create overlapping connections and xterm
+        // output duplication after rapid network changes.
+        if (wsRef.current !== ws) {
+          return;
+        }
         wsRef.current = null;
+        brokerPaused = false;
         // Code 1008 (policy violation) is the broker's "this session is gone /
         // you're not authorized" signal. Retrying would just loop forever, so
         // surface the reason and stop. Anything else is treated as a transient
         // network blip and gets exponential-backoff retry.
         if (event.code === 1008) {
           const reason = fatalMessage || event.reason || "session unavailable";
-          term!.write(`\r\n\x1b[2m[disconnected: ${reason}]\x1b[0m\r\n`);
+          writeTerminal(`\r\n\x1b[2m[disconnected: ${reason}]\x1b[0m\r\n`);
+          return;
+        }
+        if (resyncRequested) {
+          resyncRequested = false;
+          reconnectTimer = setTimeout(() => {
+            reconnectTimer = null;
+            connectWS();
+          }, 0);
           return;
         }
         reconnectAttempts += 1;
         if (reconnectAttempts === 1) {
-          term!.write("\r\n\x1b[2m[disconnected, reconnecting…]\x1b[0m\r\n");
+          writeTerminal("\r\n\x1b[2m[disconnected, reconnecting…]\x1b[0m\r\n");
         }
         // Exponential backoff capped at 30s. Resets to 1s on next successful
         // open. Tab visibility doesn't pause this; the next visible tick will
@@ -257,12 +441,13 @@ function TerminalPaneImpl({
     }
 
     void (async () => {
-      const [{ Terminal }, { FitAddon }, { WebLinksAddon }] = await Promise.all([
+      const [{ Terminal }, { FitAddon }] = await Promise.all([
         import("@xterm/xterm"),
         import("@xterm/addon-fit"),
-        import("@xterm/addon-web-links"),
       ]);
-      if (disposed || !hostRef.current) return;
+      if (disposed || !hostRef.current) {
+        return;
+      }
 
       // xterm renders to <canvas>; ctx.font does NOT reliably resolve CSS
       // variables, so 'var(--font-mono)' would fall through to the next
@@ -274,13 +459,19 @@ function TerminalPaneImpl({
       const fontFamily = [monoVar, '"DM Mono"', "SFMono-Regular", "Consolas", "monospace"]
         .filter(Boolean)
         .join(", ");
+      type ConnectionLike = { saveData?: boolean; effectiveType?: string };
+      const connection = (navigator as Navigator & { connection?: ConnectionLike }).connection;
+      const constrained =
+        Boolean(connection?.saveData) ||
+        /^(slow-2g|2g|3g)$/.test(connection?.effectiveType ?? "") ||
+        window.matchMedia("(max-width: 767px)").matches;
       term = new Terminal({
         allowTransparency: true,
         cursorBlink: true,
         fontFamily,
         fontSize: 12,
         lineHeight: 1.4,
-        scrollback: 10000,
+        scrollback: constrained ? 500 : 2000,
         theme: currentTheme(),
       });
 
@@ -288,26 +479,39 @@ function TerminalPaneImpl({
       // prefers-color-scheme media-query), swap palettes without recreating
       // the terminal. Without this, switching themes leaves the previous
       // foreground/brightBlack baked in until the page reloads.
-      const themeObserver = new MutationObserver(() => {
-        if (term) term.options.theme = currentTheme();
+      unsubscribeTheme = subscribeTheme(theme => {
+        if (term) {
+          term.options.theme = theme;
+        }
       });
-      themeObserver.observe(document.documentElement, {
-        attributes: true,
-        attributeFilter: ["class"],
-      });
-      themeObserverRef = themeObserver;
       const fit = new FitAddon();
       fitAddon = fit;
       term.loadAddon(fit);
-      term.loadAddon(new WebLinksAddon());
       term.open(hostRef.current);
       termRef.current = term;
+      if (!constrained && window.matchMedia("(hover: hover) and (pointer: fine)").matches) {
+        void import("@xterm/addon-web-links").then(({ WebLinksAddon }) => {
+          if (!disposed && term) {
+            term.loadAddon(new WebLinksAddon());
+          }
+        });
+      }
 
       // OSC 0/2 escape sequences fire here whenever a tool inside the
       // terminal changes its window title (e.g. shells, vim, claude).
       term.onTitleChange(next => {
         const trimmed = next?.trim();
-        if (trimmed) onTitleChangeRef.current?.(sessionId, trimmed);
+        if (!trimmed) {
+          return;
+        }
+        pendingTitle = trimmed;
+        if (titleTimer) {
+          return;
+        }
+        titleTimer = setTimeout(() => {
+          titleTimer = null;
+          onTitleChangeRef.current?.(sessionId, pendingTitle);
+        }, 250);
       });
 
       // Bind once: every input goes through whatever socket is currently
@@ -316,7 +520,7 @@ function TerminalPaneImpl({
       term.onData(data => {
         const ws = wsRef.current;
         if (ws?.readyState === WebSocket.OPEN) {
-          ws.send(JSON.stringify({ type: "input", data }));
+          sendTerminalInput(ws, data);
         }
       });
 
@@ -330,22 +534,23 @@ function TerminalPaneImpl({
       window.addEventListener("termag:kill-session", onKill);
 
       // Pause the output stream when the tab/app is hidden — saves a lot of
-      // cellular data when a phone is locked or backgrounded. Broker buffers
-      // up to 64 KB; older bytes drop, the next visible frame includes a
-      // [output trimmed while paused] marker.
+      // cellular data when a phone is locked or backgrounded. The broker
+      // keeps a bounded tail and requests a fresh runtime checkpoint if the
+      // stream overflows while paused.
       const onVisibility = () => {
-        const ws = wsRef.current;
-        if (ws?.readyState !== WebSocket.OPEN) return;
-        ws.send(
-          JSON.stringify({ type: document.visibilityState === "hidden" ? "pause" : "resume" })
-        );
+        visibilityPaused = document.visibilityState === "hidden";
+        syncBrokerPause();
       };
       document.addEventListener("visibilitychange", onVisibility);
       onVisibilityRef = onVisibility;
 
       observer = new ResizeObserver(() => {
-        if (disposed) return;
-        if (resizeTimer) clearTimeout(resizeTimer);
+        if (disposed) {
+          return;
+        }
+        if (resizeTimer) {
+          clearTimeout(resizeTimer);
+        }
         resizeTimer = setTimeout(() => {
           fit.fit();
           const ws = wsRef.current;
@@ -357,7 +562,9 @@ function TerminalPaneImpl({
       observer.observe(hostRef.current!);
 
       raf = requestAnimationFrame(() => {
-        if (disposed) return;
+        if (disposed) {
+          return;
+        }
         fit.fit();
         connectWS();
       });
@@ -366,18 +573,29 @@ function TerminalPaneImpl({
     return () => {
       disposed = true;
       cancelAnimationFrame(raf);
-      if (reconnectTimer) clearTimeout(reconnectTimer);
+      if (reconnectTimer) {
+        clearTimeout(reconnectTimer);
+      }
+      if (titleTimer) {
+        clearTimeout(titleTimer);
+      }
       observer?.disconnect();
-      if (resizeTimer) clearTimeout(resizeTimer);
+      if (resizeTimer) {
+        clearTimeout(resizeTimer);
+      }
       wsRef.current?.close();
       wsRef.current = null;
-      if (onKill) window.removeEventListener("termag:kill-session", onKill);
-      if (onVisibilityRef) document.removeEventListener("visibilitychange", onVisibilityRef);
-      themeObserverRef?.disconnect();
+      if (onKill) {
+        window.removeEventListener("termag:kill-session", onKill);
+      }
+      if (onVisibilityRef) {
+        document.removeEventListener("visibilitychange", onVisibilityRef);
+      }
+      unsubscribeTheme?.();
       term?.dispose();
       termRef.current = null;
     };
-  }, [active, sessionId, ssh?.hostId, ssh?.tmuxName, share?.code]);
+  }, [active, pageActive, sessionId, shareCode, sshHostId, sshTmuxName]);
 
   function claimDrive() {
     const ws = wsRef.current;
@@ -405,14 +623,20 @@ function TerminalPaneImpl({
   const onTabSwipeEnd = useCallback((event: ReactTouchEvent<HTMLDivElement>) => {
     const start = swipeStartRef.current;
     swipeStartRef.current = null;
-    if (!start) return;
+    if (!start) {
+      return;
+    }
     const touch = event.changedTouches[0];
-    if (!touch) return;
+    if (!touch) {
+      return;
+    }
     const dx = touch.clientX - start.x;
     const dy = touch.clientY - start.y;
     // 80px threshold + dominant horizontal axis (3:1) keeps accidental
     // vertical scrolls / pinches from firing tab switches.
-    if (Math.abs(dx) < 80 || Math.abs(dx) < Math.abs(dy) * 3) return;
+    if (Math.abs(dx) < 80 || Math.abs(dx) < Math.abs(dy) * 3) {
+      return;
+    }
     window.dispatchEvent(
       new CustomEvent("termag:tab-swipe", {
         detail: { direction: dx < 0 ? "next" : "prev" },
@@ -478,7 +702,7 @@ function TerminalPaneImpl({
         onInput={data => {
           const ws = wsRef.current;
           if (ws?.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify({ type: "input", data }));
+            sendTerminalInput(ws, data);
           }
           termRef.current?.focus();
         }}

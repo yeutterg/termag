@@ -59,6 +59,20 @@ type Broker = {
     deviceName: string
   ) => Promise<{ success: boolean; error?: string; state?: CaffeinateState }>;
   getCaffeinateStatus?: (userId: string, deviceName: string) => Promise<CaffeinateState | null>;
+  acquirePowerLease?: (
+    userId: string,
+    deviceName: string,
+    leaseId: string,
+    mode: "terminals-awake" | "display-awake" | "ac-awake",
+    reason: string,
+    durationMs: number,
+    renew?: boolean
+  ) => Promise<{ success: boolean; error?: string; state?: CaffeinateState }>;
+  releasePowerLease?: (
+    userId: string,
+    deviceName: string,
+    leaseId: string
+  ) => Promise<{ success: boolean; error?: string; state?: CaffeinateState }>;
   mutateRuntime?: (
     userId: string,
     deviceName: string,
@@ -89,6 +103,7 @@ export type ConnectedDevice = {
   streamCount?: number;
   uptimeSec?: number;
   memMb?: number;
+  memPeakMb?: number;
   // "agent" (default, omitted on the wire) or "ssh". Lets the UI render
   // an SSH-host badge and the CLI label hosts in `termag list`.
   kind?: "agent" | "ssh";
@@ -108,6 +123,7 @@ export type CaffeinateState = {
   endTime?: string | null;
   pid?: number | null;
   endsAtUnixMs?: number | null;
+  leaseCount?: number;
 };
 
 export type DirectoryListing = {
@@ -261,7 +277,9 @@ export async function mutateRuntime(
   timeoutMs = 10000
 ) {
   const live = broker();
-  if (!live?.mutateRuntime) throw new Error("Agent offline or does not support runtime mutations");
+  if (!live?.mutateRuntime) {
+    throw new Error("Agent offline or does not support runtime mutations");
+  }
   return live.mutateRuntime(userId, deviceName, operation, payload, timeoutMs);
 }
 
@@ -355,4 +373,32 @@ export async function getCaffeinateStatusOnDevice(
     throw new Error("Broker offline or does not support caffeinate");
   }
   return live.getCaffeinateStatus(userId, deviceName);
+}
+
+export async function acquirePowerLeaseOnDevice(
+  userId: string,
+  deviceName: string,
+  leaseId: string,
+  mode: "terminals-awake" | "display-awake" | "ac-awake",
+  reason: string,
+  durationMs: number,
+  renew = false
+): Promise<{ success: boolean; error?: string; state?: CaffeinateState }> {
+  const live = broker();
+  if (!live?.acquirePowerLease) {
+    throw new Error("Broker does not support power leases");
+  }
+  return live.acquirePowerLease(userId, deviceName, leaseId, mode, reason, durationMs, renew);
+}
+
+export async function releasePowerLeaseOnDevice(
+  userId: string,
+  deviceName: string,
+  leaseId: string
+): Promise<{ success: boolean; error?: string; state?: CaffeinateState }> {
+  const live = broker();
+  if (!live?.releasePowerLease) {
+    throw new Error("Broker does not support power leases");
+  }
+  return live.releasePowerLease(userId, deviceName, leaseId);
 }

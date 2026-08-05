@@ -2,7 +2,8 @@
 
 /* eslint-disable react-hooks/set-state-in-effect */
 
-import { useState, useEffect, useRef } from "react";
+import { signOut } from "next-auth/react";
+import { useState, useEffect, useMemo, useRef } from "react";
 import {
   Search,
   Terminal,
@@ -42,8 +43,11 @@ import {
   Square,
   GitMerge,
   Type,
+  LogOut,
+  Laptop,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import type { Project } from "./types";
 
 export interface Command {
   id: string;
@@ -274,6 +278,156 @@ export function CommandPalette({
   );
 }
 
+type TermagCommandPaletteProps = {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  projects: Project[];
+  onSession: (projectId: string, tabId: string) => void;
+  onNewTab: () => void;
+  onKill: () => void;
+  onTheme: () => void;
+  onSearch: () => void;
+  onDevices: () => void;
+  onAddDevice?: () => void;
+  onAddSshHost?: () => void;
+  authMode: "oauth" | "password" | "trusted";
+};
+
+async function signOutPassword() {
+  await fetch("/api/auth/password", { method: "DELETE" }).catch(() => {});
+  window.location.href = "/login";
+}
+
+// Adapter used by the dashboard. The generic palette above intentionally
+// accepts a command list; keeping this dashboard-specific mapping here means
+// the entire command UI remains in its lazy-loaded chunk while preserving the
+// original Termag integration contract.
+export function TermagCommandPalette({
+  open,
+  onOpenChange,
+  projects,
+  onSession,
+  onNewTab,
+  onKill,
+  onTheme,
+  onSearch,
+  onDevices,
+  onAddDevice,
+  onAddSshHost,
+  authMode,
+}: TermagCommandPaletteProps) {
+  const commands = useMemo<Command[]>(() => {
+    const sessionCommands = projects.flatMap(project =>
+      project.tabs.map(tab => ({
+        id: `session:${project.id}:${tab.id}`,
+        label: `${project.runtimeSpaceName || project.name} / ${tab.runtimeTabName || tab.name}`,
+        description: `${project.rootKey} · ${project.runtimeSessionName || project.relativePath}`,
+        icon: Terminal,
+        category: "Agents",
+        keywords: [project.name, tab.name, project.rootKey],
+        action: () => onSession(project.id, tab.id),
+      }))
+    );
+    const actions: Command[] = [
+      {
+        id: "new-tab",
+        label: "New tab in current session",
+        icon: Plus,
+        category: "Commands",
+        action: onNewTab,
+        shortcut: "⌘↵",
+      },
+      {
+        id: "search",
+        label: "Search scrollback",
+        icon: Search,
+        category: "Commands",
+        action: onSearch,
+        shortcut: "⌘⇧F",
+      },
+      {
+        id: "kill",
+        label: "Delete current window",
+        icon: X,
+        category: "Commands",
+        action: onKill,
+      },
+      {
+        id: "theme",
+        label: "Toggle theme",
+        icon: Moon,
+        category: "Commands",
+        action: onTheme,
+        shortcut: "⌘.",
+      },
+      {
+        id: "devices",
+        label: "Open devices",
+        icon: Laptop,
+        category: "Commands",
+        action: onDevices,
+        shortcut: "⌘;",
+      },
+    ];
+    if (onAddDevice) {
+      actions.push({
+        id: "add-device",
+        label: "Add device agent",
+        icon: Plus,
+        category: "Commands",
+        action: onAddDevice,
+      });
+    }
+    if (onAddSshHost) {
+      actions.push({
+        id: "add-ssh",
+        label: "Add SSH host",
+        icon: Plus,
+        category: "Commands",
+        action: onAddSshHost,
+      });
+    }
+    if (authMode === "oauth") {
+      actions.push({
+        id: "sign-out",
+        label: "Sign out",
+        icon: LogOut,
+        category: "Account",
+        action: () => void signOut({ callbackUrl: "/login" }),
+      });
+    } else if (authMode === "password") {
+      actions.push({
+        id: "sign-out",
+        label: "Sign out",
+        icon: LogOut,
+        category: "Account",
+        action: () => void signOutPassword(),
+      });
+    }
+    return [...sessionCommands, ...actions];
+  }, [
+    authMode,
+    onAddDevice,
+    onAddSshHost,
+    onDevices,
+    onKill,
+    onNewTab,
+    onSearch,
+    onSession,
+    onTheme,
+    projects,
+  ]);
+
+  return (
+    <CommandPalette
+      isOpen={open}
+      onClose={() => onOpenChange(false)}
+      commands={commands}
+      placeholder="Jump to a session, tab, or command..."
+    />
+  );
+}
+
 export function useCommandPalette(_commands: Command[]) {
   const [isOpen, setIsOpen] = useState(false);
 
@@ -381,8 +535,8 @@ export function getTermagCommands(options: {
   onOpenHelp?: () => void;
 }): Command[] {
   const {
-    _sessionId,
-    _workingDirectory,
+    sessionId: _sessionId,
+    workingDirectory: _workingDirectory,
     // Project Management
     onCreateProject,
     onNewSession,

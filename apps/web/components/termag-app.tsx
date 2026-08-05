@@ -34,13 +34,12 @@ import { useTabHistory } from "./use-tab-history";
 import type { AgentDeviceStatus, Project, Tab, TmuxDeviceSession, TmuxWindow } from "./types";
 import type { Platform } from "@/lib/platform";
 import { cn, statusDot } from "@/lib/utils";
-import { startCaffeinateOnDevice, stopCaffeinateOnDevice } from "@/lib/broker";
 import { HerdrStatusIcon } from "./herdr-status-icon";
 import { MirroredTerminalLayout } from "./mirrored-terminal-layout";
 
 // Heavy dialogs are split into their own chunks and loaded only when opened.
 const CommandPalette = lazy(() =>
-  import("./command-palette").then(m => ({ default: m.CommandPalette }))
+  import("./command-palette").then(m => ({ default: m.TermagCommandPalette }))
 );
 const SearchPalette = lazy(() =>
   import("./search-palette").then(m => ({ default: m.SearchPalette }))
@@ -73,6 +72,40 @@ function isTypingTarget(target: EventTarget | null): boolean {
   }
   const tag = target.tagName;
   return tag === "INPUT" || tag === "TEXTAREA" || target.isContentEditable;
+}
+
+const POWER_LEASE_MS = 120_000;
+const POWER_RENEW_MS = 60_000;
+
+function powerLeaseId(deviceName: string): string {
+  const key = `termag-power-lease:${deviceName}`;
+  let leaseId = sessionStorage.getItem(key);
+  if (!leaseId) {
+    leaseId = `web:${crypto.randomUUID()}`;
+    sessionStorage.setItem(key, leaseId);
+  }
+  return leaseId;
+}
+
+async function updatePowerLease(
+  deviceName: string,
+  action: "acquire" | "renew" | "release"
+): Promise<{ active: boolean }> {
+  const response = await fetch(`/api/devices/${encodeURIComponent(deviceName)}/power`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      action,
+      leaseId: powerLeaseId(deviceName),
+      mode: "terminals-awake",
+      durationMs: POWER_LEASE_MS,
+    }),
+  });
+  const result = await response.json();
+  if (!response.ok) {
+    throw new Error(result.error || "Power operation failed");
+  }
+  return { active: Boolean(result.state?.active ?? result.state?.isActive) };
 }
 
 function aggregateHerdRStatus(tabs: Tab[]): string {
@@ -114,6 +147,8 @@ function normalizeAgentDevice(input: unknown): AgentDeviceStatus {
     streamCount: Number.isFinite(Number(raw.streamCount)) ? Number(raw.streamCount) : undefined,
     uptimeSec: Number.isFinite(Number(raw.uptimeSec)) ? Number(raw.uptimeSec) : undefined,
     memMb: Number.isFinite(Number(raw.memMb)) ? Number(raw.memMb) : undefined,
+    memPeakMb: Number.isFinite(Number(raw.memPeakMb)) ? Number(raw.memPeakMb) : undefined,
+    kind: raw.kind === "ssh" ? "ssh" : "agent",
     lastSeenAt: typeof raw.lastSeenAt === "string" ? raw.lastSeenAt : null,
     deviceId: typeof raw.deviceId === "string" ? raw.deviceId : null,
     protocolVersion: Number.isFinite(Number(raw.protocolVersion)) ? Number(raw.protocolVersion) : 1,
@@ -224,7 +259,9 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
   const [helpOpen, setHelpOpen] = useState(false);
   const [agentDevices, setAgentDevices] = useState<AgentDeviceStatus[]>([]);
   const [theme, setTheme] = useState(user.theme);
-  const [caffeinateActive, setCaffeinateActive] = useState(false);
+  const [caffeinateActiveState, setCaffeinateActive] = useState(false);
+  const [caffeinateStatusDevice, setCaffeinateStatusDevice] = useState<string | null>(null);
+  const [caffeinateLeaseDevice, setCaffeinateLeaseDevice] = useState<string | null>(null);
   const [copiedCommand, setCopiedCommand] = useState("");
   // Live xterm titles keyed by sessionId. Tools inside the terminal can set
   // a title via OSC 0/2; we mirror it onto the corresponding tab label.
@@ -237,17 +274,27 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
   const [dragProjectId, setDragProjectId] = useState<string | null>(null);
   const [dropTarget, setDropTarget] = useState<{ id: string; before: boolean } | null>(null);
 
-  const handleSessionTitle = useCallback((sessionId: string, title: string) => {
-    setLiveTitles(current =>
-      current[sessionId] === title ? current : { ...current, [sessionId]: title }
-    );
-  }, []);
+  const handleSessionTitle = useCallback(
+    (sessionId: string, title: string) => {
+      setLiveTitles(current =>
+        current[sessionId] === title ? current : { ...current, [sessionId]: title }
+      );
+    },
+    [setLiveTitles]
+  );
   const initialTab = preferredProjectTab(initialProject);
   const tabHistory = useTabHistory(
     initialProject && initialTab ? { [initialProject.id]: [initialTab.id] } : {}
   );
   const activeProjectIdRef = useRef(activeProjectId);
   const activeTabIdRef = useRef(activeTabId);
+  const reloadStateRef = useRef<{
+    running: boolean;
+    pending: boolean;
+    nextProjectId?: string;
+    nextTabId?: string;
+    waiters: Array<() => void>;
+  }>({ running: false, pending: false, waiters: [] });
 
   const activeProject = useMemo(
     () => projects.find(project => project.id === activeProjectId) ?? projects[0],
@@ -263,18 +310,26 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
     [activeProject]
   );
   const topTabs = useMemo(() => {
-    if (!activeProject || activeProject.runtime !== "herdr") return activeProject?.tabs ?? [];
+    if (!activeProject || activeProject.runtime !== "herdr") {
+      return activeProject?.tabs ?? [];
+    }
     const seen = new Set<string>();
     return activeProject.tabs.filter(tab => {
       const key = tab.runtimeTabId || tab.id;
-      if (seen.has(key)) return false;
+      if (seen.has(key)) {
+        return false;
+      }
       seen.add(key);
       return true;
     });
   }, [activeProject]);
   const activeRuntimePanes = useMemo(() => {
-    if (!activeProject || !activeTab) return [];
-    if (activeProject.runtime !== "herdr" || !activeTab.runtimeTabId) return [activeTab];
+    if (!activeProject || !activeTab) {
+      return [];
+    }
+    if (activeProject.runtime !== "herdr" || !activeTab.runtimeTabId) {
+      return [activeTab];
+    }
     return activeProject.tabs.filter(tab => tab.runtimeTabId === activeTab.runtimeTabId);
   }, [activeProject, activeTab]);
   const connectedDeviceNames = useMemo(
@@ -283,6 +338,22 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
   );
   const activeDeviceConnected = Boolean(
     activeProject && connectedDeviceNames.has(activeProject.rootKey)
+  );
+  const activeAgentDevice = agentDevices.find(device => device.name === activeProject?.rootKey);
+  const powerSupported = Boolean(
+    activeAgentDevice &&
+    activeAgentDevice.kind !== "ssh" &&
+    (activeAgentDevice.protocolVersion ?? 1) >= 2 &&
+    activeAgentDevice.capabilities?.powerPolicy
+  );
+  const ownsCurrentPowerLease = Boolean(
+    powerSupported && activeProject && caffeinateLeaseDevice === activeProject.rootKey
+  );
+  const caffeinateActive = Boolean(
+    powerSupported &&
+    activeProject &&
+    caffeinateStatusDevice === activeProject.rootKey &&
+    caffeinateActiveState
   );
 
   useEffect(() => {
@@ -524,6 +595,45 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
             }
           } else if (msg.type === "refresh") {
             window.dispatchEvent(new CustomEvent("termag:refresh-projects"));
+          } else if (msg.type === "projects.patch" && Array.isArray(msg.projects)) {
+            const byProject = new Map(
+              msg.projects.map((patch: { id: string }) => [patch.id, patch])
+            );
+            setProjects(current =>
+              current.map(project => {
+                const patch = byProject.get(project.id) as
+                  | (Omit<Partial<Project>, "tabs"> & {
+                      tabs?: Array<Partial<Tab> & { id: string; sessionStatus?: string }>;
+                    })
+                  | undefined;
+                if (!patch) {
+                  return project;
+                }
+                const { tabs: tabPatches = [], ...projectFields } = patch;
+                const byTab = new Map(tabPatches.map(tabPatch => [tabPatch.id, tabPatch]));
+                return {
+                  ...project,
+                  ...projectFields,
+                  tabs: project.tabs
+                    .map(tab => {
+                      const tabPatch = byTab.get(tab.id);
+                      if (!tabPatch) {
+                        return tab;
+                      }
+                      const { sessionStatus, ...tabFields } = tabPatch;
+                      return {
+                        ...tab,
+                        ...tabFields,
+                        session:
+                          tab.session && sessionStatus
+                            ? { ...tab.session, status: sessionStatus }
+                            : tab.session,
+                      };
+                    })
+                    .sort((left, right) => left.ordinal - right.ordinal),
+                };
+              })
+            );
           }
         } catch {
           // ignore malformed payloads
@@ -555,31 +665,92 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
   }, []);
 
   const reloadProjects = useCallback(
-    async (nextProjectId?: string, nextTabId?: string) => {
-      const res = await fetch("/api/projects");
-      if (!res.ok) {
-        return;
+    (nextProjectId?: string, nextTabId?: string) => {
+      const state = reloadStateRef.current;
+      if (nextProjectId) {
+        state.nextProjectId = nextProjectId;
       }
-      const next = await res.json();
-      const desiredProjectId = nextProjectId ?? activeProjectIdRef.current;
-      const desiredTabId = nextTabId ?? activeTabIdRef.current;
-      setProjects(next);
-      const project = next.find((item: Project) => item.id === desiredProjectId) ?? next[0];
-      setActiveProjectId(project?.id || "");
-      const tab =
-        project?.tabs.find((item: Tab) => item.id === desiredTabId) ?? preferredProjectTab(project);
-      setActiveTabId(tab?.id || "");
-      if (project?.id && tab?.id && nextTabId) {
-        tabHistory.remember(project.id, tab.id);
+      if (nextTabId) {
+        state.nextTabId = nextTabId;
       }
+      state.pending = true;
+      const complete = new Promise<void>(resolve => state.waiters.push(resolve));
+      if (state.running) {
+        return complete;
+      }
+
+      state.running = true;
+      void (async () => {
+        try {
+          while (state.pending) {
+            state.pending = false;
+            const res = await fetch("/api/projects");
+            if (!res.ok) {
+              continue;
+            }
+            const next = (await res.json()) as Project[];
+            const desiredProjectId = state.nextProjectId ?? activeProjectIdRef.current;
+            const desiredTabId = state.nextTabId ?? activeTabIdRef.current;
+            const rememberRequestedTab = state.nextTabId;
+            state.nextProjectId = undefined;
+            state.nextTabId = undefined;
+            setProjects(next);
+            const liveSessionIds = new Set(
+              next.flatMap(project => [
+                ...project.sessions.map(session => session.id),
+                ...project.tabs.flatMap(tab => (tab.session ? [tab.session.id] : [])),
+              ])
+            );
+            setLiveTitles(current => {
+              const entries = Object.entries(current).filter(([sessionId]) =>
+                liveSessionIds.has(sessionId)
+              );
+              return entries.length === Object.keys(current).length
+                ? current
+                : Object.fromEntries(entries);
+            });
+            const project = next.find(item => item.id === desiredProjectId) ?? next[0];
+            activeProjectIdRef.current = project?.id || "";
+            setActiveProjectId(project?.id || "");
+            const tab =
+              project?.tabs.find(item => item.id === desiredTabId) ?? preferredProjectTab(project);
+            activeTabIdRef.current = tab?.id || "";
+            setActiveTabId(tab?.id || "");
+            if (project?.id && tab?.id && rememberRequestedTab) {
+              tabHistory.remember(project.id, tab.id);
+            }
+          }
+        } finally {
+          state.running = false;
+          const waiters = state.waiters.splice(0);
+          for (const resolve of waiters) {
+            resolve();
+          }
+        }
+      })();
+      return complete;
     },
     [tabHistory]
   );
 
   useEffect(() => {
-    const refresh = () => void reloadProjects();
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const refresh = () => {
+      if (timer) {
+        clearTimeout(timer);
+      }
+      timer = setTimeout(() => {
+        timer = null;
+        void reloadProjects();
+      }, 150);
+    };
     window.addEventListener("termag:refresh-projects", refresh);
-    return () => window.removeEventListener("termag:refresh-projects", refresh);
+    return () => {
+      if (timer) {
+        clearTimeout(timer);
+      }
+      window.removeEventListener("termag:refresh-projects", refresh);
+    };
   }, [reloadProjects]);
 
   const reorderProjects = useCallback(
@@ -622,7 +793,7 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
         await reloadProjects();
       }
     },
-    [reloadProjects]
+    [reloadProjects, setProjects]
   );
 
   const createProject = useCallback(
@@ -693,24 +864,27 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
     [reloadProjects]
   );
 
-  const copyText = useCallback(async (id: string, value: string) => {
-    try {
-      await navigator.clipboard.writeText(value);
-    } catch {
-      const textarea = document.createElement("textarea");
-      textarea.value = value;
-      textarea.style.position = "fixed";
-      textarea.style.opacity = "0";
-      document.body.appendChild(textarea);
-      textarea.select();
-      document.execCommand("copy");
-      document.body.removeChild(textarea);
-    }
-    setCopiedCommand(id);
-    window.setTimeout(() => {
-      setCopiedCommand(current => (current === id ? "" : current));
-    }, 1500);
-  }, []);
+  const copyText = useCallback(
+    async (id: string, value: string) => {
+      try {
+        await navigator.clipboard.writeText(value);
+      } catch {
+        const textarea = document.createElement("textarea");
+        textarea.value = value;
+        textarea.style.position = "fixed";
+        textarea.style.opacity = "0";
+        document.body.appendChild(textarea);
+        textarea.select();
+        document.execCommand("copy");
+        document.body.removeChild(textarea);
+      }
+      setCopiedCommand(id);
+      window.setTimeout(() => {
+        setCopiedCommand(current => (current === id ? "" : current));
+      }, 1500);
+    },
+    [setCopiedCommand]
+  );
 
   const renameProject = useCallback(
     async (projectId: string, name: string) => {
@@ -735,7 +909,7 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
         await reloadProjects();
       }
     },
-    [reloadProjects]
+    [reloadProjects, setProjects]
   );
 
   const renameTab = useCallback(
@@ -778,7 +952,7 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
         await reloadProjects();
       }
     },
-    [projects, reloadProjects]
+    [projects, reloadProjects, setLiveTitles, setProjects]
   );
 
   const closeTab = useCallback(
@@ -810,7 +984,7 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
     if (!platform.showShortcuts) {
       setSidebarOpen(false);
     }
-  }, [platform.showShortcuts]);
+  }, [platform.showShortcuts, setSidebarOpen]);
 
   const selectTab = useCallback(
     (projectId: string, tabId: string) => {
@@ -819,7 +993,7 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
       tabHistory.remember(projectId, tabId);
       closeDrawerOnMobile();
     },
-    [tabHistory, closeDrawerOnMobile]
+    [tabHistory, closeDrawerOnMobile, setActiveProjectId, setActiveTabId]
   );
 
   const cycleTheme = useCallback(async () => {
@@ -831,30 +1005,84 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ theme: next }),
     });
-  }, [theme]);
+  }, [setTheme, theme]);
 
-  const toggleCaffeinate = useCallback(async () => {
+  const toggleCaffeinate = async () => {
     if (!activeProject) {
       return;
     }
 
     try {
-      if (caffeinateActive) {
-        await stopCaffeinateOnDevice(user.id, activeProject.rootKey);
-        setCaffeinateActive(false);
+      const deviceName = activeProject.rootKey;
+      // Machine-wide state may be active because another browser/client owns
+      // a lease. Only release the lease owned by this browser; otherwise a
+      // click should acquire one so this view is independently protected.
+      if (ownsCurrentPowerLease) {
+        const state = await updatePowerLease(deviceName, "release");
+        sessionStorage.removeItem(`termag-power-active:${deviceName}`);
+        setCaffeinateLeaseDevice(null);
+        setCaffeinateStatusDevice(deviceName);
+        setCaffeinateActive(state.active);
       } else {
-        await startCaffeinateOnDevice(
-          user.id,
-          activeProject.rootKey,
-          "terminals-awake",
-          "User request from web UI"
-        );
-        setCaffeinateActive(true);
+        const state = await updatePowerLease(deviceName, "acquire");
+        sessionStorage.setItem(`termag-power-active:${deviceName}`, "1");
+        setCaffeinateLeaseDevice(deviceName);
+        setCaffeinateStatusDevice(deviceName);
+        setCaffeinateActive(state.active);
       }
     } catch (error) {
       console.error("Failed to toggle caffeinate:", error);
     }
-  }, [activeProject, caffeinateActive, user.id]);
+  };
+
+  useEffect(() => {
+    const deviceName = activeProject?.rootKey;
+    if (!deviceName || !powerSupported) {
+      return;
+    }
+    const controller = new AbortController();
+    const ownsLease = sessionStorage.getItem(`termag-power-active:${deviceName}`) === "1";
+    fetch(`/api/devices/${encodeURIComponent(deviceName)}/power`, {
+      signal: controller.signal,
+    })
+      .then(async response => {
+        if (!response.ok) {
+          throw new Error("Power state unavailable");
+        }
+        return response.json();
+      })
+      .then(state => {
+        setCaffeinateStatusDevice(deviceName);
+        setCaffeinateLeaseDevice(ownsLease ? deviceName : null);
+        setCaffeinateActive(Boolean(state?.active ?? state?.isActive));
+      })
+      .catch(error => {
+        if (error instanceof DOMException && error.name === "AbortError") {
+          return;
+        }
+        setCaffeinateStatusDevice(deviceName);
+        setCaffeinateLeaseDevice(ownsLease ? deviceName : null);
+        setCaffeinateActive(false);
+      });
+    return () => controller.abort();
+  }, [activeProject?.rootKey, powerSupported]);
+
+  useEffect(() => {
+    const deviceName = activeProject?.rootKey;
+    if (!deviceName || !ownsCurrentPowerLease) {
+      return;
+    }
+    const renew = () => {
+      updatePowerLease(deviceName, "renew")
+        .then(state => {
+          setCaffeinateStatusDevice(deviceName);
+          setCaffeinateActive(state.active);
+        })
+        .catch(() => setCaffeinateActive(false));
+    };
+    const timer = window.setInterval(renew, POWER_RENEW_MS);
+    return () => window.clearInterval(timer);
+  }, [activeProject?.rootKey, ownsCurrentPowerLease]);
 
   // Keep the keyboard ref pointed at the latest values without re-binding.
   useEffect(() => {
@@ -940,21 +1168,36 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
       device,
       [...deviceProjects].sort((left, right) => {
         const runtimeOrder = (value?: string) => (value === "herdr" ? 0 : value === "tmux" ? 1 : 2);
-        return (
+        const hierarchy =
           runtimeOrder(left.runtime) - runtimeOrder(right.runtime) ||
-          (left.runtimeSessionName || "").localeCompare(right.runtimeSessionName || "") ||
-          (left.runtimeOrdinal ?? 0) - (right.runtimeOrdinal ?? 0) ||
-          left.name.localeCompare(right.name)
+          (left.runtimeSessionName || "").localeCompare(right.runtimeSessionName || "");
+        if (hierarchy) {
+          return hierarchy;
+        }
+        // Runtime mirrors follow the authoritative local order. Ordinary
+        // cloud-managed projects retain the user's drag-and-drop position.
+        if (left.mirrored || right.mirrored) {
+          return (
+            (left.runtimeOrdinal ?? 0) - (right.runtimeOrdinal ?? 0) ||
+            left.name.localeCompare(right.name)
+          );
+        }
+        return (
+          (left.position ?? Number.POSITIVE_INFINITY) -
+            (right.position ?? Number.POSITIVE_INFINITY) || left.name.localeCompare(right.name)
         );
       }),
     ]) as Array<[string, Project[]]>;
   }, [devices, projects]);
 
-  const openNewProject = useCallback((device?: string) => {
-    setCreateMenuOpen(false);
-    setNewProjectDevice(device ?? null);
-    setNewProjectOpen(true);
-  }, []);
+  const openNewProject = useCallback(
+    (device?: string) => {
+      setCreateMenuOpen(false);
+      setNewProjectDevice(device ?? null);
+      setNewProjectOpen(true);
+    },
+    [setCreateMenuOpen, setNewProjectDevice, setNewProjectOpen]
+  );
 
   const onCommandSession = useCallback(
     (projectId: string, tabId: string) => {
@@ -977,10 +1220,13 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
     }
   }, [activeTab]);
 
-  const openDevices = useCallback((deviceName?: string) => {
-    setFocusedDevice(deviceName ?? null);
-    setDevicesOpen(true);
-  }, []);
+  const openDevices = useCallback(
+    (deviceName?: string) => {
+      setFocusedDevice(deviceName ?? null);
+      setDevicesOpen(true);
+    },
+    [setDevicesOpen, setFocusedDevice]
+  );
 
   return (
     <PlatformProvider platform={platform}>
@@ -1170,14 +1416,23 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
                             </div>
                           )}
                           <div
-                            draggable
+                            draggable={!project.mirrored}
+                            style={{ contentVisibility: "auto", containIntrinsicSize: "auto 80px" }}
                             onDragStart={event => {
+                              if (project.mirrored) {
+                                event.preventDefault();
+                                return;
+                              }
                               setDragProjectId(project.id);
                               event.dataTransfer.effectAllowed = "move";
                               event.dataTransfer.setData("text/plain", project.id);
                             }}
                             onDragOver={event => {
-                              if (!dragProjectId || dragProjectId === project.id) {
+                              if (
+                                project.mirrored ||
+                                !dragProjectId ||
+                                dragProjectId === project.id
+                              ) {
                                 return;
                               }
                               event.preventDefault();
@@ -1603,12 +1858,20 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
                   <Monitor className="h-4 w-4" />
                 )}
               </IconButton>
-              <IconButton
-                title={caffeinateActive ? "Stop preventing sleep" : "Prevent sleep"}
-                onClick={toggleCaffeinate}
-              >
-                <Coffee className={`h-4 w-4 ${caffeinateActive ? "text-yellow-500" : ""}`} />
-              </IconButton>
+              {powerSupported && (
+                <IconButton
+                  title={
+                    ownsCurrentPowerLease
+                      ? "Stop keeping terminals awake"
+                      : caffeinateActive
+                        ? "Terminals are kept awake by another lease; add this browser"
+                        : "Keep terminals awake (display may sleep and lock)"
+                  }
+                  onClick={toggleCaffeinate}
+                >
+                  <Coffee className={`h-4 w-4 ${caffeinateActive ? "text-yellow-500" : ""}`} />
+                </IconButton>
+              )}
             </div>
           </header>
 

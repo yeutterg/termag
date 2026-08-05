@@ -1,7 +1,7 @@
 const crypto = require("node:crypto");
 const { WebSocket } = require("ws");
 const { getToken } = require("next-auth/jwt");
-const { appendScrollback, startScrollbackPrune } = require("./scrollback");
+const { appendScrollback, readScrollback, startScrollbackPrune } = require("./scrollback");
 const { createSshStreamRegistry } = require("./ssh-session-stream");
 const { reconcileInventory } = require("./inventory-v2");
 
@@ -38,45 +38,179 @@ function sendJson(ws, msg) {
 // into xterm. Control messages (ready/sleeping/exit/refresh/agent) stay JSON.
 function sendOutput(ws, data) {
   if (ws.readyState !== WebSocket.OPEN || !data) {
-    return;
+    return false;
+  }
+  if (ws.bufferedAmount > WS_SEND_HIGH_WATER) {
+    return false;
   }
   ws.send(Buffer.isBuffer(data) ? data : Buffer.from(data, "utf8"));
+  return true;
+}
+
+async function sendReplayChunks(ws, chunks, isCurrent = () => true) {
+  const deadline = Date.now() + 30_000;
+  for (const data of chunks) {
+    while (
+      isCurrent() &&
+      ws.readyState === WebSocket.OPEN &&
+      ws.bufferedAmount > WS_SEND_LOW_WATER
+    ) {
+      if (Date.now() >= deadline) {
+        return false;
+      }
+      await new Promise(resolve => {
+        const timer = setTimeout(resolve, BACKPRESSURE_RETRY_MS);
+        timer.unref?.();
+      });
+    }
+    if (!isCurrent() || ws.readyState !== WebSocket.OPEN) {
+      return false;
+    }
+    ws.send(Buffer.isBuffer(data) ? data : Buffer.from(data, "utf8"));
+  }
+  return true;
 }
 
 const COALESCE_MS = 16; // ~60fps flush — imperceptible latency
 const PAUSE_DROP_LIMIT = 64 * 1024; // bytes buffered while paused; older bytes dropped
+const ACTIVE_BUFFER_LIMIT = 256 * 1024;
+const WS_SEND_HIGH_WATER = 1024 * 1024;
+const WS_SEND_LOW_WATER = 256 * 1024;
+const BACKPRESSURE_RETRY_MS = 50;
 
-function bufferAndFlush(stream, data) {
-  if (!stream || !data) {
-    return;
-  }
-  stream.outBuffer = (stream.outBuffer || "") + data;
-  if (stream.paused) {
-    if (stream.outBuffer.length > PAUSE_DROP_LIMIT) {
-      stream.outBuffer = stream.outBuffer.slice(-PAUSE_DROP_LIMIT);
-      stream.pausedTrimmed = true;
-    }
-    return;
-  }
+function asBuffer(data) {
+  return Buffer.isBuffer(data) ? data : Buffer.from(data, "utf8");
+}
+
+function bufferedBytes(stream) {
+  return stream.outBytes || 0;
+}
+
+function clearOutputBuffer(stream) {
+  stream.outChunks = [];
+  stream.outBytes = 0;
+}
+
+function markNeedsResync(stream, reason) {
+  clearOutputBuffer(stream);
+  stream.needsResync = true;
+  stream.resyncReason = reason || "terminal output fell behind";
+}
+
+function scheduleFlush(stream, delay = COALESCE_MS) {
   if (stream.flushTimer) {
     return;
   }
   stream.flushTimer = setTimeout(() => {
     stream.flushTimer = null;
     flushStream(stream);
-  }, COALESCE_MS);
+  }, delay);
+  stream.flushTimer.unref?.();
+}
+
+function bufferAndFlush(stream, data) {
+  if (!stream || !data) {
+    return;
+  }
+  if (stream.needsResync) {
+    scheduleFlush(stream, BACKPRESSURE_RETRY_MS);
+    return;
+  }
+  const chunk = asBuffer(data);
+  stream.outChunks ||= [];
+  stream.outChunks.push(chunk);
+  stream.outBytes = bufferedBytes(stream) + chunk.length;
+  if (stream.paused) {
+    if (stream.outBytes > PAUSE_DROP_LIMIT) {
+      markNeedsResync(stream, "output changed while this terminal was paused");
+      stream.pausedTrimmed = true;
+    }
+    return;
+  }
+  if (stream.outBytes > ACTIVE_BUFFER_LIMIT) {
+    markNeedsResync(stream, "browser could not keep up with terminal output");
+    scheduleFlush(stream, BACKPRESSURE_RETRY_MS);
+    return;
+  }
+  scheduleFlush(stream);
 }
 
 function flushStream(stream) {
-  if (!stream || !stream.outBuffer) {
+  if (!stream) {
     return;
   }
   if (stream.paused) {
     return;
   }
-  const data = stream.outBuffer;
-  stream.outBuffer = "";
-  sendOutput(stream.ws, data);
+  if (stream.needsResync) {
+    if (stream.ws.readyState !== WebSocket.OPEN) {
+      return;
+    }
+    if (stream.ws.bufferedAmount > WS_SEND_LOW_WATER) {
+      scheduleFlush(stream, BACKPRESSURE_RETRY_MS);
+      return;
+    }
+    if (!stream.resyncSent) {
+      stream.resyncSent = true;
+      sendJson(stream.ws, {
+        type: "resync",
+        message: stream.resyncReason || "terminal state needs a fresh checkpoint",
+      });
+    }
+    return;
+  }
+  if (!bufferedBytes(stream)) {
+    return;
+  }
+  if (stream.ws.bufferedAmount > WS_SEND_HIGH_WATER) {
+    if (stream.outBytes > ACTIVE_BUFFER_LIMIT) {
+      markNeedsResync(stream, "browser WebSocket remained backpressured");
+    }
+    scheduleFlush(stream, BACKPRESSURE_RETRY_MS);
+    return;
+  }
+  const data =
+    stream.outChunks.length === 1
+      ? stream.outChunks[0]
+      : Buffer.concat(stream.outChunks, stream.outBytes);
+  clearOutputBuffer(stream);
+  if (!sendOutput(stream.ws, data)) {
+    stream.outChunks = [data];
+    stream.outBytes = data.length;
+    scheduleFlush(stream, BACKPRESSURE_RETRY_MS);
+  }
+}
+
+// Agent protocol v2.1 binary terminal frame:
+//   4 bytes "TMG2", 1 byte flags (bit 0 = full checkpoint), 4 byte sequence,
+//   2 byte stream-id length, UTF-8 stream id, then raw terminal bytes.
+const AGENT_TERMINAL_MAGIC = Buffer.from("TMG2");
+const AGENT_TERMINAL_HEADER_BYTES = 11;
+
+function parseAgentTerminalFrame(raw) {
+  const frame = Buffer.isBuffer(raw) ? raw : Buffer.from(raw);
+  if (frame.length < AGENT_TERMINAL_HEADER_BYTES) {
+    return null;
+  }
+  if (!frame.subarray(0, 4).equals(AGENT_TERMINAL_MAGIC)) {
+    return null;
+  }
+  const flags = frame[4];
+  const sequence = frame.readUInt32BE(5);
+  const streamIdLength = frame.readUInt16BE(9);
+  const payloadStart = AGENT_TERMINAL_HEADER_BYTES + streamIdLength;
+  if (streamIdLength === 0 || streamIdLength > 512 || payloadStart > frame.length) {
+    return null;
+  }
+  const streamId = frame.subarray(AGENT_TERMINAL_HEADER_BYTES, payloadStart).toString("utf8");
+  return {
+    streamId,
+    sequence,
+    full: (flags & 1) === 1,
+    checkpointContinuation: (flags & (1 << 1)) !== 0,
+    checkpointEnd: (flags & (1 << 2)) !== 0,
+    data: frame.subarray(payloadStart),
+  };
 }
 
 function hashToken(token) {
@@ -194,11 +328,12 @@ const REPLAY_QUEUE_CAP = 256 * 1024;
 const REPLAY_QUEUE_TRIM = 192 * 1024;
 
 function pushReplayQueue(stream, data) {
-  if (typeof data !== "string" || !data) {
+  if (!data) {
     return;
   }
-  stream.replayQueue.push(data);
-  stream.replayQueueBytes += data.length;
+  const chunk = asBuffer(data);
+  stream.replayQueue.push(chunk);
+  stream.replayQueueBytes += chunk.length;
   if (stream.replayQueueBytes <= REPLAY_QUEUE_CAP) {
     return;
   }
@@ -295,6 +430,7 @@ async function userIdFromRequest(req, prisma) {
  */
 function createBroker({ prisma, wss }) {
   const agents = new Map();
+  const inventoryReconciliations = new Map();
   const browserStreams = new Map();
   const sessionPrimary = new Map();
   // SSH host state. sshHosts is userId → Map(hostId → { spec, status,
@@ -310,6 +446,41 @@ function createBroker({ prisma, wss }) {
   // fresh AND the session still has an attached browser stream — the PTY
   // path reacts to live output/BEL faster than the 30s health tick.
   const ptyStatusBySession = new Map(); // sessionId -> { status, at }
+  const terminalSequenceBySession = new Map();
+  const terminalCheckpoints = new Map();
+  const terminalCheckpointRequests = new Map();
+  const MAX_CHECKPOINT_CACHE_BYTES = 64 * 1024 * 1024;
+  let terminalCheckpointBytes = 0;
+
+  function deleteTerminalCheckpoint(sessionId) {
+    const checkpoint = terminalCheckpoints.get(sessionId);
+    if (!checkpoint) {
+      return;
+    }
+    terminalCheckpointBytes = Math.max(
+      0,
+      terminalCheckpointBytes - checkpoint.fullBytes - checkpoint.tailBytes
+    );
+    terminalCheckpoints.delete(sessionId);
+  }
+
+  function trimCheckpointCache(exemptSessionId) {
+    while (terminalCheckpointBytes > MAX_CHECKPOINT_CACHE_BYTES) {
+      let oldest = null;
+      for (const [sessionId, checkpoint] of terminalCheckpoints) {
+        if (sessionId === exemptSessionId) {
+          continue;
+        }
+        if (!oldest || checkpoint.at < oldest.checkpoint.at) {
+          oldest = { sessionId, checkpoint };
+        }
+      }
+      if (!oldest) {
+        break;
+      }
+      deleteTerminalCheckpoint(oldest.sessionId);
+    }
+  }
   // A window whose last output is younger than this counts as actively
   // working — fresh output beats a stale bell flag. Env-overridable to match
   // the HEALTH_INTERVAL_MS tuning pattern over in apps/agent/src/index.ts.
@@ -317,7 +488,31 @@ function createBroker({ prisma, wss }) {
   // How long a PTY-reported status stays authoritative before the poll
   // classifier takes back over (the PTY path stops refreshing on output stop).
   const PTY_FRESH_MS = Number(process.env.TERMAG_PTY_FRESH_MS) || 5000;
+  const TRANSIENT_STATE_TTL_MS = 10 * 60 * 1000;
   let seq = 0;
+
+  const transientStateSweep = setInterval(() => {
+    const cutoff = Date.now() - TRANSIENT_STATE_TTL_MS;
+    const activeSessions = new Set(
+      [...browserStreams.values()].map(stream => stream.sessionId).filter(Boolean)
+    );
+    for (const [sessionId, state] of ptyStatusBySession) {
+      if (state.at < cutoff && !activeSessions.has(sessionId)) {
+        ptyStatusBySession.delete(sessionId);
+      }
+    }
+    for (const [sessionId, state] of terminalSequenceBySession) {
+      if (state.at < cutoff && !activeSessions.has(sessionId)) {
+        terminalSequenceBySession.delete(sessionId);
+      }
+    }
+    for (const [sessionId, state] of terminalCheckpoints) {
+      if (state.at < cutoff && !activeSessions.has(sessionId)) {
+        deleteTerminalCheckpoint(sessionId);
+      }
+    }
+  }, 60_000);
+  transientStateSweep.unref?.();
 
   // Schedule the scrollback TTL prune as part of broker boot. Runs once
   // immediately so a freshly-started broker that's been off for a while
@@ -403,6 +598,135 @@ function createBroker({ prisma, wss }) {
     return stream?.userId === userId && stream.deviceName === deviceName;
   }
 
+  function routeSharedTerminalData(userId, deviceName, frame) {
+    const anchor = browserStreams.get(frame.streamId);
+    if (!streamBelongsToAgent(anchor, userId, deviceName)) {
+      return;
+    }
+    if (!frame.data || frame.data.length > 256 * 1024) {
+      return;
+    }
+
+    const previous = terminalSequenceBySession.get(anchor.sessionId);
+    const expectedSequence = previous
+      ? previous.sequence === 0xffffffff
+        ? 1
+        : previous.sequence + 1
+      : frame.sequence;
+    if (!frame.full && previous && frame.sequence !== expectedSequence) {
+      // A checkpoint plus ANSI deltas is only replayable as one contiguous
+      // byte sequence. Once any frame is missing, retaining/appending to that
+      // cache would make the next viewer's screen plausibly but silently
+      // corrupt, so discard it and force a fresh runtime checkpoint.
+      deleteTerminalCheckpoint(anchor.sessionId);
+      for (const stream of browserStreams.values()) {
+        if (
+          stream.sessionId === anchor.sessionId &&
+          streamBelongsToAgent(stream, userId, deviceName)
+        ) {
+          markNeedsResync(stream, "terminal frame sequence was interrupted");
+          scheduleFlush(stream, BACKPRESSURE_RETRY_MS);
+        }
+      }
+      terminalSequenceBySession.set(anchor.sessionId, {
+        sequence: frame.sequence,
+        at: Date.now(),
+      });
+      return;
+    }
+    terminalSequenceBySession.set(anchor.sessionId, {
+      sequence: frame.sequence,
+      at: Date.now(),
+    });
+
+    let checkpoint = terminalCheckpoints.get(anchor.sessionId);
+    if (frame.full) {
+      terminalCheckpointRequests.delete(anchor.sessionId);
+      deleteTerminalCheckpoint(anchor.sessionId);
+      checkpoint = {
+        full: [Buffer.from(frame.data)],
+        fullBytes: frame.data.length,
+        building: !frame.checkpointEnd,
+        tail: [],
+        tailBytes: 0,
+        sequence: frame.sequence,
+        at: Date.now(),
+      };
+      terminalCheckpoints.set(anchor.sessionId, checkpoint);
+      terminalCheckpointBytes += checkpoint.fullBytes;
+    } else if (frame.checkpointContinuation) {
+      if (checkpoint?.building) {
+        checkpoint.full.push(Buffer.from(frame.data));
+        checkpoint.fullBytes += frame.data.length;
+        terminalCheckpointBytes += frame.data.length;
+        checkpoint.sequence = frame.sequence;
+        checkpoint.at = Date.now();
+        checkpoint.building = !frame.checkpointEnd;
+      } else {
+        // A continuation without its start cannot seed future replay. It is
+        // still fanned to already-live viewers below, which may have received
+        // the start before this broker lost cache state.
+        deleteTerminalCheckpoint(anchor.sessionId);
+        checkpoint = null;
+      }
+      if (checkpoint?.fullBytes > 4 * 1024 * 1024) {
+        deleteTerminalCheckpoint(anchor.sessionId);
+        checkpoint = null;
+      }
+    } else if (checkpoint?.building) {
+      // A checkpoint start must be followed only by explicitly-marked
+      // continuation frames through checkpointEnd. Treat any other frame as
+      // a protocol gap instead of caching a partial terminal state.
+      deleteTerminalCheckpoint(anchor.sessionId);
+      checkpoint = null;
+    } else if (checkpoint) {
+      const tailChunk = Buffer.from(frame.data);
+      checkpoint.tail.push(tailChunk);
+      checkpoint.tailBytes += tailChunk.length;
+      terminalCheckpointBytes += tailChunk.length;
+      checkpoint.sequence = frame.sequence;
+      checkpoint.at = Date.now();
+      // ANSI deltas are ordered state transitions: dropping the middle and
+      // retaining only a tail would produce a plausible-looking but corrupt
+      // replay. Invalidate the cache instead; the next viewer asks the local
+      // runtime for a fresh bounded checkpoint.
+      if (checkpoint.tailBytes > 1024 * 1024) {
+        deleteTerminalCheckpoint(anchor.sessionId);
+        checkpoint = null;
+      }
+    }
+    trimCheckpointCache(anchor.sessionId);
+
+    for (const stream of browserStreams.values()) {
+      if (
+        stream.sessionId !== anchor.sessionId ||
+        !streamBelongsToAgent(stream, userId, deviceName)
+      ) {
+        continue;
+      }
+      if (frame.full) {
+        if (stream.replaying) {
+          stream.replayEpoch += 1;
+        }
+        stream.needsResync = false;
+        stream.resyncSent = false;
+        clearOutputBuffer(stream);
+        sendJson(stream.ws, { type: "checkpoint", sequence: frame.sequence });
+      }
+      if (stream.replaying) {
+        pushReplayQueue(stream, frame.data);
+      } else {
+        bufferAndFlush(stream, frame.data);
+      }
+    }
+
+    if (anchor.persistScrollback) {
+      appendScrollback(prisma, anchor.sessionId, frame.data).catch(error =>
+        console.error("[scrollback]", error instanceof Error ? error.message : String(error))
+      );
+    }
+  }
+
   function connectedAgents(userId) {
     return [...agentsForUser(userId).values()].filter(
       agent => agent.ws.readyState === WebSocket.OPEN
@@ -443,6 +767,36 @@ function createBroker({ prisma, wss }) {
     return true;
   }
 
+  async function reconcileAgentInventory(agent, rawSnapshot) {
+    const key = `${agent.userId}\u0000${agent.deviceName}`;
+    const previous = inventoryReconciliations.get(key) || Promise.resolve();
+    const task = previous
+      .catch(() => {})
+      .then(() => {
+        // Serialize old/new connections for the same device. This prevents a
+        // slow snapshot from the replaced socket from committing after the
+        // replacement's newer tree and resurrecting stale local state.
+        if (agentsForUser(agent.userId).get(agent.deviceName) !== agent) {
+          return null;
+        }
+        return reconcileInventory({
+          prisma,
+          userId: agent.userId,
+          deviceId: agent.tokenId,
+          deviceName: agent.deviceName,
+          rawSnapshot,
+        });
+      });
+    inventoryReconciliations.set(key, task);
+    try {
+      return await task;
+    } finally {
+      if (inventoryReconciliations.get(key) === task) {
+        inventoryReconciliations.delete(key);
+      }
+    }
+  }
+
   function sendToAgent(userId, deviceName, type, payload = {}, timeoutMs = 15000) {
     const agent = agentForUser(userId, deviceName);
     if (!agent) {
@@ -457,6 +811,22 @@ function createBroker({ prisma, wss }) {
       agent.pending.set(requestId, { resolve, reject, timer });
       sendJson(agent.ws, { requestId, type, ...payload });
     });
+  }
+
+  function sendAgentEvent(userId, deviceName, type, payload = {}, legacyTimeoutMs = 1000) {
+    const agent = agentForUser(userId, deviceName);
+    if (!agent) {
+      return false;
+    }
+    if ((agent.protocolVersion || 1) >= 2) {
+      // High-frequency terminal input/resize messages do not need a reply.
+      // Omitting requestId keeps large pastes from allocating one Promise,
+      // timeout, and pending-map entry per chunk in the cloud broker.
+      sendJson(agent.ws, { type, ...payload });
+      return true;
+    }
+    sendToAgent(userId, deviceName, type, payload, legacyTimeoutMs).catch(() => {});
+    return true;
   }
 
   function claimPrimary(sessionId, streamId) {
@@ -741,7 +1111,7 @@ function createBroker({ prisma, wss }) {
     return changed;
   }
 
-  function broadcastStatus(userId, refresh = false) {
+  function broadcastStatus(userId, refresh = false, projectPatches = null) {
     const devices = deviceStatuses(userId);
     for (const client of wss.clients) {
       if (client._termagStatusUserId === userId && client.readyState === WebSocket.OPEN) {
@@ -752,6 +1122,8 @@ function createBroker({ prisma, wss }) {
         });
         if (refresh) {
           sendJson(client, { type: "refresh" });
+        } else if (Array.isArray(projectPatches) && projectPatches.length > 0) {
+          sendJson(client, { type: "projects.patch", projects: projectPatches });
         }
       }
     }
@@ -818,7 +1190,8 @@ function createBroker({ prisma, wss }) {
       protocolVersion: 1,
       capabilities: {},
       inventory: null,
-      inventoryQueue: Promise.resolve(),
+      inventoryProcessing: false,
+      pendingInventory: null,
     };
     setAgent(record.userId, deviceName, agent);
 
@@ -843,7 +1216,14 @@ function createBroker({ prisma, wss }) {
       }
     }
 
-    ws.on("message", async raw => {
+    ws.on("message", async (raw, isBinary) => {
+      if (isBinary) {
+        const frame = parseAgentTerminalFrame(raw);
+        if (frame) {
+          routeSharedTerminalData(record.userId, deviceName, frame);
+        }
+        return;
+      }
       let msg;
       try {
         msg = JSON.parse(raw.toString());
@@ -876,6 +1256,7 @@ function createBroker({ prisma, wss }) {
           streamCount: Number.isFinite(Number(msg.streamCount)) ? Number(msg.streamCount) : 0,
           uptimeSec: Number.isFinite(Number(msg.uptimeSec)) ? Number(msg.uptimeSec) : 0,
           memMb: Number.isFinite(Number(msg.memMb)) ? Number(msg.memMb) : 0,
+          memPeakMb: Number.isFinite(Number(msg.memPeakMb)) ? Number(msg.memPeakMb) : 0,
           roots: msg.roots && typeof msg.roots === "object" ? msg.roots : {},
           tmuxSessions: normalizeTmuxSessions(msg.tmux?.sessions),
         };
@@ -895,39 +1276,61 @@ function createBroker({ prisma, wss }) {
         ) {
           return;
         }
-        // Serialize snapshots from one device. A rapid HerdR event burst may
-        // enqueue another snapshot while Prisma is still reconciling the
-        // previous one; preserving order prevents an older archive pass from
-        // winning after a newer create pass.
-        agent.inventoryQueue = agent.inventoryQueue
-          .then(async () => {
-            const inventory = await reconcileInventory({
-              prisma,
-              userId: record.userId,
-              deviceId: record.id,
-              deviceName,
-              rawSnapshot: msg.inventory,
-            });
-            agent.protocolVersion = 2;
-            agent.capabilities =
-              msg.capabilities && typeof msg.capabilities === "object" ? msg.capabilities : {};
-            agent.inventory = inventory;
-            agent.lastSeenAt = new Date();
-            await prisma.agentToken
-              .update({
-                where: { id: record.id },
-                data: {
-                  protocolVersion: 2,
-                  capabilities: JSON.stringify(agent.capabilities),
-                  lastInventoryAt: new Date(),
-                },
-              })
-              .catch(() => {});
-            broadcastStatus(record.userId, true);
-          })
-          .catch(err =>
-            console.error("[inventory-v2]", sanitizeAgentText(err?.message || err, 512))
-          );
+        const revision = Number(msg.inventory.revision) || 0;
+        if (revision <= (Number(agent.inventory?.revision) || -1)) {
+          return;
+        }
+        // Keep only the newest pending snapshot while a reconciliation is in
+        // flight. HerdR can emit a burst of focus/layout/status events; replaying
+        // every intermediate tree adds DB churn without adding user-visible state.
+        if (!agent.pendingInventory || revision >= agent.pendingInventory.revision) {
+          agent.pendingInventory = { revision, msg };
+        }
+        if (agent.inventoryProcessing) {
+          return;
+        }
+        agent.inventoryProcessing = true;
+        void (async () => {
+          try {
+            while (agent.pendingInventory) {
+              const pending = agent.pendingInventory;
+              agent.pendingInventory = null;
+              if (pending.revision <= (Number(agent.inventory?.revision) || -1)) {
+                continue;
+              }
+              const result = await reconcileAgentInventory(agent, pending.msg.inventory);
+              if (!result) {
+                break;
+              }
+              agent.protocolVersion = 2;
+              agent.capabilities =
+                pending.msg.capabilities && typeof pending.msg.capabilities === "object"
+                  ? pending.msg.capabilities
+                  : {};
+              agent.inventory = result.snapshot;
+              agent.lastSeenAt = new Date();
+              await prisma.agentToken
+                .update({
+                  where: { id: record.id },
+                  data: {
+                    protocolVersion: 2,
+                    capabilities: JSON.stringify(agent.capabilities),
+                    lastInventoryAt: new Date(),
+                  },
+                })
+                .catch(() => {});
+              broadcastStatus(
+                record.userId,
+                result.structuralChanged,
+                result.structuralChanged ? null : result.patches
+              );
+            }
+          } catch (err) {
+            console.error("[inventory-v2]", sanitizeAgentText(err?.message || err, 512));
+          } finally {
+            agent.inventoryProcessing = false;
+          }
+        })();
         return;
       }
 
@@ -968,6 +1371,26 @@ function createBroker({ prisma, wss }) {
           appendScrollback(prisma, stream.sessionId, msg.data).catch(err =>
             console.error("[scrollback]", err.message)
           );
+        }
+        return;
+      }
+
+      if (msg.type === "terminal-gap" && msg.streamId) {
+        const anchor = browserStreams.get(msg.streamId);
+        if (!streamBelongsToAgent(anchor, record.userId, deviceName)) {
+          return;
+        }
+        deleteTerminalCheckpoint(anchor.sessionId);
+        terminalSequenceBySession.delete(anchor.sessionId);
+        terminalCheckpointRequests.delete(anchor.sessionId);
+        for (const stream of browserStreams.values()) {
+          if (
+            stream.sessionId === anchor.sessionId &&
+            streamBelongsToAgent(stream, record.userId, deviceName)
+          ) {
+            markNeedsResync(stream, "local terminal output exceeded its bounded queue");
+            scheduleFlush(stream, BACKPRESSURE_RETRY_MS);
+          }
         }
         return;
       }
@@ -1070,6 +1493,7 @@ function createBroker({ prisma, wss }) {
         clearTimeout(pending.timer);
         pending.reject(new Error("Agent disconnected"));
       }
+      agent.pending.clear();
       for (const stream of browserStreams.values()) {
         if (
           stream.userId === record.userId &&
@@ -1215,48 +1639,96 @@ function createBroker({ prisma, wss }) {
       cols,
       rows,
       readOnly,
-      // While true, terminal-data handlers also push data to replayQueue.
+      persistScrollback: !session.project.mirrored,
+      // While true, terminal-data handlers push live bytes to replayQueue so
+      // they cannot overtake the bounded history/checkpoint being drained.
+      // Mirrored runtimes skip DB history but still need this ordering gate
+      // while an in-memory checkpoint is backpressured to the browser.
       replaying: true,
       replayQueue: [],
       replayQueueBytes: 0,
       replayQueueTruncated: false,
+      replayEpoch: 0,
+      outChunks: [],
+      outBytes: 0,
+      needsResync: false,
+      resyncSent: false,
       reattach: () => attachToAgent(),
     };
     browserStreams.set(streamId, stream);
 
-    // On mobile/saveData: send only the most recent ~500 lines of scrollback.
-    // Otherwise replay everything (~10K-line cap from appendScrollback).
-    if (lowBandwidth) {
-      // Cap at 64 chunks newest-first; with the broker's coalesce-window
-      // sizing this comfortably covers 500+ lines without materializing
-      // the whole 10K-line history into Node memory just to slice it.
-      const recentChunks = await prisma.scrollbackChunk.findMany({
-        where: { sessionId },
-        orderBy: { createdAt: "desc" },
-        select: { data: true, lineCount: true },
-        take: 64,
-      });
-      let lines = 0;
-      const slice = [];
-      for (const chunk of recentChunks) {
-        slice.push(chunk);
-        lines += chunk.lineCount;
-        if (lines >= 500) {
-          break;
+    // Install cleanup before any awaited replay work. A client can disappear
+    // while a multi-megabyte checkpoint is yielding to WebSocket
+    // backpressure; waiting until after attach would retain the stream and
+    // its queued bytes indefinitely.
+    let streamClosed = false;
+    const cleanupStream = () => {
+      if (streamClosed) {
+        return;
+      }
+      streamClosed = true;
+      const wasAttached = stream.attached;
+      stream.attached = false;
+      if (stream.flushTimer) {
+        clearTimeout(stream.flushTimer);
+      }
+      clearOutputBuffer(stream);
+      stream.replayQueue = [];
+      stream.replayQueueBytes = 0;
+      browserStreams.delete(streamId);
+      releasePrimary(sessionId, streamId);
+      if (![...browserStreams.values()].some(other => other.sessionId === sessionId)) {
+        ptyStatusBySession.delete(sessionId);
+        terminalSequenceBySession.delete(sessionId);
+        deleteTerminalCheckpoint(sessionId);
+        terminalCheckpointRequests.delete(sessionId);
+      }
+      if (wasAttached) {
+        sendAgentEvent(userId, session.project.rootKey, "terminal-close", { streamId }, 1000);
+      }
+    };
+    ws.once("close", cleanupStream);
+
+    const abortReplay = () => {
+      cleanupStream();
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.close(1012, "terminal replay stalled");
+      }
+    };
+
+    if (session.project.mirrored) {
+      const checkpoint = terminalCheckpoints.get(sessionId);
+      if (checkpoint) {
+        const replayEpoch = stream.replayEpoch;
+        sendJson(ws, { type: "checkpoint", sequence: checkpoint.sequence });
+        const replayed = await sendReplayChunks(
+          ws,
+          [...checkpoint.full, ...checkpoint.tail],
+          () => stream.replayEpoch === replayEpoch
+        );
+        // A fresh full checkpoint intentionally supersedes stale replay and
+        // has already been queued. Any other interruption is a dead/stalled
+        // browser and must release its retained state immediately.
+        if (!replayed && stream.replayEpoch === replayEpoch) {
+          abortReplay();
+          return;
         }
       }
-      slice.reverse();
-      for (const chunk of slice) {
-        sendOutput(ws, chunk.data);
+    }
+
+    if (stream.replaying && !session.project.mirrored) {
+      let chunks = [];
+      try {
+        chunks = await readScrollback(prisma, sessionId, {
+          maxLines: lowBandwidth ? 500 : 2500,
+          maxBytes: lowBandwidth ? 1024 * 1024 : 4 * 1024 * 1024,
+        });
+      } catch (error) {
+        console.error("[scrollback]", error instanceof Error ? error.message : String(error));
       }
-    } else {
-      const chunks = await prisma.scrollbackChunk.findMany({
-        where: { sessionId },
-        orderBy: { createdAt: "asc" },
-        select: { data: true },
-      });
-      for (const chunk of chunks) {
-        sendOutput(ws, chunk.data);
+      if (!(await sendReplayChunks(ws, chunks))) {
+        abortReplay();
+        return;
       }
     }
 
@@ -1267,10 +1739,18 @@ function createBroker({ prisma, wss }) {
     }
     stream.replaying = false;
     if (stream.replayQueueTruncated) {
-      sendOutput(ws, "\r\n\x1b[2m[scrollback continuity gap during attach]\x1b[0m\r\n");
+      // Terminal output is stateful: sending a retained tail after dropping
+      // bytes in the middle can leave xterm looking plausible but wrong.
+      // Reconnect and replay a complete runtime checkpoint / DB snapshot.
+      stream.replayQueue = [];
+      stream.replayQueueBytes = 0;
+      markNeedsResync(stream, "terminal output changed too quickly during attach");
+      scheduleFlush(stream, 0);
+      return;
     }
-    for (const queued of stream.replayQueue) {
-      sendOutput(ws, queued);
+    if (!(await sendReplayChunks(ws, stream.replayQueue))) {
+      abortReplay();
+      return;
     }
     stream.replayQueue = [];
     stream.replayQueueBytes = 0;
@@ -1315,6 +1795,12 @@ function createBroker({ prisma, wss }) {
               other.sessionId === sessionId &&
               (other.attached || other.attachPromise)
           );
+          const lastCheckpointRequest = terminalCheckpointRequests.get(sessionId) || 0;
+          const requestCheckpoint =
+            !terminalCheckpoints.has(sessionId) && Date.now() - lastCheckpointRequest > 5000;
+          if (requestCheckpoint) {
+            terminalCheckpointRequests.set(sessionId, Date.now());
+          }
           const attachResult = await sendToAgent(
             userId,
             session.project.rootKey,
@@ -1359,9 +1845,22 @@ function createBroker({ prisma, wss }) {
               cols: stream.cols,
               rows: stream.rows,
               readOnly: stream.readOnly === true,
+              requestCheckpoint,
               replayRecent: !anotherAttached,
             }
           );
+          if (streamClosed || ws.readyState !== WebSocket.OPEN) {
+            // The browser can close while the agent is creating/attaching the
+            // runtime. Early cleanup saw `attached=false`, so explicitly undo
+            // the just-completed attach to avoid an orphan subscriber in the
+            // lightweight agent registry.
+            sendAgentEvent(userId, session.project.rootKey, "terminal-close", { streamId }, 1000);
+            return false;
+          }
+          // Mark before any persistence await so the already-installed close
+          // handler can undo the agent attach if the browser disappears while
+          // tmux metadata is being updated.
+          stream.attached = true;
           if (attachResult?.tmuxName && attachResult.tmuxName !== session.tmuxName) {
             session.tmuxName = attachResult.tmuxName;
             await prisma.session
@@ -1371,7 +1870,9 @@ function createBroker({ prisma, wss }) {
               })
               .catch(() => {});
           }
-          stream.attached = true;
+          if (streamClosed) {
+            return false;
+          }
           // Claim primary lazily: covers the case where the previous primary
           // failed to reattach and cleared the slot. Without this, our
           // terminal-data would fan out fine but never make it into the DB
@@ -1383,9 +1884,13 @@ function createBroker({ prisma, wss }) {
           if (!session.project.mirrored) {
             await markSessionStatus("idle");
           }
+          if (streamClosed) {
+            return false;
+          }
           sendJson(ws, { type: "ready" });
           return true;
         } catch {
+          terminalCheckpointRequests.delete(sessionId);
           stream.attached = false;
           // If we were holding the primary slot but failed to attach (e.g.
           // tmux session was destroyed during agent restart), hand it off
@@ -1426,31 +1931,35 @@ function createBroker({ prisma, wss }) {
         return;
       }
       if (msg.type === "input") {
-        if (stream.readOnly) {
+        if (
+          stream.readOnly ||
+          typeof msg.data !== "string" ||
+          Buffer.byteLength(msg.data, "utf8") > 256 * 1024
+        ) {
           return;
         } // Read-only viewers never write to the PTY.
         if (!(await attachToAgent())) {
           return;
         }
-        sendToAgent(
+        sendAgentEvent(
           userId,
           session.project.rootKey,
           "terminal-input",
           { streamId, data: msg.data },
           1000
-        ).catch(() => {});
+        );
       }
       if (msg.type === "resize") {
         stream.cols = terminalDimension(msg.cols, stream.cols, 20, 500);
         stream.rows = terminalDimension(msg.rows, stream.rows, 5, 200);
         if (stream.attached) {
-          sendToAgent(
+          sendAgentEvent(
             userId,
             session.project.rootKey,
             "terminal-resize",
             { streamId, cols: stream.cols, rows: stream.rows },
             1000
-          ).catch(() => {});
+          );
         }
       }
       if (
@@ -1458,22 +1967,16 @@ function createBroker({ prisma, wss }) {
         session.tmuxManaged !== false &&
         agentForUser(userId, session.project.rootKey)
       ) {
-        sendToAgent(
+        sendAgentEvent(
           userId,
           session.project.rootKey,
           "tmux-kill-window",
           { tmuxName: session.tmuxName },
           5000
-        ).catch(() => {});
+        );
       }
       if (msg.type === "claim-drive" && stream.attached && !stream.readOnly) {
-        sendToAgent(
-          userId,
-          session.project.rootKey,
-          "terminal-claim-drive",
-          { streamId },
-          1000
-        ).catch(() => {});
+        sendAgentEvent(userId, session.project.rootKey, "terminal-claim-drive", { streamId }, 1000);
       }
       if (msg.type === "pause") {
         // Browser tab/app is hidden — stop forwarding output. Buffer is
@@ -1483,24 +1986,9 @@ function createBroker({ prisma, wss }) {
       if (msg.type === "resume") {
         stream.paused = false;
         if (stream.pausedTrimmed) {
-          sendOutput(stream.ws, "\r\n[output trimmed while paused]\r\n");
           stream.pausedTrimmed = false;
         }
         flushStream(stream);
-      }
-    });
-
-    ws.on("close", () => {
-      const wasAttached = stream.attached;
-      if (stream.flushTimer) {
-        clearTimeout(stream.flushTimer);
-      }
-      browserStreams.delete(streamId);
-      releasePrimary(sessionId, streamId);
-      if (wasAttached) {
-        sendToAgent(userId, session.project.rootKey, "terminal-close", { streamId }, 1000).catch(
-          () => {}
-        );
       }
     });
   }
@@ -2025,11 +2513,38 @@ function createBroker({ prisma, wss }) {
       }
       return sendToAgent(userId, deviceName, "caffeinate-stop", {}, 5000);
     },
+    async acquirePowerLease(userId, deviceName, leaseId, mode, reason, durationMs, renew = false) {
+      const agent = agentForUser(userId, deviceName);
+      if (!agent) {
+        throw new Error("Agent offline");
+      }
+      if (agent.protocolVersion < 2 || !agent.capabilities?.powerPolicy) {
+        throw new Error("Agent does not support renewable power leases");
+      }
+      return sendToAgent(
+        userId,
+        deviceName,
+        renew ? "power.renew" : "power.acquire",
+        { leaseId, mode, reason, durationMs },
+        5000
+      );
+    },
+    async releasePowerLease(userId, deviceName, leaseId) {
+      const agent = agentForUser(userId, deviceName);
+      if (!agent) {
+        throw new Error("Agent offline");
+      }
+      if (agent.protocolVersion < 2 || !agent.capabilities?.powerPolicy) {
+        throw new Error("Agent does not support renewable power leases");
+      }
+      return sendToAgent(userId, deviceName, "power.release", { leaseId }, 5000);
+    },
     async getCaffeinateStatus(userId, deviceName) {
       if (!agentForUser(userId, deviceName)) {
         throw new Error("Agent offline");
       }
-      return sendToAgent(userId, deviceName, "caffeinate-status", {}, 5000);
+      const result = await sendToAgent(userId, deviceName, "caffeinate-status", {}, 5000);
+      return result?.state || result;
     },
     killTmuxSession(userId, deviceName, tmuxSessionName, timeoutMs = 5000) {
       if (!tmuxSessionName || !agentForUser(userId, deviceName)) {
@@ -2087,4 +2602,4 @@ function createBroker({ prisma, wss }) {
   };
 }
 
-module.exports = { createBroker };
+module.exports = { createBroker, parseAgentTerminalFrame };

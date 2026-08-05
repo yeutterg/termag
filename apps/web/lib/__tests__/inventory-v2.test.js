@@ -1,6 +1,6 @@
 // inventory-v2 is intentionally CommonJS because it is loaded by the custom broker.
 // eslint-disable-next-line @typescript-eslint/no-require-imports
-const { normalizeSnapshot } = require("../../server/inventory-v2");
+const { normalizeSnapshot, reconcileInventory } = require("../../server/inventory-v2");
 
 describe("protocol-v2 inventory normalization", () => {
   it("preserves HerdR identity, layout, and status vocabulary", () => {
@@ -74,5 +74,56 @@ describe("protocol-v2 inventory normalization", () => {
 
     expect(snapshot.runtimes).toHaveLength(1);
     expect(snapshot.runtimes[0].sessions[0].spaces[0].tabs[0].panes[0].status).toBe("unknown");
+  });
+
+  it("does not archive mirrors when runtime discovery is unavailable", async () => {
+    const prisma = {
+      project: {
+        findMany: jest.fn().mockResolvedValue([]),
+        updateMany: jest.fn().mockResolvedValue({ count: 0 }),
+      },
+      agentToken: { update: jest.fn().mockResolvedValue({}) },
+    };
+    const result = await reconcileInventory({
+      prisma,
+      userId: "user-1",
+      deviceId: "device-1",
+      deviceName: "mac",
+      rawSnapshot: {
+        revision: 2,
+        runtimes: [{ kind: "herdr", available: false, sessions: [] }],
+      },
+    });
+
+    expect(prisma.project.updateMany).not.toHaveBeenCalled();
+    expect(result.structuralChanged).toBe(false);
+  });
+
+  it("archives missing mirrors only after a complete empty snapshot", async () => {
+    const prisma = {
+      project: {
+        findMany: jest.fn().mockResolvedValue([]),
+        updateMany: jest.fn().mockResolvedValue({ count: 1 }),
+      },
+      agentToken: { update: jest.fn().mockResolvedValue({}) },
+    };
+    const result = await reconcileInventory({
+      prisma,
+      userId: "user-1",
+      deviceId: "device-1",
+      deviceName: "mac",
+      rawSnapshot: {
+        revision: 3,
+        runtimes: [{ kind: "tmux", available: true, sessions: [] }],
+      },
+    });
+
+    expect(prisma.project.updateMany).toHaveBeenCalledTimes(1);
+    expect(prisma.project.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({ archivedAt: null }),
+      })
+    );
+    expect(result.structuralChanged).toBe(true);
   });
 });

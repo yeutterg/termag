@@ -9,17 +9,11 @@ interface RateLimitEntry {
 
 class RateLimiter {
   private requests: Map<string, RateLimitEntry> = new Map();
-  private cleanupInterval: NodeJS.Timeout | null = null;
 
   constructor(
     private maxRequests: number = 100,
     private windowMs: number = 60000
-  ) {
-    // Clean up expired entries every minute
-    this.cleanupInterval = setInterval(() => {
-      this.cleanup();
-    }, 60000);
-  }
+  ) {}
 
   private cleanup() {
     const now = Date.now();
@@ -31,6 +25,7 @@ class RateLimiter {
   }
 
   check(identifier: string): { allowed: boolean; remaining: number; resetTime: number } {
+    this.cleanup();
     const now = Date.now();
     const entry = this.requests.get(identifier);
 
@@ -69,12 +64,88 @@ class RateLimiter {
   }
 
   destroy() {
-    if (this.cleanupInterval) {
-      clearInterval(this.cleanupInterval);
-      this.cleanupInterval = null;
-    }
     this.requests.clear();
   }
+}
+
+export function clientIpFromRequest(request: Request): string {
+  // Forwarded IP headers are attacker-controlled unless the deployment has
+  // explicitly declared its reverse proxy trusted. The conservative direct
+  // fallback shares one bucket, which is safer than a spoofable per-IP key.
+  if (process.env.TERMAG_TRUSTED_PROXY !== "true") {
+    return "direct";
+  }
+  const forwarded = request.headers.get("x-forwarded-for")?.split(",")[0]?.trim();
+  return (
+    forwarded ||
+    request.headers.get("x-real-ip")?.trim() ||
+    request.headers.get("cf-connecting-ip")?.trim() ||
+    "proxy-unknown"
+  ).slice(0, 64);
+}
+
+type SecurityRateLimiterOptions = {
+  perIpWindowMs: number;
+  perIpBurst: number;
+  perIpLockoutMs: number;
+  globalWindowMs: number;
+  globalBurst: number;
+};
+
+type FailureWindow = { failures: number; resetAt: number; lockedUntil: number };
+
+export function createRateLimiter(options: SecurityRateLimiterOptions) {
+  const failures = new Map<string, FailureWindow>();
+  let globalCount = 0;
+  let globalResetAt = Date.now() + options.globalWindowMs;
+
+  function cleanup(now: number) {
+    for (const [key, entry] of failures) {
+      if (entry.resetAt <= now && entry.lockedUntil <= now) {
+        failures.delete(key);
+      }
+    }
+  }
+
+  return {
+    check(identifier: string): { ok: boolean; retryAfterSec: number } {
+      const now = Date.now();
+      cleanup(now);
+      if (globalResetAt <= now) {
+        globalCount = 0;
+        globalResetAt = now + options.globalWindowMs;
+      }
+      if (globalCount >= options.globalBurst) {
+        return { ok: false, retryAfterSec: Math.max(1, Math.ceil((globalResetAt - now) / 1000)) };
+      }
+      globalCount += 1;
+      const entry = failures.get(identifier);
+      if (entry && entry.lockedUntil > now) {
+        return {
+          ok: false,
+          retryAfterSec: Math.max(1, Math.ceil((entry.lockedUntil - now) / 1000)),
+        };
+      }
+      return { ok: true, retryAfterSec: 0 };
+    },
+    record(identifier: string, success: boolean) {
+      if (success) {
+        failures.delete(identifier);
+        return;
+      }
+      const now = Date.now();
+      const current = failures.get(identifier);
+      const entry =
+        !current || current.resetAt <= now
+          ? { failures: 0, resetAt: now + options.perIpWindowMs, lockedUntil: 0 }
+          : current;
+      entry.failures += 1;
+      if (entry.failures >= options.perIpBurst) {
+        entry.lockedUntil = now + options.perIpLockoutMs;
+      }
+      failures.set(identifier, entry);
+    },
+  };
 }
 
 // Rate limiters for different endpoints
@@ -83,23 +154,7 @@ const authLimiter = new RateLimiter(5, 60000); // 5 requests per minute for auth
 const sensitiveLimiter = new RateLimiter(10, 60000); // 10 requests per minute for sensitive operations
 
 function getClientIdentifier(request: Request): string {
-  // Try to get client IP from various headers
-  const forwardedFor = request.headers.get("x-forwarded-for");
-  const realIp = request.headers.get("x-real-ip");
-  const cfConnectingIp = request.headers.get("cf-connecting-ip");
-
-  if (forwardedFor) {
-    return forwardedFor.split(",")[0].trim();
-  }
-  if (realIp) {
-    return realIp;
-  }
-  if (cfConnectingIp) {
-    return cfConnectingIp;
-  }
-
-  // Fallback to a combination of headers
-  return request.headers.get("user-agent") || "unknown";
+  return clientIpFromRequest(request);
 }
 
 export function rateLimit(limiter: RateLimiter = apiLimiter) {

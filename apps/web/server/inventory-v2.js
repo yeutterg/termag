@@ -5,7 +5,9 @@ const MAX_PANES = 4096;
 const VALID_STATUSES = new Set(["blocked", "working", "done", "idle", "unknown", "offline"]);
 
 function text(value, fallback = "", max = 512) {
-  if (typeof value !== "string") return fallback;
+  if (typeof value !== "string") {
+    return fallback;
+  }
   const clean = value.replace(/[\x00-\x1F\x7F-\x9F]/g, " ").trim();
   return clean.slice(0, max) || fallback;
 }
@@ -28,28 +30,45 @@ function normalizeSnapshot(raw) {
   let paneCount = 0;
   for (const runtime of Array.isArray(source.runtimes) ? source.runtimes : []) {
     const kind = runtime?.kind === "herdr" ? "herdr" : runtime?.kind === "tmux" ? "tmux" : null;
-    if (!kind) continue;
+    if (!kind) {
+      continue;
+    }
     const sessions = [];
     for (const rawSession of Array.isArray(runtime.sessions) ? runtime.sessions : []) {
-      if (++sessionCount > MAX_RUNTIME_SESSIONS)
+      if (++sessionCount > MAX_RUNTIME_SESSIONS) {
         throw new Error("inventory session limit exceeded");
+      }
       const id = text(rawSession?.id, "", 256);
-      if (!id) continue;
+      if (!id) {
+        continue;
+      }
       const spaces = [];
       for (const rawSpace of Array.isArray(rawSession.spaces) ? rawSession.spaces : []) {
-        if (++spaceCount > MAX_SPACES) throw new Error("inventory space limit exceeded");
+        if (++spaceCount > MAX_SPACES) {
+          throw new Error("inventory space limit exceeded");
+        }
         const spaceId = text(rawSpace?.id, "", 256);
-        if (!spaceId) continue;
+        if (!spaceId) {
+          continue;
+        }
         const tabs = [];
         for (const rawTab of Array.isArray(rawSpace.tabs) ? rawSpace.tabs : []) {
-          if (++tabCount > MAX_TABS) throw new Error("inventory tab limit exceeded");
+          if (++tabCount > MAX_TABS) {
+            throw new Error("inventory tab limit exceeded");
+          }
           const tabId = text(rawTab?.id, "", 256);
-          if (!tabId) continue;
+          if (!tabId) {
+            continue;
+          }
           const panes = [];
           for (const rawPane of Array.isArray(rawTab.panes) ? rawTab.panes : []) {
-            if (++paneCount > MAX_PANES) throw new Error("inventory pane limit exceeded");
+            if (++paneCount > MAX_PANES) {
+              throw new Error("inventory pane limit exceeded");
+            }
             const paneId = text(rawPane?.id, "", 256);
-            if (!paneId) continue;
+            if (!paneId) {
+              continue;
+            }
             panes.push({
               id: paneId,
               terminalId: text(rawPane?.terminalId, paneId, 256),
@@ -101,22 +120,29 @@ function normalizeSnapshot(raw) {
   };
 }
 
-async function uniqueProjectName(prisma, userId, wanted, existingId) {
+function reserveProjectName(owners, wanted, existing) {
   const base = text(wanted, "Workspace", 80);
+  if (existing && owners.get(existing.name) === existing.id) {
+    owners.delete(existing.name);
+  }
   for (let index = 0; index < 100; index += 1) {
     const suffix = index === 0 ? "" : ` (${index + 1})`;
     const candidate = `${base.slice(0, 80 - suffix.length)}${suffix}`;
-    const conflict = await prisma.project.findFirst({
-      where: { userId, name: candidate, ...(existingId ? { NOT: { id: existingId } } : {}) },
-      select: { id: true },
-    });
-    if (!conflict) return candidate;
+    const owner = owners.get(candidate);
+    if (!owner || owner === existing?.id) {
+      owners.set(candidate, existing?.id || "pending");
+      return candidate;
+    }
   }
-  return `${base.slice(0, 64)} ${Date.now().toString(36)}`;
+  const fallback = `${base.slice(0, 64)} ${Date.now().toString(36)}`;
+  owners.set(fallback, existing?.id || "pending");
+  return fallback;
 }
 
 function paneLabel(tab, pane) {
-  if (tab.panes.length <= 1) return tab.name;
+  if (tab.panes.length <= 1) {
+    return tab.name;
+  }
   const paneName = pane.name === "Terminal" ? `Pane ${pane.ordinal + 1}` : pane.name;
   return `${tab.name} · ${paneName}`.slice(0, 160);
 }
@@ -125,41 +151,82 @@ async function reconcileInventory({ prisma, userId, deviceId, deviceName, rawSna
   const snapshot = normalizeSnapshot(rawSnapshot);
   const seenProjects = new Set();
   const mirroredAt = new Date();
+  const observedKinds = new Set(
+    snapshot.runtimes.filter(runtime => runtime.available).map(runtime => runtime.kind)
+  );
+  const [existingProjects, projectNames] = await Promise.all([
+    prisma.project.findMany({
+      where: {
+        userId,
+        OR: [{ deviceId }, { rootKey: deviceName }],
+      },
+      include: { tabs: { include: { session: true } } },
+    }),
+    prisma.project.findMany({ where: { userId }, select: { id: true, name: true } }),
+  ]);
+  const nameOwners = new Map(projectNames.map(project => [project.name, project.id]));
+  const byIdentity = new Map();
+  const tmuxByWindow = new Map();
+  const tmuxBySession = new Map();
+  for (const project of existingProjects) {
+    if (project.deviceId && project.runtimeSessionId && project.externalId) {
+      byIdentity.set(
+        identityKey(
+          project.deviceId,
+          project.runtime,
+          project.runtimeSessionId,
+          project.externalId
+        ),
+        project
+      );
+    }
+    if (project.rootKey === deviceName && project.tmuxSessionName) {
+      tmuxBySession.set(project.tmuxSessionName, project);
+    }
+    if (project.rootKey === deviceName) {
+      for (const tab of project.tabs) {
+        if (tab.session?.tmuxName) {
+          tmuxByWindow.set(tab.session.tmuxName, project);
+        }
+      }
+    }
+  }
+  const claimedProjects = new Set();
+  const patches = [];
+  let structuralChanged = false;
 
   for (const runtime of snapshot.runtimes) {
+    // An unavailable runtime means discovery failed, not that every local
+    // workspace vanished. Preserve its previous mirror until a complete
+    // snapshot arrives so a transient HerdR/tmux error cannot archive it.
+    if (!runtime.available) {
+      continue;
+    }
     for (const runtimeSession of runtime.sessions) {
       for (const space of runtimeSession.spaces) {
         const firstPaneCwd = space.tabs
           .flatMap(tab => tab.panes)
           .map(pane => pane.cwd)
           .find(Boolean);
-        let project = await prisma.project.findFirst({
-          where: {
-            userId,
-            deviceId,
-            runtime: runtime.kind,
-            runtimeSessionId: runtimeSession.id,
-            externalId: space.id,
-          },
-        });
+        const key = identityKey(deviceId, runtime.kind, runtimeSession.id, space.id);
+        let project = byIdentity.get(key);
         if (!project && runtime.kind === "tmux") {
-          const windowIds = space.tabs.map(tab => tab.id).filter(Boolean);
-          if (windowIds.length) {
-            project = await prisma.project.findFirst({
-              where: {
-                userId,
-                rootKey: deviceName,
-                sessions: { some: { tmuxName: { in: windowIds } } },
-              },
-            });
+          for (const runtimeTab of space.tabs) {
+            const candidate = tmuxByWindow.get(runtimeTab.id);
+            if (candidate && !claimedProjects.has(candidate.id)) {
+              project = candidate;
+              break;
+            }
           }
         }
         if (!project && runtime.kind === "tmux") {
-          project = await prisma.project.findFirst({
-            where: { userId, rootKey: deviceName, tmuxSessionName: runtimeSession.name },
-          });
+          const candidate = tmuxBySession.get(runtimeSession.name);
+          if (candidate && !claimedProjects.has(candidate.id)) {
+            project = candidate;
+          }
         }
-        const projectName = await uniqueProjectName(prisma, userId, space.name, project?.id);
+        const existingProject = project;
+        const projectName = reserveProjectName(nameOwners, space.name, existingProject);
         const projectData = {
           name: projectName,
           rootKey: deviceName,
@@ -186,27 +253,49 @@ async function reconcileInventory({ prisma, userId, deviceId, deviceName, rawSna
           mirrored: true,
           archivedAt: null,
         };
-        project = project
-          ? await prisma.project.update({ where: { id: project.id }, data: projectData })
-          : await prisma.project.create({ data: { ...projectData, userId } });
+        const projectChanged = !project || scalarChanged(project, projectData, ["runtimeRevision"]);
+        if (project) {
+          if (project.archivedAt) {
+            structuralChanged = true;
+          }
+          if (projectChanged) {
+            const updated = await prisma.project.update({
+              where: { id: project.id },
+              data: projectData,
+            });
+            project = { ...updated, tabs: project.tabs };
+          }
+        } else {
+          const created = await prisma.project.create({ data: { ...projectData, userId } });
+          project = { ...created, tabs: [] };
+          structuralChanged = true;
+        }
+        nameOwners.set(projectName, project.id);
+        byIdentity.set(key, project);
+        claimedProjects.add(project.id);
         seenProjects.add(project.id);
         const seenTabs = new Set();
+        const tabsByPane = new Map();
+        const tabsByTmuxWindow = new Map();
+        for (const existingTab of project.tabs || []) {
+          if (
+            existingTab.runtimePaneId &&
+            (!tabsByPane.has(existingTab.runtimePaneId) ||
+              (tabsByPane.get(existingTab.runtimePaneId).archivedAt && !existingTab.archivedAt))
+          ) {
+            tabsByPane.set(existingTab.runtimePaneId, existingTab);
+          }
+          if (existingTab.session?.tmuxName && !existingTab.runtimePaneId) {
+            tabsByTmuxWindow.set(existingTab.session.tmuxName, existingTab);
+          }
+        }
+        const tabPatches = [];
 
         for (const runtimeTab of space.tabs) {
           for (const pane of runtimeTab.panes) {
-            let tab = await prisma.tab.findFirst({
-              where: { projectId: project.id, runtimePaneId: pane.id },
-              include: { session: true },
-            });
+            let tab = tabsByPane.get(pane.id);
             if (!tab && runtime.kind === "tmux") {
-              tab = await prisma.tab.findFirst({
-                where: {
-                  projectId: project.id,
-                  runtimePaneId: null,
-                  session: { tmuxName: runtimeTab.id },
-                },
-                include: { session: true },
-              });
+              tab = tabsByTmuxWindow.get(runtimeTab.id);
             }
             const ordinal = runtimeTab.ordinal * 10_000 + pane.ordinal;
             const tabData = {
@@ -227,83 +316,141 @@ async function reconcileInventory({ prisma, userId, deviceId, deviceName, rawSna
                   pane.ordinal === runtimeTab.panes[0]?.ordinal),
               archivedAt: null,
             };
+            const nextSession = sessionData(
+              runtime,
+              runtimeSession,
+              runtimeTab,
+              pane,
+              project.id,
+              mirroredAt
+            );
             if (tab) {
-              tab = await prisma.tab.update({
-                where: { id: tab.id },
-                data: {
-                  ...tabData,
-                  session: tab.session
-                    ? {
-                        update: {
-                          tmuxName: runtime.kind === "tmux" ? runtimeTab.id : pane.id,
-                          tmuxWindowName: runtimeTab.name,
-                          status: pane.status,
-                          lastSeenAt: mirroredAt,
-                          runtime: runtime.kind,
-                          runtimeSessionId: runtimeSession.id,
-                          externalId: pane.id,
-                          terminalId: pane.terminalId,
-                          archivedAt: null,
-                        },
-                      }
-                    : {
-                        create: sessionData(runtime, runtimeSession, runtimeTab, pane, project.id),
-                      },
-                },
-                include: { session: true },
-              });
+              if (tab.archivedAt || !tab.session || tab.session.archivedAt) {
+                structuralChanged = true;
+              }
+              const tabChanged = scalarChanged(tab, tabData);
+              const sessionChanged =
+                !tab.session || scalarChanged(tab.session, nextSession, ["lastSeenAt"]);
+              if (tabChanged) {
+                tab = await prisma.tab.update({
+                  where: { id: tab.id },
+                  data: {
+                    ...tabData,
+                    session: tab.session ? { update: nextSession } : { create: nextSession },
+                  },
+                  include: { session: true },
+                });
+              } else if (sessionChanged && tab.session) {
+                const session = await prisma.session.update({
+                  where: { id: tab.session.id },
+                  data: nextSession,
+                });
+                tab = { ...tab, session };
+              }
+              if (tabChanged || sessionChanged) {
+                tabPatches.push(tabPatch(tab, tabData, pane.status));
+              }
             } else {
               tab = await prisma.tab.create({
                 data: {
                   ...tabData,
                   projectId: project.id,
                   session: {
-                    create: sessionData(runtime, runtimeSession, runtimeTab, pane, project.id),
+                    create: nextSession,
                   },
                 },
                 include: { session: true },
               });
+              structuralChanged = true;
             }
+            tabsByPane.set(pane.id, tab);
             seenTabs.add(tab.id);
           }
         }
-        await prisma.tab.updateMany({
+        const archivedTabs = await prisma.tab.updateMany({
           where: {
             projectId: project.id,
             runtimePaneId: { not: null },
+            archivedAt: null,
             ...(seenTabs.size ? { id: { notIn: [...seenTabs] } } : {}),
           },
           data: { archivedAt: mirroredAt, status: "offline" },
         });
-        await prisma.session.updateMany({
+        const archivedSessions = await prisma.session.updateMany({
           where: {
             projectId: project.id,
             externalId: { not: null },
+            archivedAt: null,
             tabId: { notIn: [...seenTabs] },
           },
           data: { archivedAt: mirroredAt, status: "offline" },
         });
+        if (archivedTabs.count > 0 || archivedSessions.count > 0) {
+          structuralChanged = true;
+        }
+        if (projectChanged || tabPatches.length > 0) {
+          patches.push({
+            id: project.id,
+            name: projectData.name,
+            status: projectData.status,
+            runtimeSpaceName: projectData.runtimeSpaceName,
+            runtimeIconStyle: projectData.runtimeIconStyle,
+            runtimeOrdinal: projectData.runtimeOrdinal,
+            runtimeFocused: projectData.runtimeFocused,
+            tabs: tabPatches,
+          });
+        }
       }
     }
   }
 
-  await prisma.project.updateMany({
-    where: {
-      userId,
-      deviceId,
-      mirrored: true,
-      ...(seenProjects.size ? { id: { notIn: [...seenProjects] } } : {}),
-    },
-    data: { archivedAt: mirroredAt, status: "offline" },
-  });
-  await prisma.agentToken.update({
-    where: { id: deviceId },
-    data: { protocolVersion: 2, lastInventoryAt: mirroredAt },
-  });
-  return snapshot;
+  if (observedKinds.size > 0) {
+    const archivedProjects = await prisma.project.updateMany({
+      where: {
+        userId,
+        deviceId,
+        mirrored: true,
+        archivedAt: null,
+        runtime: { in: [...observedKinds] },
+        ...(seenProjects.size ? { id: { notIn: [...seenProjects] } } : {}),
+      },
+      data: { archivedAt: mirroredAt, status: "offline" },
+    });
+    if (archivedProjects.count > 0) {
+      structuralChanged = true;
+    }
+  }
+  // Connection metadata/capabilities are persisted once by the broker after
+  // this reconciliation succeeds. Keeping that write out of this helper
+  // avoids two AgentToken updates for every HerdR focus/status event.
+  return { snapshot, structuralChanged, patches };
 }
 
-function sessionData(runtime, runtimeSession, runtimeTab, pane, projectId) {
+function identityKey(deviceId, runtime, runtimeSessionId, externalId) {
+  return `${deviceId}\u0000${runtime}\u0000${runtimeSessionId}\u0000${externalId}`;
+}
+
+function scalarChanged(record, data, ignored = []) {
+  const skip = new Set(ignored);
+  return Object.entries(data).some(([key, value]) => !skip.has(key) && record?.[key] !== value);
+}
+
+function tabPatch(tab, data, sessionStatus) {
+  return {
+    id: tab.id,
+    ...data,
+    sessionStatus,
+  };
+}
+
+function sessionData(
+  runtime,
+  runtimeSession,
+  runtimeTab,
+  pane,
+  projectId,
+  mirroredAt = new Date()
+) {
   return {
     projectId,
     kind: "agent",
@@ -312,7 +459,7 @@ function sessionData(runtime, runtimeSession, runtimeTab, pane, projectId) {
     tmuxManaged: false,
     agentType: runtime.kind,
     status: pane.status,
-    lastSeenAt: new Date(),
+    lastSeenAt: mirroredAt,
     runtime: runtime.kind,
     runtimeSessionId: runtimeSession.id,
     externalId: pane.id,
