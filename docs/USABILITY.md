@@ -11,29 +11,29 @@ typechecks — see `docs/COMMAND_PALETTE.md` for the parts that do not.
 
 ## Shipped and wired
 
-| Feature | Where |
-| --- | --- |
-| Toast notifications | `components/toast-provider.tsx`, `components/toast-container.tsx` |
-| Keyboard shortcut help | `components/termag-app.tsx` |
-| Drag-and-drop tabs | `components/draggable-tab.tsx` |
-| Terminal search | `components/search-dialog.tsx` |
-| Theme and font controls | `app/globals.css`, `tailwind.config.ts` |
-| Touch gestures | `lib/use-touch-gestures.ts` |
-| Offline handling | `lib/offline-manager.ts`, `public/sw.js` |
-| Accessibility helpers | `lib/accessibility.ts`, `components/skip-links.tsx` |
+| Feature                 | Where                                                             |
+| ----------------------- | ----------------------------------------------------------------- |
+| Toast notifications     | `components/toast-provider.tsx`, `components/toast-container.tsx` |
+| Keyboard shortcut help  | `components/termag-app.tsx`                                       |
+| Drag-and-drop tabs      | `components/draggable-tab.tsx`                                    |
+| Terminal search         | `components/search-dialog.tsx`                                    |
+| Theme and font controls | `app/globals.css`, `tailwind.config.ts`                           |
+| Touch gestures          | `lib/use-touch-gestures.ts`                                       |
+| Offline handling        | `lib/offline-manager.ts`, `public/sw.js`                          |
+| Accessibility helpers   | `lib/accessibility.ts`, `components/skip-links.tsx`               |
 
 ## Present but not fully integrated
 
 These have a module and no complete path from the UI, or depend on the v1-only
 command channel:
 
-| Feature | Where | Blocker |
-| --- | --- | --- |
-| Command snippets | `lib/command-snippets.ts` | not surfaced in the palette |
-| Session bookmarks | `lib/session-bookmarks.ts` | not surfaced in the palette |
-| Session templates | `lib/session-templates.ts` | creation path is v1-only |
+| Feature                  | Where                                                              | Blocker                                         |
+| ------------------------ | ------------------------------------------------------------------ | ----------------------------------------------- |
+| Command snippets         | `lib/command-snippets.ts`                                          | not surfaced in the palette                     |
+| Session bookmarks        | `lib/session-bookmarks.ts`                                         | not surfaced in the palette                     |
+| Session templates        | `lib/session-templates.ts`                                         | creation path is v1-only                        |
 | Session history/recovery | `lib/session-history.ts`, `components/session-recovery-dialog.tsx` | `lib/session-integration.ts` does not typecheck |
-| Clipboard history | `lib/clipboard-history.ts` | no UI entry point |
+| Clipboard history        | `lib/clipboard-history.ts`                                         | no UI entry point                               |
 
 ## Not implemented
 

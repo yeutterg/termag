@@ -37,14 +37,14 @@ Command palette UI
 
 Feature modules sit beside the execution layer and compose it:
 
-| Module | Responsibility |
-| --- | --- |
-| `lib/session-manager.ts` | session lifecycle helpers |
-| `lib/clipboard-history.ts` | recent clipboard entries |
-| `lib/git-operations.ts` | status, branch, stage, commit, push/pull |
-| `lib/search-operations.ts` | file and content search |
-| `lib/window-management.ts` | tab and pane arrangement |
-| `lib/advanced-features.ts` | snippets, bookmarks, templates |
+| Module                     | Responsibility                           |
+| -------------------------- | ---------------------------------------- |
+| `lib/session-manager.ts`   | session lifecycle helpers                |
+| `lib/clipboard-history.ts` | recent clipboard entries                 |
+| `lib/git-operations.ts`    | status, branch, stage, commit, push/pull |
+| `lib/search-operations.ts` | file and content search                  |
+| `lib/window-management.ts` | tab and pane arrangement                 |
+| `lib/advanced-features.ts` | snippets, bookmarks, templates           |
 
 ## Porting to protocol v2
 
