@@ -1,4 +1,5 @@
 import { cookies } from "next/headers";
+import { NextResponse } from "next/server";
 
 const CSRF_TOKEN_LENGTH = 32;
 const CSRF_COOKIE_NAME = "csrf_token";
@@ -26,7 +27,9 @@ export async function validateCSRFToken(request: Request): Promise<boolean> {
   const host = forwardedHost || request.headers.get("host");
   if (origin && host) {
     try {
-      if (new URL(origin).host === host) return true;
+      if (new URL(origin).host === host) {
+        return true;
+      }
     } catch {
       // Fall through to the double-submit token check.
     }
@@ -43,7 +46,9 @@ export async function validateCSRFToken(request: Request): Promise<boolean> {
 
   // Compare every code unit so a mismatch does not return early. Avoids the
   // Node-only crypto/Buffer APIs because middleware runs in the Edge runtime.
-  if (cookieToken.length !== headerToken.length) return false;
+  if (cookieToken.length !== headerToken.length) {
+    return false;
+  }
   let difference = 0;
   for (let index = 0; index < cookieToken.length; index += 1) {
     difference |= cookieToken.charCodeAt(index) ^ headerToken.charCodeAt(index);
@@ -77,19 +82,14 @@ export async function initializeCSRF(): Promise<string> {
 }
 
 // Middleware to protect API routes from CSRF attacks
-export async function csrfProtection(request: Request): Promise<Response | null> {
+export async function csrfProtection(request: Request): Promise<NextResponse | null> {
   if (!(await validateCSRFToken(request))) {
-    return new Response(
-      JSON.stringify({
+    return NextResponse.json(
+      {
         error: "CSRF token validation failed",
         message: "Invalid or missing CSRF token",
-      }),
-      {
-        status: 403,
-        headers: {
-          "Content-Type": "application/json",
-        },
-      }
+      },
+      { status: 403 }
     );
   }
   return null;

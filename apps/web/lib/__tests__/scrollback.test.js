@@ -2,7 +2,10 @@
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const { createScrollbackStore } = require("../../server/scrollback");
 
-function fakePrisma() {
+// `clock` fixes createdAt for every row, reproducing the case the seq column
+// exists for: several flushes inside a single millisecond, where createdAt
+// alone cannot order them and cuid ids are not time-sortable.
+function fakePrisma({ clock = null } = {}) {
   let nextId = 1;
   const rows = [];
   return {
@@ -10,9 +13,17 @@ function fakePrisma() {
     scrollbackChunk: {
       findMany: jest.fn(async args => {
         const matching = rows.filter(row => row.sessionId === args.where.sessionId);
-        const ordered = [...matching].sort((a, b) =>
-          args.orderBy.createdAt === "desc" ? b.createdAt - a.createdAt : a.createdAt - b.createdAt
-        );
+        const terms = Array.isArray(args.orderBy) ? args.orderBy : [args.orderBy];
+        const ordered = [...matching].sort((a, b) => {
+          for (const term of terms) {
+            const [field, direction] = Object.entries(term)[0];
+            const delta = direction === "desc" ? b[field] - a[field] : a[field] - b[field];
+            if (delta !== 0) {
+              return delta;
+            }
+          }
+          return 0;
+        });
         return (args.take ? ordered.slice(0, args.take) : ordered).map(row => {
           const selected = {};
           for (const key of Object.keys(args.select)) {
@@ -22,7 +33,8 @@ function fakePrisma() {
         });
       }),
       create: jest.fn(async ({ data }) => {
-        const row = { ...data, id: `chunk-${nextId}`, createdAt: nextId++ };
+        const id = nextId++;
+        const row = { ...data, id: `chunk-${id}`, createdAt: clock ?? id };
         rows.push(row);
         return { id: row.id };
       }),
@@ -123,5 +135,36 @@ describe("bounded scrollback store", () => {
     expect(chunks).toHaveLength(1);
     expect(Buffer.byteLength(chunks[0])).toBe(1024);
     await store.close();
+  });
+
+  it("replays in write order when several flushes share a timestamp", async () => {
+    // Every row lands on the same millisecond, so ordering by createdAt alone
+    // is undefined and the replayed screen could come back scrambled.
+    const prisma = fakePrisma({ clock: 1_700_000_000_000 });
+    const store = createScrollbackStore(prisma);
+    for (const line of ["first\n", "second\n", "third\n"]) {
+      store.append("session-1", line);
+      await store.flush("session-1");
+    }
+
+    expect(prisma.rows.map(row => row.seq)).toEqual([1, 2, 3]);
+    expect((await store.read("session-1")).join("")).toBe("first\nsecond\nthird\n");
+    await store.close();
+  });
+
+  it("continues a session's sequence across a broker restart", async () => {
+    const prisma = fakePrisma({ clock: 1_700_000_000_000 });
+    const first = createScrollbackStore(prisma);
+    first.append("session-1", "before\n");
+    await first.flush("session-1");
+    await first.close();
+
+    const second = createScrollbackStore(prisma);
+    second.append("session-1", "after\n");
+    await second.flush("session-1");
+
+    expect(prisma.rows.map(row => row.seq)).toEqual([1, 2]);
+    expect((await second.read("session-1")).join("")).toBe("before\nafter\n");
+    await second.close();
   });
 });

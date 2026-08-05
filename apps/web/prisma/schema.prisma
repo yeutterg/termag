@@ -179,7 +179,13 @@ model Session {
 }
 
 model ScrollbackChunk {
-  id        String   @id @default(cuid())
+  id String @id @default(cuid())
+  // Replay order. createdAt has millisecond precision and cuid is not
+  // time-sortable, so two byte-triggered flushes inside the same millisecond
+  // had no defined order — enough to scramble a burst of terminal output on
+  // replay. SQLite only permits AUTOINCREMENT on the primary key, so the
+  // scrollback store assigns this per session from the max it loads.
+  seq       Int      @default(0)
   data      String
   lineCount Int
   createdAt DateTime @default(now())
@@ -187,6 +193,7 @@ model ScrollbackChunk {
   sessionId String
   session   Session @relation(fields: [sessionId], references: [id], onDelete: Cascade)
 
+  @@index([sessionId, seq])
   @@index([sessionId, createdAt])
   // Standalone createdAt index supports the daily TTL prune. Without it,
   // pruning would full-scan the table once it grows past a few thousand

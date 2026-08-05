@@ -74,8 +74,14 @@ function isTypingTarget(target: EventTarget | null): boolean {
   return tag === "INPUT" || tag === "TEXTAREA" || target.isContentEditable;
 }
 
-const POWER_LEASE_MS = 120_000;
-const POWER_RENEW_MS = 60_000;
+// The lease is deliberately long relative to the renew interval. Mobile
+// browsers throttle background timers to roughly one call per minute and
+// freeze them outright under memory pressure, and "keep the Mac awake while
+// something long runs" is precisely the case where the tab is backgrounded.
+// A 10-minute lease survives that; foreground renewals keep it fresh, and a
+// visibility change renews immediately rather than waiting for the next tick.
+const POWER_LEASE_MS = 600_000;
+const POWER_RENEW_MS = 120_000;
 
 function powerLeaseId(deviceName: string): string {
   const key = `termag-power-lease:${deviceName}`;
@@ -259,6 +265,7 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
   const [helpOpen, setHelpOpen] = useState(false);
   const [agentDevices, setAgentDevices] = useState<AgentDeviceStatus[]>([]);
   const [theme, setTheme] = useState(user.theme);
+  const powerToggleBusy = useRef(false);
   const [caffeinateActiveState, setCaffeinateActive] = useState(false);
   const [caffeinateStatusDevice, setCaffeinateStatusDevice] = useState<string | null>(null);
   const [caffeinateLeaseDevice, setCaffeinateLeaseDevice] = useState<string | null>(null);
@@ -1008,9 +1015,12 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
   }, [setTheme, theme]);
 
   const toggleCaffeinate = async () => {
-    if (!activeProject) {
+    // A double click otherwise fires acquire and release concurrently and the
+    // surviving state depends on which response lands last.
+    if (!activeProject || powerToggleBusy.current) {
       return;
     }
+    powerToggleBusy.current = true;
 
     try {
       const deviceName = activeProject.rootKey;
@@ -1032,6 +1042,8 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
       }
     } catch (error) {
       console.error("Failed to toggle caffeinate:", error);
+    } finally {
+      powerToggleBusy.current = false;
     }
   };
 
@@ -1072,16 +1084,64 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
     if (!deviceName || !ownsCurrentPowerLease) {
       return;
     }
+    let disposed = false;
     const renew = () => {
+      if (disposed) {
+        return;
+      }
       updatePowerLease(deviceName, "renew")
         .then(state => {
+          if (disposed) {
+            return;
+          }
           setCaffeinateStatusDevice(deviceName);
           setCaffeinateActive(state.active);
         })
-        .catch(() => setCaffeinateActive(false));
+        .catch(() => {
+          if (!disposed) {
+            setCaffeinateActive(false);
+          }
+        });
     };
     const timer = window.setInterval(renew, POWER_RENEW_MS);
-    return () => window.clearInterval(timer);
+    // Coming back to the foreground is the one moment we know timers were
+    // unreliable, so re-establish the lease immediately instead of waiting
+    // out an interval that may not have fired while hidden.
+    const onVisibility = () => {
+      if (document.visibilityState === "visible") {
+        renew();
+      }
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+    // Release on unload so closing the tab stops holding the machine awake
+    // rather than waiting for the lease to lapse. sendBeacon is the only
+    // request guaranteed to survive teardown; keepalive fetch is the fallback
+    // for browsers that reject a beacon's content type.
+    const onPageHide = () => {
+      const body = JSON.stringify({
+        action: "release",
+        leaseId: powerLeaseId(deviceName),
+        mode: "terminals-awake",
+        durationMs: POWER_LEASE_MS,
+      });
+      const url = `/api/devices/${encodeURIComponent(deviceName)}/power`;
+      const payload = new Blob([body], { type: "application/json" });
+      if (!navigator.sendBeacon?.(url, payload)) {
+        void fetch(url, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body,
+          keepalive: true,
+        }).catch(() => {});
+      }
+    };
+    window.addEventListener("pagehide", onPageHide);
+    return () => {
+      disposed = true;
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", onVisibility);
+      window.removeEventListener("pagehide", onPageHide);
+    };
   }, [activeProject?.rootKey, ownsCurrentPowerLease]);
 
   // Keep the keyboard ref pointed at the latest values without re-binding.

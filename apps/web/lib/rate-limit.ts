@@ -7,26 +7,71 @@ interface RateLimitEntry {
   resetTime: number;
 }
 
+// Sweeping the whole map on every request is O(entries) on the hot path once
+// buckets are per-identity rather than one shared key. Expire the accessed
+// key eagerly and sweep the rest at most this often.
+const SWEEP_INTERVAL_MS = 10_000;
+// Bounds memory if an attacker rotates identities to mint fresh buckets. The
+// global ceiling below is what actually limits them; this just caps the map.
+const MAX_TRACKED_IDENTITIES = 20_000;
+
 class RateLimiter {
   private requests: Map<string, RateLimitEntry> = new Map();
+  private globalCount = 0;
+  private globalResetTime = 0;
+  private lastSweep = 0;
 
   constructor(
     private maxRequests: number = 100,
-    private windowMs: number = 60000
+    private windowMs: number = 60000,
+    // Ceiling across every identity combined. Per-identity buckets are the
+    // useful limit; this exists so that rotating identities still cannot
+    // drive unbounded work.
+    private globalMaxRequests: number = maxRequests * 50
   ) {}
 
-  private cleanup() {
-    const now = Date.now();
+  /** Public accessor for the per-identity ceiling (used in 429 headers). */
+  get limit(): number {
+    return this.maxRequests;
+  }
+
+  private sweep(now: number) {
+    if (now - this.lastSweep < SWEEP_INTERVAL_MS && this.requests.size < MAX_TRACKED_IDENTITIES) {
+      return;
+    }
+    this.lastSweep = now;
     for (const [key, entry] of this.requests.entries()) {
       if (entry.resetTime <= now) {
         this.requests.delete(key);
       }
     }
+    // Still oversized after expiry: drop the oldest insertions. Map iteration
+    // order is insertion order.
+    if (this.requests.size > MAX_TRACKED_IDENTITIES) {
+      const excess = this.requests.size - MAX_TRACKED_IDENTITIES;
+      let dropped = 0;
+      for (const key of this.requests.keys()) {
+        this.requests.delete(key);
+        if (++dropped >= excess) {
+          break;
+        }
+      }
+    }
   }
 
   check(identifier: string): { allowed: boolean; remaining: number; resetTime: number } {
-    this.cleanup();
     const now = Date.now();
+    this.sweep(now);
+
+    if (this.globalResetTime <= now) {
+      this.globalCount = 0;
+      this.globalResetTime = now + this.windowMs;
+    }
+    if (this.globalCount >= this.globalMaxRequests) {
+      return { allowed: false, remaining: 0, resetTime: this.globalResetTime };
+    }
+    this.globalCount += 1;
+
     const entry = this.requests.get(identifier);
 
     if (!entry || entry.resetTime <= now) {
@@ -65,13 +110,14 @@ class RateLimiter {
 
   destroy() {
     this.requests.clear();
+    this.globalCount = 0;
+    this.globalResetTime = 0;
   }
 }
 
 export function clientIpFromRequest(request: Request): string {
   // Forwarded IP headers are attacker-controlled unless the deployment has
-  // explicitly declared its reverse proxy trusted. The conservative direct
-  // fallback shares one bucket, which is safer than a spoofable per-IP key.
+  // explicitly declared its reverse proxy trusted.
   if (process.env.TERMAG_TRUSTED_PROXY !== "true") {
     return "direct";
   }
@@ -82,6 +128,70 @@ export function clientIpFromRequest(request: Request): string {
     request.headers.get("cf-connecting-ip")?.trim() ||
     "proxy-unknown"
   ).slice(0, 64);
+}
+
+// Auth.js writes one of these depending on version and whether the cookie is
+// issued over HTTPS.
+const SESSION_COOKIE_NAMES = [
+  "__Secure-authjs.session-token",
+  "authjs.session-token",
+  "__Secure-next-auth.session-token",
+  "next-auth.session-token",
+];
+
+function sessionCookie(request: Request): string | null {
+  const header = request.headers.get("cookie");
+  if (!header) {
+    return null;
+  }
+  for (const part of header.split(";")) {
+    const index = part.indexOf("=");
+    if (index === -1) {
+      continue;
+    }
+    const name = part.slice(0, index).trim();
+    if (SESSION_COOKIE_NAMES.includes(name)) {
+      const value = part.slice(index + 1).trim();
+      if (value) {
+        return value;
+      }
+    }
+  }
+  return null;
+}
+
+/**
+ * FNV-1a. This only has to spread session tokens across buckets — it is not a
+ * security boundary — and middleware runs on the Edge runtime where
+ * node:crypto is unavailable and Web Crypto is async.
+ */
+function shortHash(value: string): string {
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return hash.toString(36);
+}
+
+/**
+ * Bucket key for a request.
+ *
+ * Keying on the client IP alone is unusable here: forwarded headers are
+ * spoofable, so without a trusted proxy every caller collapsed onto a single
+ * "direct" bucket and the whole deployment shared one 100-request minute.
+ * A chatty terminal UI exhausts that in normal use by one person, which then
+ * locks everybody — including sign-in — out. The session cookie is issued by
+ * this app, is present on every authenticated request, and gives each browser
+ * its own bucket. Unauthenticated callers still fall back to IP, and the
+ * limiter's global ceiling bounds cookie rotation.
+ */
+export function clientIdentifierFromRequest(request: Request): string {
+  const session = sessionCookie(request);
+  if (session) {
+    return `s:${shortHash(session)}`;
+  }
+  return `ip:${clientIpFromRequest(request)}`;
 }
 
 type SecurityRateLimiterOptions = {
@@ -148,13 +258,17 @@ export function createRateLimiter(options: SecurityRateLimiterOptions) {
   };
 }
 
-// Rate limiters for different endpoints
-const apiLimiter = new RateLimiter(100, 60000); // 100 requests per minute
-const authLimiter = new RateLimiter(5, 60000); // 5 requests per minute for auth
-const sensitiveLimiter = new RateLimiter(10, 60000); // 10 requests per minute for sensitive operations
+// Per-identity ceilings. The API limit is deliberately generous: the terminal
+// UI issues many small calls per interaction (project/tab reads, power lease
+// renewals, preference writes), and a limit tuned for a REST API silently
+// breaks the app rather than stopping abuse. The second argument to each
+// limiter is the window; the third is the all-identities ceiling.
+const apiLimiter = new RateLimiter(600, 60000, 20_000);
+const authLimiter = new RateLimiter(10, 60000, 200);
+const sensitiveLimiter = new RateLimiter(30, 60000, 1_000);
 
 function getClientIdentifier(request: Request): string {
-  return clientIpFromRequest(request);
+  return clientIdentifierFromRequest(request);
 }
 
 export function rateLimit(limiter: RateLimiter = apiLimiter) {
@@ -171,7 +285,7 @@ export function rateLimit(limiter: RateLimiter = apiLimiter) {
         {
           status: 429,
           headers: {
-            "X-RateLimit-Limit": limiter["maxRequests"].toString(),
+            "X-RateLimit-Limit": limiter.limit.toString(),
             "X-RateLimit-Remaining": result.remaining.toString(),
             "X-RateLimit-Reset": new Date(result.resetTime).toISOString(),
             "Retry-After": Math.ceil((result.resetTime - Date.now()) / 1000).toString(),
@@ -198,7 +312,7 @@ export function rateLimitByAuth(limiter: RateLimiter = authLimiter) {
         {
           status: 429,
           headers: {
-            "X-RateLimit-Limit": limiter["maxRequests"].toString(),
+            "X-RateLimit-Limit": limiter.limit.toString(),
             "X-RateLimit-Remaining": result.remaining.toString(),
             "X-RateLimit-Reset": new Date(result.resetTime).toISOString(),
             "Retry-After": Math.ceil((result.resetTime - Date.now()) / 1000).toString(),
@@ -225,7 +339,7 @@ export function rateLimitSensitive(limiter: RateLimiter = sensitiveLimiter) {
         {
           status: 429,
           headers: {
-            "X-RateLimit-Limit": limiter["maxRequests"].toString(),
+            "X-RateLimit-Limit": limiter.limit.toString(),
             "X-RateLimit-Remaining": result.remaining.toString(),
             "X-RateLimit-Reset": new Date(result.resetTime).toISOString(),
             "Retry-After": Math.ceil((result.resetTime - Date.now()) / 1000).toString(),

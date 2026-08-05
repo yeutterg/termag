@@ -98,6 +98,7 @@ function createScrollbackStore(prisma) {
         queue: Promise.resolve(),
         touchedAt: Date.now(),
         decoder: new StringDecoder("utf8"),
+        nextSeq: 1,
       };
       states.set(sessionId, state);
     }
@@ -115,8 +116,8 @@ function createScrollbackStore(prisma) {
     }
     const chunks = await prisma.scrollbackChunk.findMany({
       where: { sessionId },
-      orderBy: { createdAt: "asc" },
-      select: { id: true, data: true, lineCount: true },
+      orderBy: [{ seq: "asc" }, { createdAt: "asc" }],
+      select: { id: true, data: true, lineCount: true, seq: true },
     });
     state.entries = chunks.map(chunk => ({
       id: chunk.id,
@@ -125,6 +126,9 @@ function createScrollbackStore(prisma) {
     }));
     state.totalLines = state.entries.reduce((total, entry) => total + entry.lines, 0);
     state.totalBytes = state.entries.reduce((total, entry) => total + entry.bytes, 0);
+    // Continue this session's sequence rather than restarting it, so chunks
+    // written before a broker restart still sort ahead of new ones.
+    state.nextSeq = chunks.reduce((highest, chunk) => Math.max(highest, chunk.seq ?? 0), 0) + 1;
     state.initialized = true;
   }
 
@@ -152,7 +156,7 @@ function createScrollbackStore(prisma) {
     const lines = lineCount(data);
     const byteCount = bytes(data);
     const created = await prisma.scrollbackChunk.create({
-      data: { sessionId, data, lineCount: lines },
+      data: { sessionId, data, lineCount: lines, seq: state.nextSeq++ },
       select: { id: true },
     });
     state.entries.push({ id: created.id, lines, bytes: byteCount });
@@ -255,7 +259,7 @@ function createScrollbackStore(prisma) {
     );
     const chunks = await prisma.scrollbackChunk.findMany({
       where: { sessionId },
-      orderBy: { createdAt: "desc" },
+      orderBy: [{ seq: "desc" }, { createdAt: "desc" }],
       select: { data: true, lineCount: true },
       take: MAX_READ_CHUNKS,
     });

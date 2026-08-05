@@ -24,7 +24,18 @@ import { csrfProtection } from "@/lib/csrf";
 
 const BODY_CAP_BYTES = 256 * 1024;
 const MUTATING_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
-const CSRF_EXEMPT_PATHS = new Set(["/api/csrf", "/api/auth", "/api/health"]);
+// Prefixes, not exact paths. Auth.js mounts everything under /api/auth/*
+// (/api/auth/callback/github, /api/auth/signout, …), so an exact-match set
+// exempted only the bare path and left the real endpoints subject to a check
+// they cannot satisfy: a cross-origin form_post callback carries the IdP's
+// Origin and no double-submit token.
+const CSRF_EXEMPT_PREFIXES = ["/api/csrf", "/api/auth", "/api/health"];
+
+function isCsrfExempt(pathname: string): boolean {
+  return CSRF_EXEMPT_PREFIXES.some(
+    prefix => pathname === prefix || pathname.startsWith(`${prefix}/`)
+  );
+}
 
 function buildCsp(): string {
   // 'self' covers same-origin assets. 'unsafe-inline' on style-src is the
@@ -32,7 +43,7 @@ function buildCsp(): string {
   // injects styles at runtime in dev). Production builds can tighten with
   // hashes once a CSP-aware build pipeline is added.
   const isProd = process.env.NODE_ENV === "production";
-  const styleSrc = isProd ? "'self' 'unsafe-inline'" : "'self' 'unsafe-inline'";
+  const styleSrc = "'self' 'unsafe-inline'";
   // Next injects bootstrap/RSC scripts unless the app is wired for CSP
   // nonces. Keep inline scripts enabled in prod until that pipeline exists;
   // otherwise the built app renders but cannot hydrate.
@@ -43,7 +54,11 @@ function buildCsp(): string {
     `style-src ${styleSrc}`,
     "img-src 'self' data: https:",
     "font-src 'self' data:",
-    "connect-src 'self' ws: wss:",
+    // 'self' covers the broker's ws:/wss: upgrade on the same origin. The
+    // previous bare "ws: wss:" allowed a socket to *any* host, which is a
+    // ready-made exfil channel for a renderer whose whole job is to display
+    // untrusted bytes. TERMAG_BROKER_ORIGIN opts a split deployment back in.
+    `connect-src ${["'self'", process.env.TERMAG_BROKER_ORIGIN].filter(Boolean).join(" ")}`,
     "frame-ancestors 'none'",
     "base-uri 'none'",
     "object-src 'none'",
@@ -74,7 +89,9 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
   if (request.nextUrl.pathname.startsWith("/api/")) {
     const rateLimitResult = await rateLimit()(request);
     if (rateLimitResult) {
-      return rateLimitResult;
+      // Early returns get the same headers as every other response; a 429
+      // without a CSP is still a response an attacker can try to work with.
+      return applySecurityHeaders(rateLimitResult);
     }
   }
 
@@ -82,11 +99,11 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
   if (
     request.nextUrl.pathname.startsWith("/api/") &&
     MUTATING_METHODS.has(request.method) &&
-    !CSRF_EXEMPT_PATHS.has(request.nextUrl.pathname)
+    !isCsrfExempt(request.nextUrl.pathname)
   ) {
     const csrfResult = await csrfProtection(request);
     if (csrfResult) {
-      return csrfResult as NextResponse;
+      return applySecurityHeaders(csrfResult);
     }
   }
 

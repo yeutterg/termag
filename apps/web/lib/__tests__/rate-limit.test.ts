@@ -4,8 +4,15 @@ import {
   authLimiter,
   sensitiveLimiter,
   clientIpFromRequest,
+  clientIdentifierFromRequest,
   createRateLimiter,
 } from "../rate-limit";
+
+function sessionRequest(token: string): Request {
+  return new Request("http://localhost:3000/api/test", {
+    headers: { cookie: `theme=dark; authjs.session-token=${token}` },
+  });
+}
 
 describe("Rate Limiting", () => {
   describe("rateLimit function", () => {
@@ -16,29 +23,72 @@ describe("Rate Limiting", () => {
     });
 
     it("should return response for rate-limited requests", async () => {
-      // Make many requests to hit the limit
-      const request = new Request("http://localhost:3000/api/test");
+      const request = sessionRequest("exhaust-me");
 
-      // Use up the limit (100 requests)
-      for (let i = 0; i < 100; i++) {
+      for (let i = 0; i < apiLimiter.limit; i++) {
         await rateLimit(apiLimiter)(request);
       }
 
-      // Next request should be rate limited
       const result = await rateLimit(apiLimiter)(request);
       expect(result).not.toBeNull();
       if (result) {
         expect(result.status).toBe(429);
       }
     });
+
+    it("does not let one exhausted browser lock out another", async () => {
+      // The previous shared-bucket default meant a single active user could
+      // 429 the whole deployment, sign-in included.
+      const heavy = sessionRequest("heavy-user");
+      for (let i = 0; i < apiLimiter.limit + 5; i++) {
+        await rateLimit(apiLimiter)(heavy);
+      }
+      expect(await rateLimit(apiLimiter)(heavy)).not.toBeNull();
+      expect(await rateLimit(apiLimiter)(sessionRequest("quiet-user"))).toBeNull();
+    });
+  });
+
+  describe("client identity", () => {
+    it("buckets per session cookie and falls back to ip", () => {
+      expect(clientIdentifierFromRequest(sessionRequest("a"))).not.toBe(
+        clientIdentifierFromRequest(sessionRequest("b"))
+      );
+      expect(clientIdentifierFromRequest(sessionRequest("a"))).toBe(
+        clientIdentifierFromRequest(sessionRequest("a"))
+      );
+      expect(clientIdentifierFromRequest(new Request("http://localhost:3000/api/test"))).toBe(
+        "ip:direct"
+      );
+    });
+
+    it("recognises each Auth.js session cookie spelling", () => {
+      for (const name of [
+        "authjs.session-token",
+        "__Secure-authjs.session-token",
+        "next-auth.session-token",
+        "__Secure-next-auth.session-token",
+      ]) {
+        const request = new Request("http://localhost:3000/api/test", {
+          headers: { cookie: `${name}=token-value` },
+        });
+        expect(clientIdentifierFromRequest(request)).toMatch(/^s:/);
+      }
+    });
   });
 
   describe("different limiters", () => {
     it("should have different limits for different limiter types", () => {
-      // The limiters should have different max request counts
-      expect(apiLimiter["maxRequests"]).toBe(100);
-      expect(authLimiter["maxRequests"]).toBe(5);
-      expect(sensitiveLimiter["maxRequests"]).toBe(10);
+      expect(apiLimiter.limit).toBe(600);
+      expect(authLimiter.limit).toBe(10);
+      expect(sensitiveLimiter.limit).toBe(30);
+    });
+
+    it("still bounds total load when identities rotate", async () => {
+      const limiter = new (Object.getPrototypeOf(apiLimiter).constructor)(5, 60_000, 12);
+      for (let i = 0; i < 12; i++) {
+        expect(limiter.check(`rotating-${i}`).allowed).toBe(true);
+      }
+      expect(limiter.check("rotating-13").allowed).toBe(false);
     });
   });
 

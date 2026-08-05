@@ -193,6 +193,7 @@ async function reconcileInventory({ prisma, userId, deviceId, deviceName, rawSna
   }
   const claimedProjects = new Set();
   const patches = [];
+  const deferredWrites = [];
   let structuralChanged = false;
 
   for (const runtime of snapshot.runtimes) {
@@ -331,26 +332,33 @@ async function reconcileInventory({ prisma, userId, deviceId, deviceName, rawSna
               const tabChanged = scalarChanged(tab, tabData);
               const sessionChanged =
                 !tab.session || scalarChanged(tab.session, nextSession, ["lastSeenAt"]);
+              // Queue rather than await. A busy HerdR space can hold dozens of
+              // panes and this loop ran one round trip per pane per snapshot;
+              // on SQLite each was its own fsync-ing transaction. Every id is
+              // already known, so the rows can be written as one batch below.
               if (tabChanged) {
-                tab = await prisma.tab.update({
-                  where: { id: tab.id },
-                  data: {
-                    ...tabData,
-                    session: tab.session ? { update: nextSession } : { create: nextSession },
-                  },
-                  include: { session: true },
-                });
+                deferredWrites.push(
+                  prisma.tab.update({
+                    where: { id: tab.id },
+                    data: {
+                      ...tabData,
+                      session: tab.session ? { update: nextSession } : { create: nextSession },
+                    },
+                  })
+                );
+                tab = { ...tab, ...tabData };
               } else if (sessionChanged && tab.session) {
-                const session = await prisma.session.update({
-                  where: { id: tab.session.id },
-                  data: nextSession,
-                });
-                tab = { ...tab, session };
+                deferredWrites.push(
+                  prisma.session.update({ where: { id: tab.session.id }, data: nextSession })
+                );
+                tab = { ...tab, session: { ...tab.session, ...nextSession } };
               }
               if (tabChanged || sessionChanged) {
                 tabPatches.push(tabPatch(tab, tabData, pane.status));
               }
             } else {
+              // Creates need the generated id for seenTabs, and only happen
+              // when a pane first appears, so they stay inline.
               tab = await prisma.tab.create({
                 data: {
                   ...tabData,
@@ -367,26 +375,43 @@ async function reconcileInventory({ prisma, userId, deviceId, deviceName, rawSna
             seenTabs.add(tab.id);
           }
         }
-        const archivedTabs = await prisma.tab.updateMany({
-          where: {
-            projectId: project.id,
-            runtimePaneId: { not: null },
-            archivedAt: null,
-            ...(seenTabs.size ? { id: { notIn: [...seenTabs] } } : {}),
-          },
-          data: { archivedAt: mirroredAt, status: "offline" },
-        });
-        const archivedSessions = await prisma.session.updateMany({
-          where: {
-            projectId: project.id,
-            externalId: { not: null },
-            archivedAt: null,
-            tabId: { notIn: [...seenTabs] },
-          },
-          data: { archivedAt: mirroredAt, status: "offline" },
-        });
-        if (archivedTabs.count > 0 || archivedSessions.count > 0) {
-          structuralChanged = true;
+        if (deferredWrites.length > 0) {
+          await prisma.$transaction(deferredWrites.splice(0));
+        }
+        // Snapshots arrive on every HerdR event and on each tmux poll, so the
+        // overwhelmingly common case is "nothing moved". Two unconditional
+        // updateMany calls per space per snapshot is a continuous write load
+        // on SQLite that accomplishes nothing. A pane can only need archiving
+        // if this project previously had a live pane the snapshot no longer
+        // lists.
+        const liveBefore = (project.tabs || []).filter(
+          existingTab => existingTab.runtimePaneId && !existingTab.archivedAt
+        );
+        const archivalPossible = liveBefore.some(existingTab => !seenTabs.has(existingTab.id));
+        if (archivalPossible) {
+          const [archivedTabs, archivedSessions] = await prisma.$transaction([
+            prisma.tab.updateMany({
+              where: {
+                projectId: project.id,
+                runtimePaneId: { not: null },
+                archivedAt: null,
+                ...(seenTabs.size ? { id: { notIn: [...seenTabs] } } : {}),
+              },
+              data: { archivedAt: mirroredAt, status: "offline" },
+            }),
+            prisma.session.updateMany({
+              where: {
+                projectId: project.id,
+                externalId: { not: null },
+                archivedAt: null,
+                tabId: { notIn: [...seenTabs] },
+              },
+              data: { archivedAt: mirroredAt, status: "offline" },
+            }),
+          ]);
+          if (archivedTabs.count > 0 || archivedSessions.count > 0) {
+            structuralChanged = true;
+          }
         }
         if (projectChanged || tabPatches.length > 0) {
           patches.push({
@@ -404,7 +429,19 @@ async function reconcileInventory({ prisma, userId, deviceId, deviceName, rawSna
     }
   }
 
-  if (observedKinds.size > 0) {
+  // Same reasoning as the per-space sweep: only reach for the database when
+  // a mirrored project that was live is missing from this snapshot.
+  const staleProject =
+    observedKinds.size > 0 &&
+    existingProjects.some(
+      project =>
+        project.mirrored &&
+        !project.archivedAt &&
+        project.deviceId === deviceId &&
+        observedKinds.has(project.runtime) &&
+        !seenProjects.has(project.id)
+    );
+  if (staleProject) {
     const archivedProjects = await prisma.project.updateMany({
       where: {
         userId,
