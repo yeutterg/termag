@@ -1,0 +1,28 @@
+[package]
+name = "termag-agent"
+version = "0.2.0"
+edition = "2021"
+license = "MIT"
+description = "Low-footprint outbound agent for Termag"
+
+[[bin]]
+name = "termag-agent"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1.0"
+base64 = "0.22"
+futures-util = "0.3"
+libc = "0.2"
+nix = { version = "0.29", features = ["fs", "process", "signal", "term"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1.45", features = ["io-util", "macros", "net", "process", "rt", "signal", "sync", "time"] }
+tokio-tungstenite = { version = "0.26", features = ["rustls-tls-native-roots"] }
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "z"
+panic = "abort"
+strip = true

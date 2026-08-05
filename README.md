@@ -42,7 +42,8 @@ The agent always dials out to the web app. You do not need to expose tmux, SSH, 
 ## Components
 
 - `apps/web`: the Next.js app. It includes the browser UI, route handlers, WebSocket broker, Prisma, and SQLite database.
-- `apps/agent`: the small daemon that runs beside tmux on each remote device and bridges a PTY-backed tmux client back to the browser.
+- `apps/agent-rs`: the Protocol v2, low-footprint daemon that mirrors HerdR and tmux over one outbound WebSocket.
+- `apps/agent`: the Protocol v1 Node CLI retained for one transition release. Its macOS menu-bar helper has been removed.
 - `infra`: Docker Compose and Caddy files for running the web app on a small VPS.
 
 The user-facing shape is:
@@ -177,7 +178,18 @@ In the web UI, click `+` → **New Device**. Name the physical device, for examp
 
 ### 3. Install An Agent On Each Device
 
-The agent needs Node.js and tmux. Homebrew is preferred on macOS:
+Protocol v2 is the preferred agent. From this branch:
+
+```bash
+cargo build --release --manifest-path apps/agent-rs/Cargo.toml
+./apps/agent-rs/target/release/termag-agent
+```
+
+It discovers running HerdR sessions and all local tmux sessions automatically. Creation is restricted to the home directory by default; see [`apps/agent-rs/README.md`](apps/agent-rs/README.md) for allowlist and caffeinate configuration.
+
+The existing Homebrew/npm packages remain the Protocol v1 transition client until native release packaging is published.
+
+The Protocol v1 agent needs Node.js and tmux. Homebrew is preferred on macOS:
 
 ```bash
 brew install yeutterg/tap/termag-agent
@@ -189,7 +201,7 @@ npm works anywhere Node.js and tmux are available:
 npm install -g termag-agent
 ```
 
-Configure the agent:
+Configure either agent with the broker URL and token (the roots variable shown here is the Protocol v1 shape):
 
 ```bash
 export TERMAG_URL=wss://termag.example.com/api/ws/agent

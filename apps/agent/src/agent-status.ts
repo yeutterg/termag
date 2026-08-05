@@ -131,7 +131,7 @@ function debouncedWrite() {
 }
 
 /**
- * Write status to file for menubar to read (legacy, kept for compatibility)
+ * Write status for the legacy command-line status command.
  */
 function writeStatus() {
   debouncedWrite();
