@@ -1,6 +1,6 @@
 # termag CLI
 
-> Protocol v1 transition client. New daemon deployments should use the lightweight Rust agent on `port/rust-agent`; this package remains for CLI compatibility during the rollout. The macOS menu-bar helper has been removed.
+> Protocol v1 transition client. New daemon deployments should use the lightweight Rust agent in [`../agent-rs`](../agent-rs); this package remains for CLI compatibility during the rollout. The macOS menu-bar helper has been removed.
 
 Outbound laptop agent for [termag-next](https://github.com/yeutterg/termag-next). Bridges tmux sessions and windows on your machine to the termag broker over a single WebSocket. No inbound port, no public tmux surface.
 

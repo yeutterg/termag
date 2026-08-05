@@ -873,8 +873,7 @@ function resolveAttachTarget(state: CliState, target: string, deviceFilter: stri
 }
 
 type AttachKind =
-  | { kind: "agent"; sessionId: string }
-  | { kind: "ssh"; hostId: string; tmuxName: string };
+  { kind: "agent"; sessionId: string } | { kind: "ssh"; hostId: string; tmuxName: string };
 
 async function attachRemote(opts: {
   baseUrl: URL;

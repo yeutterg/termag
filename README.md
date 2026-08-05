@@ -44,8 +44,8 @@ The agent always dials out to the web app. You do not need to expose HerdR, tmux
 ## Components
 
 - `apps/web`: the Next.js app. It includes the browser UI, route handlers, WebSocket broker, Prisma, and SQLite database.
-- `apps/agent`: the protocol-v1 compatibility agent.
-- `apps/agent-rs` (on `port/rust-agent`): the protocol-v2 Rust daemon that discovers HerdR and tmux and streams terminals on demand.
+- `apps/agent-rs`: the protocol-v2, low-footprint Rust daemon that discovers HerdR and tmux and streams terminals on demand over one outbound WebSocket.
+- `apps/agent`: the protocol-v1 Node CLI, retained for one transition release. Its macOS menu-bar helper has been removed.
 - `infra`: Docker Compose and Caddy files for running the web app on a small VPS.
 
 The user-facing shape is:
@@ -182,7 +182,22 @@ In the web UI, click `+` → **New Device**. Name the physical device, for examp
 
 ### 3. Install An Agent On Each Device
 
-The agent needs Node.js and tmux. Homebrew is preferred on macOS:
+Protocol v2 is the preferred agent. It has no runtime dependencies beyond the
+runtimes it mirrors:
+
+```bash
+cargo build --release --manifest-path apps/agent-rs/Cargo.toml
+./apps/agent-rs/target/release/termag-agent
+```
+
+It discovers running HerdR sessions and all local tmux sessions automatically.
+Creation and browsing are restricted to the home directory by default; see
+[`apps/agent-rs/README.md`](apps/agent-rs/README.md) for allowlist and power
+configuration.
+
+The existing Homebrew and npm packages remain the protocol-v1 transition client
+until native release packaging is published. That agent needs Node.js and tmux;
+Homebrew is preferred on macOS:
 
 ```bash
 brew install yeutterg/tap/termag-agent
@@ -194,7 +209,8 @@ npm works anywhere Node.js and tmux are available:
 npm install -g termag-agent
 ```
 
-Configure the agent:
+Configure either agent with the broker URL and token (the roots variable shown
+here is the protocol-v1 shape):
 
 ```bash
 export TERMAG_URL=wss://termag.example.com/api/ws/agent
