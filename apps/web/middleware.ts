@@ -69,10 +69,10 @@ function applySecurityHeaders(response: NextResponse): NextResponse {
   return response;
 }
 
-export function middleware(request: NextRequest): NextResponse {
+export async function middleware(request: NextRequest): Promise<NextResponse> {
   // Apply rate limiting to API routes
   if (request.nextUrl.pathname.startsWith("/api/")) {
-    const rateLimitResult = rateLimit()(request);
+    const rateLimitResult = await rateLimit()(request);
     if (rateLimitResult) {
       return rateLimitResult;
     }
@@ -84,7 +84,7 @@ export function middleware(request: NextRequest): NextResponse {
     MUTATING_METHODS.has(request.method) &&
     !CSRF_EXEMPT_PATHS.has(request.nextUrl.pathname)
   ) {
-    const csrfResult = csrfProtection(request);
+    const csrfResult = await csrfProtection(request);
     if (csrfResult) {
       return csrfResult as NextResponse;
     }

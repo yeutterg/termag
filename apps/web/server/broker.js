@@ -3,6 +3,7 @@ const { WebSocket } = require("ws");
 const { getToken } = require("next-auth/jwt");
 const { appendScrollback, startScrollbackPrune } = require("./scrollback");
 const { createSshStreamRegistry } = require("./ssh-session-stream");
+const { reconcileInventory } = require("./inventory-v2");
 
 // Wire-protocol constant shared with the agent. Keep in sync with
 // apps/agent/src/index.ts → WS_REPLACED_REASON.
@@ -12,7 +13,18 @@ const WS_REPLACED_REASON = "replaced";
 // of arbitrary-shaped strings from reaching the DB-backed hash lookup.
 const AGENT_TOKEN_MIN_LENGTH = 32;
 const AGENT_TOKEN_MAX_LENGTH = 256;
-const VALID_SESSION_STATUSES = new Set(["idle", "working", "waiting", "error", "sleeping"]);
+const VALID_SESSION_STATUSES = new Set([
+  "blocked",
+  "working",
+  "done",
+  "idle",
+  "unknown",
+  "offline",
+  // Protocol v1 compatibility during the Rust rollout.
+  "waiting",
+  "error",
+  "sleeping",
+]);
 
 function sendJson(ws, msg) {
   if (ws.readyState === WebSocket.OPEN) {
@@ -325,8 +337,20 @@ function createBroker({ prisma, wss }) {
   function publicAgentStatus(agent) {
     return {
       name: agent.deviceName,
+      deviceId: agent.tokenId,
       connected: agent.ws.readyState === WebSocket.OPEN,
       lastSeenAt: agent.lastSeenAt?.toISOString?.() || null,
+      protocolVersion: agent.protocolVersion || 1,
+      capabilities: agent.capabilities || {},
+      runtimeSessions: Array.isArray(agent.inventory?.runtimes)
+        ? agent.inventory.runtimes.map(runtime => ({
+            kind: runtime.kind,
+            available: runtime.available,
+            sessions: Array.isArray(runtime.sessions)
+              ? runtime.sessions.map(session => ({ id: session.id, name: session.name }))
+              : [],
+          }))
+        : [],
       ...(agent.health || {}),
     };
   }
@@ -461,8 +485,9 @@ function createBroker({ prisma, wss }) {
     });
     const statuses = sessions.map(session => session.status);
     const status =
-      ["error", "waiting", "working", "idle"].find(candidate => statuses.includes(candidate)) ||
-      "sleeping";
+      ["blocked", "error", "working", "waiting", "done", "idle", "unknown", "offline"].find(
+        candidate => statuses.includes(candidate)
+      ) || "sleeping";
     const project = await prisma.project
       .findUnique({
         where: { id: projectId },
@@ -790,6 +815,10 @@ function createBroker({ prisma, wss }) {
       pending: new Map(),
       lastSeenAt: new Date(),
       health: null,
+      protocolVersion: 1,
+      capabilities: {},
+      inventory: null,
+      inventoryQueue: Promise.resolve(),
     };
     setAgent(record.userId, deviceName, agent);
 
@@ -840,6 +869,7 @@ function createBroker({ prisma, wss }) {
 
       if (msg.type === "health") {
         agent.lastSeenAt = new Date();
+        agent.protocolVersion = Number(msg.protocolVersion) || agent.protocolVersion || 1;
         agent.health = {
           version: typeof msg.version === "string" ? msg.version : null,
           fake: Boolean(msg.fake),
@@ -849,12 +879,55 @@ function createBroker({ prisma, wss }) {
           roots: msg.roots && typeof msg.roots === "object" ? msg.roots : {},
           tmuxSessions: normalizeTmuxSessions(msg.tmux?.sessions),
         };
-        const changed = await reconcileDeviceTmuxStatus(
-          record.userId,
-          deviceName,
-          msg.tmux?.sessions
-        );
+        const changed =
+          agent.protocolVersion >= 2
+            ? false
+            : await reconcileDeviceTmuxStatus(record.userId, deviceName, msg.tmux?.sessions);
         broadcastStatus(record.userId, changed);
+        return;
+      }
+
+      if (msg.type === "inventory.snapshot") {
+        if (
+          Number(msg.protocolVersion) !== 2 ||
+          !msg.inventory ||
+          typeof msg.inventory !== "object"
+        ) {
+          return;
+        }
+        // Serialize snapshots from one device. A rapid HerdR event burst may
+        // enqueue another snapshot while Prisma is still reconciling the
+        // previous one; preserving order prevents an older archive pass from
+        // winning after a newer create pass.
+        agent.inventoryQueue = agent.inventoryQueue
+          .then(async () => {
+            const inventory = await reconcileInventory({
+              prisma,
+              userId: record.userId,
+              deviceId: record.id,
+              deviceName,
+              rawSnapshot: msg.inventory,
+            });
+            agent.protocolVersion = 2;
+            agent.capabilities =
+              msg.capabilities && typeof msg.capabilities === "object" ? msg.capabilities : {};
+            agent.inventory = inventory;
+            agent.lastSeenAt = new Date();
+            await prisma.agentToken
+              .update({
+                where: { id: record.id },
+                data: {
+                  protocolVersion: 2,
+                  capabilities: JSON.stringify(agent.capabilities),
+                  lastInventoryAt: new Date(),
+                },
+              })
+              .catch(() => {});
+            broadcastStatus(record.userId, true);
+          })
+          .catch(err =>
+            console.error("[inventory-v2]", sanitizeAgentText(err?.message || err, 512))
+          );
         return;
       }
 
@@ -920,24 +993,30 @@ function createBroker({ prisma, wss }) {
         if (streamBelongsToAgent(stream, record.userId, deviceName)) {
           stream.attached = false;
           sendJson(stream.ws, { type: "exit" });
-          await prisma.session
-            .update({
-              where: { id: stream.sessionId },
-              data: { status: "sleeping" },
-            })
-            .catch(() => {});
           const exitedSession = await prisma.session
             .findUnique({
               where: { id: stream.sessionId },
-              select: { tabId: true, projectId: true },
+              select: {
+                tabId: true,
+                projectId: true,
+                project: { select: { mirrored: true } },
+              },
             })
             .catch(() => null);
-          if (exitedSession?.tabId) {
+          if (exitedSession && !exitedSession.project?.mirrored) {
+            await prisma.session
+              .update({
+                where: { id: stream.sessionId },
+                data: { status: "sleeping" },
+              })
+              .catch(() => {});
+          }
+          if (exitedSession?.tabId && !exitedSession.project?.mirrored) {
             await prisma.tab
               .update({ where: { id: exitedSession.tabId }, data: { status: "sleeping" } })
               .catch(() => {});
           }
-          if (exitedSession?.projectId) {
+          if (exitedSession?.projectId && !exitedSession.project?.mirrored) {
             await updateProjectStatus(exitedSession.projectId);
           }
           broadcastStatus(stream.userId, true);
@@ -1004,22 +1083,29 @@ function createBroker({ prisma, wss }) {
           });
         }
       }
+      const offlineStatus = agent.protocolVersion >= 2 ? "offline" : "sleeping";
       await prisma.project.updateMany({
         where: { userId: record.userId, rootKey: deviceName },
-        data: { status: "sleeping" },
+        data: { status: offlineStatus },
       });
       await prisma.session.updateMany({
         where: { project: { userId: record.userId, rootKey: deviceName } },
-        data: { status: "sleeping" },
+        data: { status: offlineStatus },
       });
       await prisma.tab.updateMany({
         where: { project: { userId: record.userId, rootKey: deviceName } },
-        data: { status: "sleeping" },
+        data: { status: offlineStatus },
       });
       broadcastStatus(record.userId, true);
     });
 
-    sendJson(ws, { type: "hello", userId: record.userId, deviceName });
+    sendJson(ws, {
+      type: "hello",
+      userId: record.userId,
+      deviceName,
+      protocolVersion: 2,
+      capabilities: { inventorySnapshots: true, typedMutations: true },
+    });
   }
 
   async function registerBrowser(ws, req, url) {
@@ -1255,6 +1341,21 @@ function createBroker({ prisma, wss }) {
                 session.kind === "ctrl"
                   ? session.project.ctrlSpawnCommand
                   : session.spawnCommand || session.project.agentSpawnCommand,
+              runtimeTarget: {
+                runtime: session.runtime || session.project.runtime || "tmux",
+                runtimeSessionId:
+                  session.runtimeSessionId ||
+                  session.project.runtimeSessionId ||
+                  session.project.tmuxSessionName ||
+                  session.tmuxName,
+                paneId: session.externalId || session.tmuxName,
+                terminalId: session.terminalId || session.externalId || session.tmuxName,
+                tmuxSession:
+                  session.project.tmuxSessionName ||
+                  session.runtimeSessionId ||
+                  session.project.runtimeSessionId,
+                cwd: session.project.creationPath || undefined,
+              },
               cols: stream.cols,
               rows: stream.rows,
               readOnly: stream.readOnly === true,
@@ -1279,7 +1380,9 @@ function createBroker({ prisma, wss }) {
           if (!sessionPrimary.has(sessionId)) {
             sessionPrimary.set(sessionId, streamId);
           }
-          await markSessionStatus("idle");
+          if (!session.project.mirrored) {
+            await markSessionStatus("idle");
+          }
           sendJson(ws, { type: "ready" });
           return true;
         } catch {
@@ -1298,7 +1401,9 @@ function createBroker({ prisma, wss }) {
               }
             }
           }
-          await markSessionStatus("sleeping");
+          if (!session.project.mirrored) {
+            await markSessionStatus("sleeping");
+          }
           sendJson(ws, {
             type: "sleeping",
             message: "Agent offline; open termag on your laptop to reconnect.",
@@ -1858,6 +1963,27 @@ function createBroker({ prisma, wss }) {
         5000
       );
     },
+    async mutateRuntime(userId, deviceName, operation, payload = {}, timeoutMs = 10000) {
+      const allowed = new Set([
+        "runtime.create-session",
+        "runtime.create-space",
+        "runtime.create-tab",
+        "runtime.rename-space",
+        "runtime.rename-tab",
+        "runtime.rename-pane",
+        "runtime.close-tab",
+        "runtime.close-pane",
+        "runtime.close-space",
+        "runtime.close-session",
+      ]);
+      if (!allowed.has(operation)) {
+        throw new Error("Unsupported runtime operation");
+      }
+      if (!agentForUser(userId, deviceName)) {
+        throw new Error("Agent offline");
+      }
+      return sendToAgent(userId, deviceName, operation, payload, timeoutMs);
+    },
     async executeCommand(userId, deviceName, command, workingDirectory, timeoutMs = 30000) {
       if (!agentForUser(userId, deviceName)) {
         throw new Error("Agent offline");
@@ -1871,14 +1997,25 @@ function createBroker({ prisma, wss }) {
       );
     },
     async startCaffeinate(userId, deviceName, mode, reason, durationMs) {
-      if (!agentForUser(userId, deviceName)) {
+      const agent = agentForUser(userId, deviceName);
+      if (!agent) {
         throw new Error("Agent offline");
       }
+      const wireMode =
+        agent.protocolVersion >= 2
+          ? mode
+          : mode === "terminals-awake"
+            ? "while-task"
+            : mode === "display-awake"
+              ? "forever"
+              : mode === "ac-awake"
+                ? "while-task"
+                : mode;
       return sendToAgent(
         userId,
         deviceName,
         "caffeinate-start",
-        { mode, reason, durationMs },
+        { mode: wireMode, reason, durationMs },
         5000
       );
     },

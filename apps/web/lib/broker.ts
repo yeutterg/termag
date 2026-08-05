@@ -50,7 +50,7 @@ type Broker = {
   startCaffeinate?: (
     userId: string,
     deviceName: string,
-    mode: "while-task" | "lid-closed" | "forever" | "timed",
+    mode: "terminals-awake" | "display-awake" | "ac-awake" | "while-task" | "timed",
     reason: string,
     durationMs?: number
   ) => Promise<{ success: boolean; error?: string; state?: CaffeinateState }>;
@@ -59,7 +59,26 @@ type Broker = {
     deviceName: string
   ) => Promise<{ success: boolean; error?: string; state?: CaffeinateState }>;
   getCaffeinateStatus?: (userId: string, deviceName: string) => Promise<CaffeinateState | null>;
+  mutateRuntime?: (
+    userId: string,
+    deviceName: string,
+    operation: RuntimeOperation,
+    payload: Record<string, unknown>,
+    timeoutMs?: number
+  ) => Promise<Record<string, unknown>>;
 };
+
+export type RuntimeOperation =
+  | "runtime.create-session"
+  | "runtime.create-space"
+  | "runtime.create-tab"
+  | "runtime.rename-space"
+  | "runtime.rename-tab"
+  | "runtime.rename-pane"
+  | "runtime.close-tab"
+  | "runtime.close-pane"
+  | "runtime.close-space"
+  | "runtime.close-session";
 
 export type ConnectedDevice = {
   name: string;
@@ -82,10 +101,13 @@ export type ConnectedDevice = {
 
 export type CaffeinateState = {
   mode: string;
-  isActive: boolean;
-  reason: string | null;
-  startTime: string | null;
-  endTime: string | null;
+  isActive?: boolean;
+  active?: boolean;
+  reason?: string | null;
+  startTime?: string | null;
+  endTime?: string | null;
+  pid?: number | null;
+  endsAtUnixMs?: number | null;
 };
 
 export type DirectoryListing = {
@@ -231,6 +253,18 @@ export async function listDeviceDirectory(
   return live.listDirectory(userId, deviceName, rootKey, relativePath);
 }
 
+export async function mutateRuntime(
+  userId: string,
+  deviceName: string,
+  operation: RuntimeOperation,
+  payload: Record<string, unknown>,
+  timeoutMs = 10000
+) {
+  const live = broker();
+  if (!live?.mutateRuntime) throw new Error("Agent offline or does not support runtime mutations");
+  return live.mutateRuntime(userId, deviceName, operation, payload, timeoutMs);
+}
+
 /**
  * Reload SshHost rows for this user into the broker's in-memory poller.
  * Idempotent — call from any route that mutates the SshHost table so the
@@ -284,7 +318,7 @@ export async function executeCommandOnDevice(
 export async function startCaffeinateOnDevice(
   userId: string,
   deviceName: string,
-  mode: "while-task" | "lid-closed" | "forever" | "timed",
+  mode: "terminals-awake" | "display-awake" | "ac-awake" | "while-task" | "timed",
   reason: string,
   durationMs?: number
 ): Promise<{ success: boolean; error?: string; state?: CaffeinateState }> {

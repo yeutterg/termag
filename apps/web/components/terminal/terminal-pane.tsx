@@ -1,60 +1,60 @@
-'use client';
+"use client";
 
-import { memo, useCallback, useEffect, useRef, useState } from 'react';
-import type { TouchEvent as ReactTouchEvent } from 'react';
-import type { ITheme, Terminal as XTerm } from '@xterm/xterm';
-import { cn, statusDot } from '@/lib/utils';
+import { memo, useCallback, useEffect, useRef, useState } from "react";
+import type { TouchEvent as ReactTouchEvent } from "react";
+import type { ITheme, Terminal as XTerm } from "@xterm/xterm";
+import { cn, statusDot } from "@/lib/utils";
 
 // Palettes hoisted so they're stable references — set as term.options.theme
 // on init AND swapped live whenever the html.dark class flips.
 const DARK_THEME: ITheme = {
-  background: '#00000000',
-  foreground: '#E4E4E7',
-  cursor: '#FAFAFA',
-  selectionBackground: '#404040',
-  black: '#18181B',
-  red: '#EF4444',
-  green: '#22C55E',
-  yellow: '#F59E0B',
-  blue: '#3B82F6',
-  magenta: '#A78BFA',
-  cyan: '#06B6D4',
-  white: '#D4D4D8',
-  brightBlack: '#71717A',
-  brightRed: '#F87171',
-  brightGreen: '#4ADE80',
-  brightYellow: '#FBBF24',
-  brightBlue: '#60A5FA',
-  brightMagenta: '#C4B5FD',
-  brightCyan: '#22D3EE',
-  brightWhite: '#FAFAFA'
+  background: "#00000000",
+  foreground: "#E4E4E7",
+  cursor: "#FAFAFA",
+  selectionBackground: "#404040",
+  black: "#18181B",
+  red: "#EF4444",
+  green: "#22C55E",
+  yellow: "#F59E0B",
+  blue: "#3B82F6",
+  magenta: "#A78BFA",
+  cyan: "#06B6D4",
+  white: "#D4D4D8",
+  brightBlack: "#71717A",
+  brightRed: "#F87171",
+  brightGreen: "#4ADE80",
+  brightYellow: "#FBBF24",
+  brightBlue: "#60A5FA",
+  brightMagenta: "#C4B5FD",
+  brightCyan: "#22D3EE",
+  brightWhite: "#FAFAFA",
 };
 
 const LIGHT_THEME: ITheme = {
-  background: '#00000000',
-  foreground: '#18181B',
-  cursor: '#18181B',
-  selectionBackground: '#D4D4D8',
-  black: '#18181B',
-  red: '#B91C1C',
-  green: '#15803D',
-  yellow: '#B45309',
-  blue: '#1D4ED8',
-  magenta: '#7C3AED',
-  cyan: '#0E7490',
-  white: '#71717A',
-  brightBlack: '#52525B',
-  brightRed: '#DC2626',
-  brightGreen: '#16A34A',
-  brightYellow: '#D97706',
-  brightBlue: '#2563EB',
-  brightMagenta: '#9333EA',
-  brightCyan: '#0891B2',
-  brightWhite: '#09090B'
+  background: "#00000000",
+  foreground: "#18181B",
+  cursor: "#18181B",
+  selectionBackground: "#D4D4D8",
+  black: "#18181B",
+  red: "#B91C1C",
+  green: "#15803D",
+  yellow: "#B45309",
+  blue: "#1D4ED8",
+  magenta: "#7C3AED",
+  cyan: "#0E7490",
+  white: "#71717A",
+  brightBlack: "#52525B",
+  brightRed: "#DC2626",
+  brightGreen: "#16A34A",
+  brightYellow: "#D97706",
+  brightBlue: "#2563EB",
+  brightMagenta: "#9333EA",
+  brightCyan: "#0891B2",
+  brightWhite: "#09090B",
 };
 
 function currentTheme(): ITheme {
-  return document.documentElement.classList.contains('dark') ? DARK_THEME : LIGHT_THEME;
+  return document.documentElement.classList.contains("dark") ? DARK_THEME : LIGHT_THEME;
 }
 
 interface TerminalPaneProps {
@@ -89,7 +89,17 @@ interface TerminalPaneProps {
   onSubscriberCount?: (count: number) => void;
 }
 
-function TerminalPaneImpl({ sessionId, active, title, status, onTitleChange, hideHeader, ssh, share, onSubscriberCount }: TerminalPaneProps) {
+function TerminalPaneImpl({
+  sessionId,
+  active,
+  title,
+  status,
+  onTitleChange,
+  hideHeader,
+  ssh,
+  share,
+  onSubscriberCount,
+}: TerminalPaneProps) {
   const hostRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<XTerm | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
@@ -97,7 +107,9 @@ function TerminalPaneImpl({ sessionId, active, title, status, onTitleChange, hid
   // message arrives, so we don't render a stale "Take control" badge during
   // the brief reconnect window. After the first message lands, we trust the
   // agent and re-render on every update.
-  const [driverState, setDriverState] = useState<{ driver: boolean; readOnly: boolean } | null>(null);
+  const [driverState, setDriverState] = useState<{ driver: boolean; readOnly: boolean } | null>(
+    null
+  );
   // Capture latest onTitleChange so the xterm listener (set up once) always
   // invokes the current callback without rebinding the terminal.
   const onTitleChangeRef = useRef(onTitleChange);
@@ -120,7 +132,7 @@ function TerminalPaneImpl({ sessionId, active, title, status, onTitleChange, hid
     let themeObserverRef: MutationObserver | null = null;
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
     let reconnectAttempts = 0;
-    let fatalMessage = '';
+    let fatalMessage = "";
 
     // WebSocket lifecycle is its own function so we can re-run it on disconnect.
     // All input sites (term.onData, onKill, onVisibility, ResizeObserver) read
@@ -132,12 +144,13 @@ function TerminalPaneImpl({ sessionId, active, title, status, onTitleChange, hid
         clearTimeout(reconnectTimer);
         reconnectTimer = null;
       }
-      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
       // Hint the broker to trim initial scrollback when the user is on a
       // metered/cellular connection or has Low Data Mode on.
       type ConnectionLike = { saveData?: boolean; effectiveType?: string };
       const conn = (navigator as Navigator & { connection?: ConnectionLike }).connection;
-      const saveDataHint = conn?.saveData || /^(slow-2g|2g|3g)$/.test(conn?.effectiveType ?? '') ? '&saveData=1' : '';
+      const saveDataHint =
+        conn?.saveData || /^(slow-2g|2g|3g)$/.test(conn?.effectiveType ?? "") ? "&saveData=1" : "";
       // Three connection modes. Share routes through a public WS path
       // that authenticates via the share code; SSH attaches use hostId
       // + tmuxName; everything else is sessionId-keyed. The on-wire
@@ -149,12 +162,12 @@ function TerminalPaneImpl({ sessionId, active, title, status, onTitleChange, hid
           ? `${protocol}//${window.location.host}/api/ws/ssh-terminal?hostId=${encodeURIComponent(ssh.hostId)}&tmuxName=${encodeURIComponent(ssh.tmuxName)}&cols=${term.cols}&rows=${term.rows}`
           : `${protocol}//${window.location.host}/api/ws/terminal?sessionId=${sessionId}&cols=${term.cols}&rows=${term.rows}${saveDataHint}`;
       const ws = new WebSocket(wsUrl);
-      ws.binaryType = 'arraybuffer';
+      ws.binaryType = "arraybuffer";
       wsRef.current = ws;
 
       ws.onopen = () => {
         if (reconnectAttempts > 0) {
-          term!.write('\r\n\x1b[2m[reconnected]\x1b[0m\r\n');
+          term!.write("\r\n\x1b[2m[reconnected]\x1b[0m\r\n");
         }
         const justReconnected = reconnectAttempts > 0;
         reconnectAttempts = 0;
@@ -163,23 +176,23 @@ function TerminalPaneImpl({ sessionId, active, title, status, onTitleChange, hid
         // misleading after a reconnect (drive likely went to someone else).
         setDriverState(null);
         fitAddon?.fit();
-        ws.send(JSON.stringify({ type: 'resize', cols: term!.cols, rows: term!.rows }));
+        ws.send(JSON.stringify({ type: "resize", cols: term!.cols, rows: term!.rows }));
         // If the tab was hidden when we opened (background tab, page-restore,
         // visibility flicker mid-handshake), the visibilitychange event
         // already fired before the WS was open and was dropped. Send the
         // pause now so the broker isn't burning bandwidth on an offscreen
         // viewer.
-        if (document.visibilityState === 'hidden') {
-          ws.send(JSON.stringify({ type: 'pause' }));
+        if (document.visibilityState === "hidden") {
+          ws.send(JSON.stringify({ type: "pause" }));
         }
         // Only steal focus on the initial connect — yanking focus mid-typing
         // when the broker hiccups would be infuriating.
         if (!justReconnected) term!.focus();
       };
-      ws.onmessage = (event) => {
+      ws.onmessage = event => {
         // Binary frames carry raw terminal output (no JSON wrapper). Text
         // frames carry control messages — ready/sleeping/exit/refresh.
-        if (typeof event.data !== 'string') {
+        if (typeof event.data !== "string") {
           term!.write(new Uint8Array(event.data as ArrayBuffer));
           return;
         }
@@ -189,28 +202,30 @@ function TerminalPaneImpl({ sessionId, active, title, status, onTitleChange, hid
         } catch {
           return;
         }
-        if (msg.type === 'output') term!.write(msg.data ?? ''); // legacy/control fallback
-        if (msg.type === 'sleeping') term!.write(`\r\n${msg.message ?? 'Agent sleeping'}\r\n`);
-        if (msg.type === 'exit') term!.write('\r\n[session ended]\r\n');
-        if (msg.type === 'fatal') {
-          fatalMessage = msg.message || 'terminal unavailable';
+        if (msg.type === "output") term!.write(msg.data ?? ""); // legacy/control fallback
+        if (msg.type === "sleeping") term!.write(`\r\n${msg.message ?? "Agent sleeping"}\r\n`);
+        if (msg.type === "exit") term!.write("\r\n[session ended]\r\n");
+        if (msg.type === "fatal") {
+          fatalMessage = msg.message || "terminal unavailable";
           term!.write(`\r\n\x1b[31m[${fatalMessage}]\x1b[0m\r\n`);
-          try { ws.close(1008, 'terminal unavailable'); } catch {}
+          try {
+            ws.close(1008, "terminal unavailable");
+          } catch {}
         }
-        if (msg.type === 'subscribers' && typeof (msg as { count?: unknown }).count === 'number') {
+        if (msg.type === "subscribers" && typeof (msg as { count?: unknown }).count === "number") {
           onSubscriberCountRef.current?.((msg as { count: number }).count);
         }
-        if (msg.type === 'driver-changed') {
+        if (msg.type === "driver-changed") {
           // Multi-subscriber model: agent's SessionStream broadcasts on every
           // driver change so each viewer knows whether they're driving or
           // riding along. UI just reads two flags out of state.
           setDriverState({
             driver: Boolean((msg as { driver?: unknown }).driver),
-            readOnly: Boolean((msg as { readOnly?: unknown }).readOnly)
+            readOnly: Boolean((msg as { readOnly?: unknown }).readOnly),
           });
         }
       };
-      ws.onclose = (event) => {
+      ws.onclose = event => {
         if (disposed) return;
         wsRef.current = null;
         // Code 1008 (policy violation) is the broker's "this session is gone /
@@ -218,13 +233,13 @@ function TerminalPaneImpl({ sessionId, active, title, status, onTitleChange, hid
         // surface the reason and stop. Anything else is treated as a transient
         // network blip and gets exponential-backoff retry.
         if (event.code === 1008) {
-          const reason = fatalMessage || event.reason || 'session unavailable';
+          const reason = fatalMessage || event.reason || "session unavailable";
           term!.write(`\r\n\x1b[2m[disconnected: ${reason}]\x1b[0m\r\n`);
           return;
         }
         reconnectAttempts += 1;
         if (reconnectAttempts === 1) {
-          term!.write('\r\n\x1b[2m[disconnected, reconnecting…]\x1b[0m\r\n');
+          term!.write("\r\n\x1b[2m[disconnected, reconnecting…]\x1b[0m\r\n");
         }
         // Exponential backoff capped at 30s. Resets to 1s on next successful
         // open. Tab visibility doesn't pause this; the next visible tick will
@@ -243,9 +258,9 @@ function TerminalPaneImpl({ sessionId, active, title, status, onTitleChange, hid
 
     void (async () => {
       const [{ Terminal }, { FitAddon }, { WebLinksAddon }] = await Promise.all([
-        import('@xterm/xterm'),
-        import('@xterm/addon-fit'),
-        import('@xterm/addon-web-links')
+        import("@xterm/xterm"),
+        import("@xterm/addon-fit"),
+        import("@xterm/addon-web-links"),
       ]);
       if (disposed || !hostRef.current) return;
 
@@ -253,10 +268,12 @@ function TerminalPaneImpl({ sessionId, active, title, status, onTitleChange, hid
       // variables, so 'var(--font-mono)' would fall through to the next
       // hard-coded family. next/font hashes the font name (e.g. __DM_Mono_xxx),
       // so we resolve the var at runtime and pass the actual loaded family.
-      const monoVar = getComputedStyle(document.documentElement).getPropertyValue('--font-mono').trim();
-      const fontFamily = [monoVar, '"DM Mono"', 'SFMono-Regular', 'Consolas', 'monospace']
+      const monoVar = getComputedStyle(document.documentElement)
+        .getPropertyValue("--font-mono")
+        .trim();
+      const fontFamily = [monoVar, '"DM Mono"', "SFMono-Regular", "Consolas", "monospace"]
         .filter(Boolean)
-        .join(', ');
+        .join(", ");
       term = new Terminal({
         allowTransparency: true,
         cursorBlink: true,
@@ -264,7 +281,7 @@ function TerminalPaneImpl({ sessionId, active, title, status, onTitleChange, hid
         fontSize: 12,
         lineHeight: 1.4,
         scrollback: 10000,
-        theme: currentTheme()
+        theme: currentTheme(),
       });
 
       // Live theme reactivity: when html.dark flips (cycleTheme button or
@@ -274,7 +291,10 @@ function TerminalPaneImpl({ sessionId, active, title, status, onTitleChange, hid
       const themeObserver = new MutationObserver(() => {
         if (term) term.options.theme = currentTheme();
       });
-      themeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ['class'] });
+      themeObserver.observe(document.documentElement, {
+        attributes: true,
+        attributeFilter: ["class"],
+      });
       themeObserverRef = themeObserver;
       const fit = new FitAddon();
       fitAddon = fit;
@@ -285,7 +305,7 @@ function TerminalPaneImpl({ sessionId, active, title, status, onTitleChange, hid
 
       // OSC 0/2 escape sequences fire here whenever a tool inside the
       // terminal changes its window title (e.g. shells, vim, claude).
-      term.onTitleChange((next) => {
+      term.onTitleChange(next => {
         const trimmed = next?.trim();
         if (trimmed) onTitleChangeRef.current?.(sessionId, trimmed);
       });
@@ -293,10 +313,10 @@ function TerminalPaneImpl({ sessionId, active, title, status, onTitleChange, hid
       // Bind once: every input goes through whatever socket is currently
       // assigned to wsRef.current. After a reconnect, the new WS just gets
       // the keystrokes naturally.
-      term.onData((data) => {
+      term.onData(data => {
         const ws = wsRef.current;
         if (ws?.readyState === WebSocket.OPEN) {
-          ws.send(JSON.stringify({ type: 'input', data }));
+          ws.send(JSON.stringify({ type: "input", data }));
         }
       });
 
@@ -304,10 +324,10 @@ function TerminalPaneImpl({ sessionId, active, title, status, onTitleChange, hid
         const custom = event as CustomEvent<{ sessionId: string }>;
         const ws = wsRef.current;
         if (custom.detail?.sessionId === sessionId && ws?.readyState === WebSocket.OPEN) {
-          ws.send(JSON.stringify({ type: 'kill' }));
+          ws.send(JSON.stringify({ type: "kill" }));
         }
       };
-      window.addEventListener('termag:kill-session', onKill);
+      window.addEventListener("termag:kill-session", onKill);
 
       // Pause the output stream when the tab/app is hidden — saves a lot of
       // cellular data when a phone is locked or backgrounded. Broker buffers
@@ -316,9 +336,11 @@ function TerminalPaneImpl({ sessionId, active, title, status, onTitleChange, hid
       const onVisibility = () => {
         const ws = wsRef.current;
         if (ws?.readyState !== WebSocket.OPEN) return;
-        ws.send(JSON.stringify({ type: document.visibilityState === 'hidden' ? 'pause' : 'resume' }));
+        ws.send(
+          JSON.stringify({ type: document.visibilityState === "hidden" ? "pause" : "resume" })
+        );
       };
-      document.addEventListener('visibilitychange', onVisibility);
+      document.addEventListener("visibilitychange", onVisibility);
       onVisibilityRef = onVisibility;
 
       observer = new ResizeObserver(() => {
@@ -328,7 +350,7 @@ function TerminalPaneImpl({ sessionId, active, title, status, onTitleChange, hid
           fit.fit();
           const ws = wsRef.current;
           if (ws?.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify({ type: 'resize', cols: term!.cols, rows: term!.rows }));
+            ws.send(JSON.stringify({ type: "resize", cols: term!.cols, rows: term!.rows }));
           }
         }, 120);
       });
@@ -349,8 +371,8 @@ function TerminalPaneImpl({ sessionId, active, title, status, onTitleChange, hid
       if (resizeTimer) clearTimeout(resizeTimer);
       wsRef.current?.close();
       wsRef.current = null;
-      if (onKill) window.removeEventListener('termag:kill-session', onKill);
-      if (onVisibilityRef) document.removeEventListener('visibilitychange', onVisibilityRef);
+      if (onKill) window.removeEventListener("termag:kill-session", onKill);
+      if (onVisibilityRef) document.removeEventListener("visibilitychange", onVisibilityRef);
       themeObserverRef?.disconnect();
       term?.dispose();
       termRef.current = null;
@@ -360,7 +382,7 @@ function TerminalPaneImpl({ sessionId, active, title, status, onTitleChange, hid
   function claimDrive() {
     const ws = wsRef.current;
     if (ws?.readyState === WebSocket.OPEN && !driverState?.readOnly) {
-      ws.send(JSON.stringify({ type: 'claim-drive' }));
+      ws.send(JSON.stringify({ type: "claim-drive" }));
     }
   }
 
@@ -391,17 +413,36 @@ function TerminalPaneImpl({ sessionId, active, title, status, onTitleChange, hid
     // 80px threshold + dominant horizontal axis (3:1) keeps accidental
     // vertical scrolls / pinches from firing tab switches.
     if (Math.abs(dx) < 80 || Math.abs(dx) < Math.abs(dy) * 3) return;
-    window.dispatchEvent(new CustomEvent('termag:tab-swipe', {
-      detail: { direction: dx < 0 ? 'next' : 'prev' }
-    }));
+    window.dispatchEvent(
+      new CustomEvent("termag:tab-swipe", {
+        detail: { direction: dx < 0 ? "next" : "prev" },
+      })
+    );
   }, []);
 
   return (
-    <section className={cn('flex min-h-0 flex-1 flex-col overflow-hidden bg-bg', !hideHeader && 'rounded-lg border border-line')}>
+    <section
+      className={cn(
+        "relative flex min-h-0 flex-1 flex-col overflow-hidden bg-bg",
+        !hideHeader && "rounded-lg border border-line"
+      )}
+    >
+      {hideHeader && showBadge && (
+        <button
+          type="button"
+          onClick={claimDrive}
+          disabled={isReadOnly}
+          className="absolute right-2 top-2 z-20 inline-flex h-6 items-center gap-1 rounded border border-line bg-panel/95 px-2 text-[10px] text-muted shadow hover:text-text disabled:cursor-not-allowed disabled:opacity-60"
+          title={isReadOnly ? "Read-only session" : "Take keyboard control from the current driver"}
+        >
+          <span className="h-1.5 w-1.5 rounded-full bg-muted" />
+          {isReadOnly ? "Read-only" : "Take control"}
+        </button>
+      )}
       {!hideHeader && (
         <header className="flex h-9 shrink-0 items-center justify-between bg-panel px-3 text-xs">
           <div className="flex min-w-0 items-center gap-2">
-            <span className={cn('h-1.5 w-1.5 rounded-full', statusDot(status))} />
+            <span className={cn("h-1.5 w-1.5 rounded-full", statusDot(status))} />
             <span className="truncate font-medium">{title}</span>
           </div>
           <div className="flex items-center gap-2">
@@ -411,13 +452,15 @@ function TerminalPaneImpl({ sessionId, active, title, status, onTitleChange, hid
                 onClick={claimDrive}
                 disabled={isReadOnly}
                 className="inline-flex h-6 items-center gap-1 rounded border border-line bg-panel2 px-2 text-[10px] text-muted hover:text-text disabled:cursor-not-allowed disabled:opacity-60"
-                title={isReadOnly ? 'Read-only session' : 'Take keyboard control from the current driver'}
+                title={
+                  isReadOnly ? "Read-only session" : "Take keyboard control from the current driver"
+                }
               >
                 <span className="h-1.5 w-1.5 rounded-full bg-muted" />
-                {isReadOnly ? 'Read-only' : 'Take control'}
+                {isReadOnly ? "Read-only" : "Take control"}
               </button>
             )}
-            <span className="font-mono text-[10px] text-muted">{status ?? 'sleeping'}</span>
+            <span className="font-mono text-[10px] text-muted">{status ?? "sleeping"}</span>
           </div>
         </header>
       )}
@@ -432,10 +475,10 @@ function TerminalPaneImpl({ sessionId, active, title, status, onTitleChange, hid
         onTouchEnd={onTabSwipeEnd}
       />
       <MobileSoftKeys
-        onInput={(data) => {
+        onInput={data => {
           const ws = wsRef.current;
           if (ws?.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify({ type: 'input', data }));
+            ws.send(JSON.stringify({ type: "input", data }));
           }
           termRef.current?.focus();
         }}
@@ -449,55 +492,64 @@ function TerminalPaneImpl({ sessionId, active, title, status, onTitleChange, hid
 // nearly unusable for vim/tmux/emacs muscle memory. The main row covers
 // the always-needed essentials; the ⋯ button reveals readline + paging
 // shortcuts; Fn toggles F1-F12.
-const ESC = '\u001b';
+const ESC = "\u001b";
 
 const MOBILE_PRIMARY_KEYS: Array<[string, string]> = [
-  ['Esc', ESC],
-  ['Tab', '\t'],
-  ['←', `${ESC}[D`],
-  ['↓', `${ESC}[B`],
-  ['↑', `${ESC}[A`],
-  ['→', `${ESC}[C`],
-  ['C-c', '\u0003'],
-  ['C-d', '\u0004']
+  ["Esc", ESC],
+  ["Tab", "\t"],
+  ["←", `${ESC}[D`],
+  ["↓", `${ESC}[B`],
+  ["↑", `${ESC}[A`],
+  ["→", `${ESC}[C`],
+  ["C-c", "\u0003"],
+  ["C-d", "\u0004"],
 ];
 
 const MOBILE_SECONDARY_KEYS: Array<[string, string, string?]> = [
-  ['C-a', '\u0001', 'start of line'],
-  ['C-e', '\u0005', 'end of line'],
-  ['C-w', '\u0017', 'delete word back'],
-  ['C-u', '\u0015', 'delete line back'],
-  ['C-k', '\u000b', 'delete line forward'],
-  ['C-r', '\u0012', 'reverse search'],
-  ['C-l', '\u000c', 'clear'],
-  ['C-z', '\u001a', 'suspend'],
-  ['PgUp', `${ESC}[5~`],
-  ['PgDn', `${ESC}[6~`],
-  ['Home', `${ESC}[H`],
-  ['End', `${ESC}[F`],
-  ['Del', `${ESC}[3~`],
-  ['Ins', `${ESC}[2~`]
+  ["C-a", "\u0001", "start of line"],
+  ["C-e", "\u0005", "end of line"],
+  ["C-w", "\u0017", "delete word back"],
+  ["C-u", "\u0015", "delete line back"],
+  ["C-k", "\u000b", "delete line forward"],
+  ["C-r", "\u0012", "reverse search"],
+  ["C-l", "\u000c", "clear"],
+  ["C-z", "\u001a", "suspend"],
+  ["PgUp", `${ESC}[5~`],
+  ["PgDn", `${ESC}[6~`],
+  ["Home", `${ESC}[H`],
+  ["End", `${ESC}[F`],
+  ["Del", `${ESC}[3~`],
+  ["Ins", `${ESC}[2~`],
 ];
 
 // F1-F4 use xterm SS3 (ESC O P..S); F5-F12 use CSI (ESC [ NN ~).
 const MOBILE_FN_KEYS: Array<[string, string]> = [
-  ['F1', `${ESC}OP`], ['F2', `${ESC}OQ`], ['F3', `${ESC}OR`], ['F4', `${ESC}OS`],
-  ['F5', `${ESC}[15~`], ['F6', `${ESC}[17~`], ['F7', `${ESC}[18~`], ['F8', `${ESC}[19~`],
-  ['F9', `${ESC}[20~`], ['F10', `${ESC}[21~`], ['F11', `${ESC}[23~`], ['F12', `${ESC}[24~`]
+  ["F1", `${ESC}OP`],
+  ["F2", `${ESC}OQ`],
+  ["F3", `${ESC}OR`],
+  ["F4", `${ESC}OS`],
+  ["F5", `${ESC}[15~`],
+  ["F6", `${ESC}[17~`],
+  ["F7", `${ESC}[18~`],
+  ["F8", `${ESC}[19~`],
+  ["F9", `${ESC}[20~`],
+  ["F10", `${ESC}[21~`],
+  ["F11", `${ESC}[23~`],
+  ["F12", `${ESC}[24~`],
 ];
 
 function MobileSoftKeys({ onInput }: { onInput: (data: string) => void }) {
-  const [expanded, setExpanded] = useState<'none' | 'extras' | 'fn'>('none');
+  const [expanded, setExpanded] = useState<"none" | "extras" | "fn">("none");
   return (
     <div className="md:hidden">
-      {expanded === 'fn' && (
+      {expanded === "fn" && (
         <div className="flex shrink-0 flex-wrap items-center gap-1 border-t border-line bg-panel2 px-2 py-1">
           {MOBILE_FN_KEYS.map(([label, data]) => (
             <SoftKeyButton key={label} label={label} onClick={() => onInput(data)} />
           ))}
         </div>
       )}
-      {expanded === 'extras' && (
+      {expanded === "extras" && (
         <div className="flex shrink-0 flex-wrap items-center gap-1 border-t border-line bg-panel2 px-2 py-1">
           {MOBILE_SECONDARY_KEYS.map(([label, data, title]) => (
             <SoftKeyButton key={label} label={label} title={title} onClick={() => onInput(data)} />
@@ -511,17 +563,17 @@ function MobileSoftKeys({ onInput }: { onInput: (data: string) => void }) {
         <button
           type="button"
           className="ml-auto h-7 min-w-8 rounded-md border border-line bg-bg px-2 text-xs"
-          onClick={() => setExpanded((current) => (current === 'extras' ? 'none' : 'extras'))}
-          aria-pressed={expanded === 'extras'}
+          onClick={() => setExpanded(current => (current === "extras" ? "none" : "extras"))}
+          aria-pressed={expanded === "extras"}
           title="More keys"
         >
-          {expanded === 'extras' ? '×' : '⋯'}
+          {expanded === "extras" ? "×" : "⋯"}
         </button>
         <button
           type="button"
           className="h-7 min-w-8 rounded-md border border-line bg-bg px-2 text-xs"
-          onClick={() => setExpanded((current) => (current === 'fn' ? 'none' : 'fn'))}
-          aria-pressed={expanded === 'fn'}
+          onClick={() => setExpanded(current => (current === "fn" ? "none" : "fn"))}
+          aria-pressed={expanded === "fn"}
           title="Function keys"
         >
           Fn
@@ -531,7 +583,15 @@ function MobileSoftKeys({ onInput }: { onInput: (data: string) => void }) {
   );
 }
 
-function SoftKeyButton({ label, title, onClick }: { label: string; title?: string; onClick: () => void }) {
+function SoftKeyButton({
+  label,
+  title,
+  onClick,
+}: {
+  label: string;
+  title?: string;
+  onClick: () => void;
+}) {
   return (
     <button
       type="button"

@@ -1,6 +1,6 @@
 "use client";
 
-import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Bell,
   BellOff,
@@ -35,6 +35,8 @@ import type { AgentDeviceStatus, Project, Tab, TmuxDeviceSession, TmuxWindow } f
 import type { Platform } from "@/lib/platform";
 import { cn, statusDot } from "@/lib/utils";
 import { startCaffeinateOnDevice, stopCaffeinateOnDevice } from "@/lib/broker";
+import { HerdrStatusIcon } from "./herdr-status-icon";
+import { MirroredTerminalLayout } from "./mirrored-terminal-layout";
 
 // Heavy dialogs are split into their own chunks and loaded only when opened.
 const CommandPalette = lazy(() =>
@@ -73,6 +75,30 @@ function isTypingTarget(target: EventTarget | null): boolean {
   return tag === "INPUT" || tag === "TEXTAREA" || target.isContentEditable;
 }
 
+function aggregateHerdRStatus(tabs: Tab[]): string {
+  const nativeTabStatus = tabs.find(tab => tab.runtimeTabStatus)?.runtimeTabStatus;
+  if (nativeTabStatus) {
+    return nativeTabStatus;
+  }
+  const statuses = tabs.map(tab => tab.status);
+  return (
+    ["blocked", "working", "done", "idle", "unknown"].find(status => statuses.includes(status)) ||
+    "unknown"
+  );
+}
+
+function herdRIndicatorVariant(project?: Project | null): "dot" | "symbol" {
+  return project?.runtimeIconStyle === "symbols" ? "symbol" : "dot";
+}
+
+function preferredProjectTab(project?: Project | null): Tab | undefined {
+  return project?.tabs.find(tab => tab.focused) ?? project?.tabs[0];
+}
+
+function preferredProject(projects: Project[]): Project | undefined {
+  return projects.find(project => project.runtimeFocused) ?? projects[0];
+}
+
 function normalizeAgentDevice(input: unknown): AgentDeviceStatus {
   if (typeof input === "string") {
     return { name: input, connected: true };
@@ -89,6 +115,15 @@ function normalizeAgentDevice(input: unknown): AgentDeviceStatus {
     uptimeSec: Number.isFinite(Number(raw.uptimeSec)) ? Number(raw.uptimeSec) : undefined,
     memMb: Number.isFinite(Number(raw.memMb)) ? Number(raw.memMb) : undefined,
     lastSeenAt: typeof raw.lastSeenAt === "string" ? raw.lastSeenAt : null,
+    deviceId: typeof raw.deviceId === "string" ? raw.deviceId : null,
+    protocolVersion: Number.isFinite(Number(raw.protocolVersion)) ? Number(raw.protocolVersion) : 1,
+    capabilities:
+      raw.capabilities && typeof raw.capabilities === "object"
+        ? (raw.capabilities as Record<string, boolean>)
+        : undefined,
+    runtimeSessions: Array.isArray(raw.runtimeSessions)
+      ? (raw.runtimeSessions as AgentDeviceStatus["runtimeSessions"])
+      : undefined,
     roots:
       raw.roots && typeof raw.roots === "object"
         ? (raw.roots as Record<string, string>)
@@ -160,10 +195,11 @@ interface TermagAppProps {
 }
 
 export function TermagApp({ user, initialProjects, platform, authMode }: TermagAppProps) {
+  const initialProject = preferredProject(initialProjects);
   const [projects, setProjects] = useState<Project[]>(initialProjects);
   const [tokenDevices, setTokenDevices] = useState<string[]>([]);
-  const [activeProjectId, setActiveProjectId] = useState(initialProjects[0]?.id ?? "");
-  const [activeTabId, setActiveTabId] = useState(initialProjects[0]?.tabs[0]?.id ?? "");
+  const [activeProjectId, setActiveProjectId] = useState(initialProject?.id ?? "");
+  const [activeTabId, setActiveTabId] = useState(preferredProjectTab(initialProject)?.id ?? "");
   // Open by default on desktop, closed on mobile (the drawer pattern). The
   // initial decision is made server-side via platform.showShortcuts (false on
   // phones) so there's no flash of an open drawer.
@@ -206,9 +242,9 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
       current[sessionId] === title ? current : { ...current, [sessionId]: title }
     );
   }, []);
-  const initialTab = initialProjects[0]?.tabs[0];
+  const initialTab = preferredProjectTab(initialProject);
   const tabHistory = useTabHistory(
-    initialProjects[0] && initialTab ? { [initialProjects[0].id]: [initialTab.id] } : {}
+    initialProject && initialTab ? { [initialProject.id]: [initialTab.id] } : {}
   );
   const activeProjectIdRef = useRef(activeProjectId);
   const activeTabIdRef = useRef(activeTabId);
@@ -218,13 +254,29 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
     [projects, activeProjectId]
   );
   const activeTab = useMemo(
-    () => activeProject?.tabs.find(tab => tab.id === activeTabId) ?? activeProject?.tabs[0],
+    () =>
+      activeProject?.tabs.find(tab => tab.id === activeTabId) ?? preferredProjectTab(activeProject),
     [activeProject, activeTabId]
   );
   const ctrlSession = useMemo(
     () => activeProject?.sessions.find(session => session.kind === "ctrl"),
     [activeProject]
   );
+  const topTabs = useMemo(() => {
+    if (!activeProject || activeProject.runtime !== "herdr") return activeProject?.tabs ?? [];
+    const seen = new Set<string>();
+    return activeProject.tabs.filter(tab => {
+      const key = tab.runtimeTabId || tab.id;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  }, [activeProject]);
+  const activeRuntimePanes = useMemo(() => {
+    if (!activeProject || !activeTab) return [];
+    if (activeProject.runtime !== "herdr" || !activeTab.runtimeTabId) return [activeTab];
+    return activeProject.tabs.filter(tab => tab.runtimeTabId === activeTab.runtimeTabId);
+  }, [activeProject, activeTab]);
   const connectedDeviceNames = useMemo(
     () => new Set(agentDevices.filter(device => device.connected).map(device => device.name)),
     [agentDevices]
@@ -357,7 +409,7 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
         event.preventDefault();
         const project = handlers.projects[parseInt(event.key, 10) - 1];
         if (project) {
-          const tabId = project.tabs[0]?.id;
+          const tabId = preferredProjectTab(project)?.id;
           if (tabId) {
             handlers.selectTab(project.id, tabId);
           }
@@ -457,24 +509,27 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
       if (cancelled) {
         return;
       }
-      ws = new WebSocket(url);
-      ws.onopen = () => {
+      const socket = new WebSocket(url);
+      ws = socket;
+      socket.onopen = () => {
         attempts = 0;
-        ws.send(JSON.stringify({ type: "subscribe-devices" }));
+        socket.send(JSON.stringify({ type: "subscribe-devices" }));
       };
-      ws.onmessage = event => {
+      socket.onmessage = event => {
         try {
           const msg = JSON.parse(event.data);
           if (msg.type === "agent") {
             if (Array.isArray(msg.devices)) {
               setAgentDevices(msg.devices.map(normalizeAgentDevice));
             }
+          } else if (msg.type === "refresh") {
+            window.dispatchEvent(new CustomEvent("termag:refresh-projects"));
           }
         } catch {
           // ignore malformed payloads
         }
       };
-      ws.onclose = () => {
+      socket.onclose = () => {
         if (cancelled) {
           return;
         }
@@ -483,7 +538,7 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
         const delay = Math.min(15000, 500 * 2 ** Math.min(attempts, 5));
         retryTimer = setTimeout(connect, delay);
       };
-      ws.onerror = () => {
+      socket.onerror = () => {
         // close handler will fire next and schedule the retry
       };
     };
@@ -511,7 +566,8 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
       setProjects(next);
       const project = next.find((item: Project) => item.id === desiredProjectId) ?? next[0];
       setActiveProjectId(project?.id || "");
-      const tab = project?.tabs.find((item: Tab) => item.id === desiredTabId) ?? project?.tabs[0];
+      const tab =
+        project?.tabs.find((item: Tab) => item.id === desiredTabId) ?? preferredProjectTab(project);
       setActiveTabId(tab?.id || "");
       if (project?.id && tab?.id && nextTabId) {
         tabHistory.remember(project.id, tab.id);
@@ -519,6 +575,12 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
     },
     [tabHistory]
   );
+
+  useEffect(() => {
+    const refresh = () => void reloadProjects();
+    window.addEventListener("termag:refresh-projects", refresh);
+    return () => window.removeEventListener("termag:refresh-projects", refresh);
+  }, [reloadProjects]);
 
   const reorderProjects = useCallback(
     async (sourceId: string, targetId: string, before: boolean) => {
@@ -565,11 +627,14 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
 
   const createProject = useCallback(
     async (input: {
+      deviceName: string;
       rootKey: string;
       relativePath: string;
       name?: string;
       agentTypes: string[];
       customAgents: string[];
+      runtime?: "herdr" | "tmux";
+      runtimeSessionId?: string;
     }) => {
       const customAgents = input.customAgents.map(spawnCommand => ({ spawnCommand }));
       const builtinAgents = input.agentTypes.map(agentType => ({ agentType }));
@@ -578,9 +643,12 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
           name: input.name,
+          deviceName: input.deviceName,
           rootKey: input.rootKey,
           relativePath: input.relativePath,
           agents: [...customAgents, ...builtinAgents],
+          runtime: input.runtime,
+          runtimeSessionId: input.runtimeSessionId,
         }),
       });
       if (!res.ok) {
@@ -671,7 +739,7 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
   );
 
   const renameTab = useCallback(
-    async (projectId: string, tabId: string, name: string) => {
+    async (projectId: string, tabId: string, name: string, scope: "tab" | "pane" = "tab") => {
       const trimmed = name.trim();
       if (!trimmed) {
         return;
@@ -703,7 +771,7 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
       const res = await fetch(`/api/projects/${projectId}/tabs/${tabId}`, {
         method: "PATCH",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ name: trimmed }),
+        body: JSON.stringify({ name: trimmed, scope }),
       });
       if (!res.ok) {
         console.error("[termag] renameTab failed", res.status, await res.text().catch(() => ""));
@@ -714,12 +782,15 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
   );
 
   const closeTab = useCallback(
-    async (projectId: string, tabId: string) => {
+    async (projectId: string, tabId: string, scope: "tab" | "pane" = "tab") => {
       const project = projects.find(item => item.id === projectId);
       if (!project || project.tabs.length <= 1) {
         return;
       }
-      const res = await fetch(`/api/projects/${projectId}/tabs/${tabId}`, { method: "DELETE" });
+      const query = scope === "pane" ? "?scope=pane" : "";
+      const res = await fetch(`/api/projects/${projectId}/tabs/${tabId}${query}`, {
+        method: "DELETE",
+      });
       if (!res.ok) {
         console.error("[termag] closeTab failed", res.status, await res.text().catch(() => ""));
         return;
@@ -775,7 +846,7 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
         await startCaffeinateOnDevice(
           user.id,
           activeProject.rootKey,
-          "while-task",
+          "terminals-awake",
           "User request from web UI"
         );
         setCaffeinateActive(true);
@@ -806,7 +877,7 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
     () =>
       projects.flatMap(project =>
         project.tabs.map(tab => ({
-          projectName: project.name,
+          projectName: project.runtimeSpaceName || project.name,
           tabName: tab.name,
           tabId: tab.id,
           status: tab.status as string,
@@ -865,7 +936,18 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
       const key = project.rootKey;
       result.set(key, [...(result.get(key) ?? []), project]);
     }
-    return [...result.entries()];
+    return [...result.entries()].map(([device, deviceProjects]) => [
+      device,
+      [...deviceProjects].sort((left, right) => {
+        const runtimeOrder = (value?: string) => (value === "herdr" ? 0 : value === "tmux" ? 1 : 2);
+        return (
+          runtimeOrder(left.runtime) - runtimeOrder(right.runtime) ||
+          (left.runtimeSessionName || "").localeCompare(right.runtimeSessionName || "") ||
+          (left.runtimeOrdinal ?? 0) - (right.runtimeOrdinal ?? 0) ||
+          left.name.localeCompare(right.name)
+        );
+      }),
+    ]) as Array<[string, Project[]]>;
   }, [devices, projects]);
 
   const openNewProject = useCallback((device?: string) => {
@@ -1064,280 +1146,351 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
                     {groupProjects.length === 0 && (
                       <div className="px-2 py-1 text-xs text-muted/70">No projects yet</div>
                     )}
-                    {groupProjects.map(project => {
+                    {groupProjects.map((project, projectIndex) => {
+                      const previousProject = groupProjects[projectIndex - 1];
+                      const runtimeChanged = previousProject?.runtime !== project.runtime;
+                      const runtimeSessionChanged =
+                        runtimeChanged ||
+                        previousProject?.runtimeSessionId !== project.runtimeSessionId;
                       const isActiveProject = project.id === activeProject?.id;
                       const isDragging = dragProjectId === project.id;
                       const dropBefore = dropTarget?.id === project.id && dropTarget.before;
                       const dropAfter = dropTarget?.id === project.id && !dropTarget.before;
                       return (
-                        <div
-                          key={project.id}
-                          draggable
-                          onDragStart={event => {
-                            setDragProjectId(project.id);
-                            event.dataTransfer.effectAllowed = "move";
-                            event.dataTransfer.setData("text/plain", project.id);
-                          }}
-                          onDragOver={event => {
-                            if (!dragProjectId || dragProjectId === project.id) {
-                              return;
-                            }
-                            event.preventDefault();
-                            event.dataTransfer.dropEffect = "move";
-                            const rect = (
-                              event.currentTarget as HTMLDivElement
-                            ).getBoundingClientRect();
-                            const before = event.clientY < rect.top + rect.height / 2;
-                            if (dropTarget?.id !== project.id || dropTarget.before !== before) {
-                              setDropTarget({ id: project.id, before });
-                            }
-                          }}
-                          onDragLeave={() => {
-                            if (dropTarget?.id === project.id) {
-                              setDropTarget(null);
-                            }
-                          }}
-                          onDrop={event => {
-                            if (!dragProjectId) {
-                              return;
-                            }
-                            event.preventDefault();
-                            const rect = (
-                              event.currentTarget as HTMLDivElement
-                            ).getBoundingClientRect();
-                            const before = event.clientY < rect.top + rect.height / 2;
-                            reorderProjects(dragProjectId, project.id, before);
-                            setDragProjectId(null);
-                            setDropTarget(null);
-                          }}
-                          onDragEnd={() => {
-                            setDragProjectId(null);
-                            setDropTarget(null);
-                          }}
-                          className={cn(
-                            "relative",
-                            isDragging && "opacity-40",
-                            dropBefore &&
-                              "before:absolute before:inset-x-2 before:-top-px before:h-px before:bg-text",
-                            dropAfter &&
-                              "after:absolute after:inset-x-2 after:-bottom-px after:h-px after:bg-text"
+                        <Fragment key={project.id}>
+                          {runtimeChanged && (
+                            <div className="mt-2 flex h-5 items-center gap-1.5 px-2 text-[10px] font-semibold uppercase tracking-wider text-muted">
+                              <Terminal className="h-3 w-3" />
+                              {project.runtime === "herdr" ? "HerdR" : project.runtime || "tmux"}
+                            </div>
                           )}
-                        >
+                          {project.runtime === "herdr" && runtimeSessionChanged && (
+                            <div className="h-5 truncate pl-5 pr-2 text-[11px] font-medium text-muted">
+                              {project.runtimeSessionName || project.runtimeSessionId || "default"}
+                            </div>
+                          )}
                           <div
+                            draggable
+                            onDragStart={event => {
+                              setDragProjectId(project.id);
+                              event.dataTransfer.effectAllowed = "move";
+                              event.dataTransfer.setData("text/plain", project.id);
+                            }}
+                            onDragOver={event => {
+                              if (!dragProjectId || dragProjectId === project.id) {
+                                return;
+                              }
+                              event.preventDefault();
+                              event.dataTransfer.dropEffect = "move";
+                              const rect = (
+                                event.currentTarget as HTMLDivElement
+                              ).getBoundingClientRect();
+                              const before = event.clientY < rect.top + rect.height / 2;
+                              if (dropTarget?.id !== project.id || dropTarget.before !== before) {
+                                setDropTarget({ id: project.id, before });
+                              }
+                            }}
+                            onDragLeave={() => {
+                              if (dropTarget?.id === project.id) {
+                                setDropTarget(null);
+                              }
+                            }}
+                            onDrop={event => {
+                              if (!dragProjectId) {
+                                return;
+                              }
+                              event.preventDefault();
+                              const rect = (
+                                event.currentTarget as HTMLDivElement
+                              ).getBoundingClientRect();
+                              const before = event.clientY < rect.top + rect.height / 2;
+                              reorderProjects(dragProjectId, project.id, before);
+                              setDragProjectId(null);
+                              setDropTarget(null);
+                            }}
+                            onDragEnd={() => {
+                              setDragProjectId(null);
+                              setDropTarget(null);
+                            }}
                             className={cn(
-                              "group/project flex h-9 w-full items-center rounded-md hover:bg-panel2",
-                              isActiveProject && "bg-panel2 shadow-sm"
+                              "relative",
+                              isDragging && "opacity-40",
+                              dropBefore &&
+                                "before:absolute before:inset-x-2 before:-top-px before:h-px before:bg-text",
+                              dropAfter &&
+                                "after:absolute after:inset-x-2 after:-bottom-px after:h-px after:bg-text"
                             )}
                           >
                             <div
-                              role="button"
-                              tabIndex={0}
-                              className="flex h-full min-w-0 flex-1 cursor-pointer items-center gap-2 rounded-l-md px-2 text-left text-sm"
-                              title={`${project.rootKey}/${project.relativePath}`}
-                              onClick={() => {
-                                const tabId = project.tabs[0]?.id;
-                                if (tabId) {
-                                  selectTab(project.id, tabId);
-                                } else {
-                                  setActiveProjectId(project.id);
-                                  closeDrawerOnMobile();
-                                }
-                              }}
-                              onKeyDown={event => {
-                                if (event.key === "Enter" || event.key === " ") {
-                                  event.preventDefault();
-                                  const tabId = project.tabs[0]?.id;
+                              className={cn(
+                                "group/project flex h-9 w-full items-center rounded-md hover:bg-panel2",
+                                isActiveProject && "bg-panel2 shadow-sm"
+                              )}
+                            >
+                              <div
+                                role="button"
+                                tabIndex={0}
+                                className="flex h-full min-w-0 flex-1 cursor-pointer items-center gap-2 rounded-l-md px-2 text-left text-sm"
+                                title={`${project.rootKey}/${project.relativePath}`}
+                                onClick={() => {
+                                  const tabId = preferredProjectTab(project)?.id;
                                   if (tabId) {
                                     selectTab(project.id, tabId);
                                   } else {
                                     setActiveProjectId(project.id);
                                     closeDrawerOnMobile();
                                   }
-                                }
-                              }}
-                            >
-                              <span
-                                className={cn(
-                                  "h-2 w-2 shrink-0 rounded-full",
-                                  statusDot(
-                                    connectedDeviceNames.has(project.rootKey)
-                                      ? project.status
-                                      : "sleeping"
-                                  )
-                                )}
-                              />
-                              <TabLabel
-                                name={project.name}
-                                className="min-w-0 flex-1 truncate"
-                                onRename={next => renameProject(project.id, next)}
-                              />
-                            </div>
-                            <button
-                              type="button"
-                              className="mr-1 grid h-6 w-6 shrink-0 place-items-center rounded text-muted opacity-0 hover:bg-bg hover:text-text focus:opacity-100 group-hover/project:opacity-100"
-                              onPointerDown={event => event.stopPropagation()}
-                              onClick={event => {
-                                event.stopPropagation();
-                                setProjectMenuId(current =>
-                                  current === project.id ? null : project.id
-                                );
-                              }}
-                              title="Project actions"
-                              aria-label={`${project.name} actions`}
-                            >
-                              <Plus className="h-3.5 w-3.5" />
-                            </button>
-                          </div>
-                          {projectMenuId === project.id && (
-                            <div
-                              className="absolute right-1 top-8 z-30 w-56 rounded-md border border-line bg-panel p-1 shadow-xl"
-                              onPointerDown={event => event.stopPropagation()}
-                              onClick={event => event.stopPropagation()}
-                            >
-                              <button
-                                type="button"
-                                className="flex h-8 w-full items-center gap-2 rounded px-2 text-left text-sm text-muted hover:bg-panel2 hover:text-text"
-                                onClick={() => {
-                                  setProjectMenuId(null);
-                                  createTab(project.id);
+                                }}
+                                onKeyDown={event => {
+                                  if (event.key === "Enter" || event.key === " ") {
+                                    event.preventDefault();
+                                    const tabId = preferredProjectTab(project)?.id;
+                                    if (tabId) {
+                                      selectTab(project.id, tabId);
+                                    } else {
+                                      setActiveProjectId(project.id);
+                                      closeDrawerOnMobile();
+                                    }
+                                  }
                                 }}
                               >
+                                {project.runtime === "herdr" ? (
+                                  <HerdrStatusIcon
+                                    status={
+                                      connectedDeviceNames.has(project.rootKey)
+                                        ? project.status
+                                        : "offline"
+                                    }
+                                    variant={herdRIndicatorVariant(project)}
+                                    className="h-3 w-3"
+                                  />
+                                ) : (
+                                  <span
+                                    className={cn(
+                                      "h-2 w-2 shrink-0 rounded-full",
+                                      statusDot(
+                                        connectedDeviceNames.has(project.rootKey)
+                                          ? project.status
+                                          : "offline"
+                                      )
+                                    )}
+                                  />
+                                )}
+                                <TabLabel
+                                  name={project.runtimeSpaceName || project.name}
+                                  className="min-w-0 flex-1 truncate"
+                                  onRename={next => renameProject(project.id, next)}
+                                />
+                              </div>
+                              <button
+                                type="button"
+                                className="mr-1 grid h-6 w-6 shrink-0 place-items-center rounded text-muted opacity-0 hover:bg-bg hover:text-text focus:opacity-100 group-hover/project:opacity-100"
+                                onPointerDown={event => event.stopPropagation()}
+                                onClick={event => {
+                                  event.stopPropagation();
+                                  setProjectMenuId(current =>
+                                    current === project.id ? null : project.id
+                                  );
+                                }}
+                                title="Project actions"
+                                aria-label={`${project.runtimeSpaceName || project.name} actions`}
+                              >
                                 <Plus className="h-3.5 w-3.5" />
-                                <span className="flex-1">New tab</span>
-                                <Shortcut keys={["mod", "enter"]} />
-                              </button>
-                              <button
-                                type="button"
-                                className="flex h-8 w-full items-center gap-2 rounded px-2 text-left text-sm text-muted hover:bg-panel2 hover:text-text"
-                                onClick={() =>
-                                  copyText(`connect:${project.id}`, connectCommand(project.name))
-                                }
-                              >
-                                {copiedCommand === `connect:${project.id}` ? (
-                                  <Check className="h-3.5 w-3.5" />
-                                ) : (
-                                  <Copy className="h-3.5 w-3.5" />
-                                )}
-                                <span className="truncate">
-                                  {copiedCommand === `connect:${project.id}`
-                                    ? "Copied"
-                                    : "Copy connect command"}
-                                </span>
-                              </button>
-                              <button
-                                type="button"
-                                className="flex h-8 w-full items-center gap-2 rounded px-2 text-left text-sm text-muted hover:bg-panel2 hover:text-text"
-                                onClick={() =>
-                                  copyText(
-                                    `connect-session:${project.id}`,
-                                    connectCommand(project.name, true)
-                                  )
-                                }
-                              >
-                                {copiedCommand === `connect-session:${project.id}` ? (
-                                  <Check className="h-3.5 w-3.5" />
-                                ) : (
-                                  <Copy className="h-3.5 w-3.5" />
-                                )}
-                                <span className="truncate">
-                                  {copiedCommand === `connect-session:${project.id}`
-                                    ? "Copied"
-                                    : "Copy session command"}
-                                </span>
                               </button>
                             </div>
-                          )}
-                          {project.tabs.length > 0 && (
-                            <div className="mt-0.5 space-y-0.5 pl-4">
-                              {project.tabs.map(tab => {
-                                const isActiveTab = isActiveProject && tab.id === activeTab?.id;
-                                const tabManaged = tab.session?.tmuxManaged !== false;
-                                return (
-                                  <div
-                                    key={tab.id}
-                                    role="button"
-                                    tabIndex={0}
-                                    className={cn(
-                                      "group/tab flex h-7 w-full cursor-pointer items-center gap-2 rounded-md px-2 text-left text-xs hover:bg-panel2",
-                                      isActiveTab && "bg-panel2 shadow-sm"
-                                    )}
-                                    onClick={() => selectTab(project.id, tab.id)}
-                                    onKeyDown={event => {
-                                      if (event.key === "Enter" || event.key === " ") {
-                                        event.preventDefault();
-                                        selectTab(project.id, tab.id);
-                                      }
-                                    }}
-                                  >
-                                    <span
-                                      className={cn(
-                                        "h-1.5 w-1.5 shrink-0 rounded-full",
-                                        statusDot(
-                                          connectedDeviceNames.has(project.rootKey)
-                                            ? tab.status
-                                            : "sleeping"
-                                        )
+                            {projectMenuId === project.id && (
+                              <div
+                                className="absolute right-1 top-8 z-30 w-56 rounded-md border border-line bg-panel p-1 shadow-xl"
+                                onPointerDown={event => event.stopPropagation()}
+                                onClick={event => event.stopPropagation()}
+                              >
+                                <button
+                                  type="button"
+                                  className="flex h-8 w-full items-center gap-2 rounded px-2 text-left text-sm text-muted hover:bg-panel2 hover:text-text"
+                                  onClick={() => {
+                                    setProjectMenuId(null);
+                                    createTab(project.id);
+                                  }}
+                                >
+                                  <Plus className="h-3.5 w-3.5" />
+                                  <span className="flex-1">New tab</span>
+                                  <Shortcut keys={["mod", "enter"]} />
+                                </button>
+                                <button
+                                  type="button"
+                                  className="flex h-8 w-full items-center gap-2 rounded px-2 text-left text-sm text-muted hover:bg-panel2 hover:text-text"
+                                  onClick={() =>
+                                    copyText(`connect:${project.id}`, connectCommand(project.name))
+                                  }
+                                >
+                                  {copiedCommand === `connect:${project.id}` ? (
+                                    <Check className="h-3.5 w-3.5" />
+                                  ) : (
+                                    <Copy className="h-3.5 w-3.5" />
+                                  )}
+                                  <span className="truncate">
+                                    {copiedCommand === `connect:${project.id}`
+                                      ? "Copied"
+                                      : "Copy connect command"}
+                                  </span>
+                                </button>
+                                <button
+                                  type="button"
+                                  className="flex h-8 w-full items-center gap-2 rounded px-2 text-left text-sm text-muted hover:bg-panel2 hover:text-text"
+                                  onClick={() =>
+                                    copyText(
+                                      `connect-session:${project.id}`,
+                                      connectCommand(project.name, true)
+                                    )
+                                  }
+                                >
+                                  {copiedCommand === `connect-session:${project.id}` ? (
+                                    <Check className="h-3.5 w-3.5" />
+                                  ) : (
+                                    <Copy className="h-3.5 w-3.5" />
+                                  )}
+                                  <span className="truncate">
+                                    {copiedCommand === `connect-session:${project.id}`
+                                      ? "Copied"
+                                      : "Copy session command"}
+                                  </span>
+                                </button>
+                              </div>
+                            )}
+                            {project.tabs.length > 0 && (
+                              <div className="mt-0.5 space-y-0.5 pl-4">
+                                {project.tabs.map((tab, tabIndex) => {
+                                  const previousTab = project.tabs[tabIndex - 1];
+                                  const runtimeTabChanged =
+                                    previousTab?.runtimeTabId !== tab.runtimeTabId;
+                                  const isActiveTab = isActiveProject && tab.id === activeTab?.id;
+                                  const tabManaged = tab.session?.tmuxManaged !== false;
+                                  return (
+                                    <Fragment key={tab.id}>
+                                      {tab.runtimeTabId && runtimeTabChanged && (
+                                        <div className="flex h-5 items-center gap-1.5 truncate px-2 text-[10px] font-medium text-muted">
+                                          <span className="font-mono opacity-70">↳</span>
+                                          {tab.runtimeTabName || "Terminal"}
+                                        </div>
                                       )}
-                                    />
-                                    <TabLabel
-                                      name={tab.name}
-                                      liveTitle={tab.session ? liveTitles[tab.session.id] : null}
-                                      className="min-w-0 flex-1 truncate"
-                                      onRename={next => renameTab(project.id, tab.id, next)}
-                                    />
-                                    {/* Per-tab notification toggle. First
+                                      <div
+                                        role="button"
+                                        tabIndex={0}
+                                        className={cn(
+                                          "group/tab flex h-7 w-full cursor-pointer items-center gap-2 rounded-md px-2 text-left text-xs hover:bg-panel2",
+                                          isActiveTab && "bg-panel2 shadow-sm"
+                                        )}
+                                        onClick={() => selectTab(project.id, tab.id)}
+                                        onKeyDown={event => {
+                                          if (event.key === "Enter" || event.key === " ") {
+                                            event.preventDefault();
+                                            selectTab(project.id, tab.id);
+                                          }
+                                        }}
+                                      >
+                                        {project.runtime === "herdr" ? (
+                                          <HerdrStatusIcon
+                                            status={
+                                              connectedDeviceNames.has(project.rootKey)
+                                                ? tab.status
+                                                : "offline"
+                                            }
+                                            variant={herdRIndicatorVariant(project)}
+                                            className="h-3 w-3 text-xs"
+                                          />
+                                        ) : (
+                                          <span
+                                            className={cn(
+                                              "h-1.5 w-1.5 shrink-0 rounded-full",
+                                              statusDot(
+                                                connectedDeviceNames.has(project.rootKey)
+                                                  ? tab.status
+                                                  : "offline"
+                                              )
+                                            )}
+                                          />
+                                        )}
+                                        <TabLabel
+                                          name={tab.runtimePaneName || tab.name}
+                                          liveTitle={
+                                            tab.session ? liveTitles[tab.session.id] : null
+                                          }
+                                          className="min-w-0 flex-1 truncate"
+                                          onRename={next =>
+                                            renameTab(
+                                              project.id,
+                                              tab.id,
+                                              next,
+                                              project.runtime === "herdr" ? "pane" : "tab"
+                                            )
+                                          }
+                                        />
+                                        {/* Per-tab notification toggle. First
                                       click on any tab requests Notification
                                       permission (cached after that). The
                                       hook then watches for working/waiting
                                       → idle/error transitions and fires a
                                       browser notification for subscribed
                                       tabs only. */}
-                                    {notify.permission !== "unsupported" && (
-                                      <span
-                                        className={cn(
-                                          "grid h-4 w-4 shrink-0 place-items-center rounded text-muted hover:bg-bg hover:text-text",
-                                          notify.subscribed.has(tab.id)
-                                            ? "opacity-100 text-accent"
-                                            : "opacity-0 group-hover/tab:opacity-100"
+                                        {notify.permission !== "unsupported" && (
+                                          <span
+                                            className={cn(
+                                              "grid h-4 w-4 shrink-0 place-items-center rounded text-muted hover:bg-bg hover:text-text",
+                                              notify.subscribed.has(tab.id)
+                                                ? "opacity-100 text-accent"
+                                                : "opacity-0 group-hover/tab:opacity-100"
+                                            )}
+                                            title={
+                                              notify.subscribed.has(tab.id)
+                                                ? "Stop notifying when this session goes idle/errors"
+                                                : "Notify me when this session goes idle or errors"
+                                            }
+                                            onClick={async event => {
+                                              event.stopPropagation();
+                                              if (notify.permission === "default") {
+                                                await notify.requestPermission();
+                                              }
+                                              notify.toggle(tab.id);
+                                            }}
+                                          >
+                                            {notify.subscribed.has(tab.id) ? (
+                                              <Bell className="h-3 w-3" />
+                                            ) : (
+                                              <BellOff className="h-3 w-3" />
+                                            )}
+                                          </span>
                                         )}
-                                        title={
-                                          notify.subscribed.has(tab.id)
-                                            ? "Stop notifying when this session goes idle/errors"
-                                            : "Notify me when this session goes idle or errors"
-                                        }
-                                        onClick={async event => {
-                                          event.stopPropagation();
-                                          if (notify.permission === "default") {
-                                            await notify.requestPermission();
-                                          }
-                                          notify.toggle(tab.id);
-                                        }}
-                                      >
-                                        {notify.subscribed.has(tab.id) ? (
-                                          <Bell className="h-3 w-3" />
-                                        ) : (
-                                          <BellOff className="h-3 w-3" />
+                                        {project.tabs.length > 1 && (
+                                          <span
+                                            className="grid h-4 w-4 shrink-0 place-items-center rounded text-muted opacity-0 hover:bg-bg hover:text-text group-hover/tab:opacity-100"
+                                            title={
+                                              tabManaged ? "Delete (kill tmux window)" : "Detach"
+                                            }
+                                            onClick={event => {
+                                              event.stopPropagation();
+                                              const paneCount = project.tabs.filter(
+                                                item => item.runtimeTabId === tab.runtimeTabId
+                                              ).length;
+                                              closeTab(
+                                                project.id,
+                                                tab.id,
+                                                project.runtime === "herdr" && paneCount > 1
+                                                  ? "pane"
+                                                  : "tab"
+                                              );
+                                            }}
+                                          >
+                                            ×
+                                          </span>
                                         )}
-                                      </span>
-                                    )}
-                                    {project.tabs.length > 1 && (
-                                      <span
-                                        className="grid h-4 w-4 shrink-0 place-items-center rounded text-muted opacity-0 hover:bg-bg hover:text-text group-hover/tab:opacity-100"
-                                        title={tabManaged ? "Delete (kill tmux window)" : "Detach"}
-                                        onClick={event => {
-                                          event.stopPropagation();
-                                          closeTab(project.id, tab.id);
-                                        }}
-                                      >
-                                        ×
-                                      </span>
-                                    )}
-                                  </div>
-                                );
-                              })}
-                            </div>
-                          )}
-                        </div>
+                                      </div>
+                                    </Fragment>
+                                  );
+                                })}
+                              </div>
+                            )}
+                          </div>
+                        </Fragment>
                       );
                     })}
                   </div>
@@ -1396,14 +1549,21 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
               )}
               <div className="min-w-0">
                 <div className="flex items-center gap-2">
-                  <span
-                    className={cn(
-                      "h-2 w-2 rounded-full",
-                      statusDot(activeDeviceConnected ? activeProject?.status : "sleeping")
-                    )}
-                  />
+                  {activeProject?.runtime === "herdr" ? (
+                    <HerdrStatusIcon
+                      status={activeDeviceConnected ? activeProject.status : "offline"}
+                      variant={herdRIndicatorVariant(activeProject)}
+                    />
+                  ) : (
+                    <span
+                      className={cn(
+                        "h-2 w-2 rounded-full",
+                        statusDot(activeDeviceConnected ? activeProject?.status : "offline")
+                      )}
+                    />
+                  )}
                   <h1 className="truncate text-sm font-semibold">
-                    {activeProject?.name ?? "No project"}
+                    {activeProject?.runtimeSpaceName || activeProject?.name || "No project"}
                   </h1>
                 </div>
                 <div className="truncate font-mono text-[11px] text-muted">
@@ -1461,9 +1621,17 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
               // pseudo-tab is hidden.
               <section className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-lg border border-line bg-bg">
                 <div className="flex h-9 items-end gap-px overflow-x-auto bg-panel pl-1.5 pr-1">
-                  {activeProject.tabs.map(tab => {
-                    const isActive = tab.id === activeTab.id && !mobileViewCtrl;
+                  {topTabs.map(tab => {
+                    const paneGroup = tab.runtimeTabId
+                      ? activeProject.tabs.filter(item => item.runtimeTabId === tab.runtimeTabId)
+                      : [tab];
+                    const preferredPane = paneGroup.find(item => item.focused) ?? paneGroup[0];
+                    const isActive =
+                      (tab.runtimeTabId
+                        ? tab.runtimeTabId === activeTab.runtimeTabId
+                        : tab.id === activeTab.id) && !mobileViewCtrl;
                     const tabManaged = tab.session?.tmuxManaged !== false;
+                    const displayName = tab.runtimeTabName || tab.name;
                     return (
                       <div
                         key={tab.id}
@@ -1475,35 +1643,49 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
                         )}
                         onClick={() => {
                           setMobileViewCtrl(false);
-                          selectTab(activeProject.id, tab.id);
+                          selectTab(activeProject.id, preferredPane.id);
                         }}
                         onKeyDown={event => {
                           if (event.key === "Enter" || event.key === " ") {
                             event.preventDefault();
                             setMobileViewCtrl(false);
-                            selectTab(activeProject.id, tab.id);
+                            selectTab(activeProject.id, preferredPane.id);
                           }
                         }}
                       >
-                        <span
-                          className={cn(
-                            "h-1.5 w-1.5 shrink-0 rounded-full",
-                            statusDot(activeDeviceConnected ? tab.status : "sleeping")
-                          )}
-                        />
+                        {activeProject.runtime === "herdr" ? (
+                          <HerdrStatusIcon
+                            status={
+                              activeDeviceConnected ? aggregateHerdRStatus(paneGroup) : "offline"
+                            }
+                            variant={herdRIndicatorVariant(activeProject)}
+                            className="h-3 w-3 text-xs"
+                          />
+                        ) : (
+                          <span
+                            className={cn(
+                              "h-1.5 w-1.5 shrink-0 rounded-full",
+                              statusDot(activeDeviceConnected ? tab.status : "offline")
+                            )}
+                          />
+                        )}
                         <TabLabel
-                          name={tab.name}
-                          liveTitle={tab.session ? liveTitles[tab.session.id] : null}
+                          name={displayName}
+                          liveTitle={
+                            activeProject.runtime === "herdr" || !tab.session
+                              ? null
+                              : liveTitles[tab.session.id]
+                          }
                           className="max-w-[180px] truncate"
-                          onRename={next => renameTab(activeProject.id, tab.id, next)}
+                          onRename={next => renameTab(activeProject.id, tab.id, next, "tab")}
                         />
-                        {activeProject.tabs.length > 1 && (
+                        {topTabs.length > 1 && (
                           <span
                             className="grid h-4 w-4 shrink-0 place-items-center rounded text-muted opacity-0 hover:bg-panel2 hover:text-text group-hover/tab:opacity-100"
                             title={tabManaged ? "Delete (kill tmux window)" : "Detach"}
                             onClick={event => {
                               event.stopPropagation();
-                              closeTab(activeProject.id, tab.id);
+                              closeTab(activeProject.id, tab.id, "tab");
                             }}
                           >
                             ×
@@ -1559,6 +1741,13 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
                       status={activeDeviceConnected ? ctrlSession.status : "sleeping"}
                       onTitleChange={handleSessionTitle}
                       hideHeader
+                    />
+                  ) : activeProject.runtime === "herdr" ? (
+                    <MirroredTerminalLayout
+                      tabs={activeRuntimePanes}
+                      connected={activeDeviceConnected}
+                      liveTitles={liveTitles}
+                      onTitleChange={handleSessionTitle}
                     />
                   ) : (
                     <TerminalPane
