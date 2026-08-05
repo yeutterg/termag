@@ -7,6 +7,7 @@
 /* Lightfield-inspired neutral palette. Sidebar (--panel) is the only chrome
    tint; main canvas is true bg. Status colors are the only chroma. */
 :root {
+  --termag-viewport-height: 100dvh;
   --bg: 0 0% 100%; /* #FFFFFF main canvas */
   --panel: 240 5% 96%; /* #F4F4F5 sidebar */
   --panel-2: 0 0% 90%; /* #E5E5E5 hover/active surface */
@@ -42,8 +43,11 @@
 
 html,
 body {
-  height: 100%;
+  height: var(--termag-viewport-height);
+  max-height: var(--termag-viewport-height);
   overflow: hidden;
+  overscroll-behavior: none;
+  -webkit-text-size-adjust: 100%;
 }
 
 body {
@@ -52,6 +56,9 @@ body {
   color: hsl(var(--text));
   font-family: var(--font-sans), ui-sans-serif, system-ui, sans-serif;
   letter-spacing: 0;
+  padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom)
+    env(safe-area-inset-left);
+  touch-action: manipulation;
 }
 
 button,
@@ -63,8 +70,10 @@ select {
 .xterm {
   height: 100%;
   padding: 10px;
+  touch-action: pan-y;
 }
 
 .xterm .xterm-viewport {
   background: transparent !important;
+  overscroll-behavior: contain;
 }

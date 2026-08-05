@@ -1,8 +1,8 @@
-'use client';
+"use client";
 
-import { useState } from 'react';
-import { Check, Copy, Eye, Share2 } from 'lucide-react';
-import { TerminalPane } from '@/components/terminal/terminal-pane';
+import { useState } from "react";
+import { Check, Copy, Eye, Share2 } from "lucide-react";
+import { TerminalPane } from "@/components/terminal/terminal-pane";
 
 interface SshAttachShellProps {
   hostId: string;
@@ -17,42 +17,46 @@ interface SshAttachShellProps {
 export function SshAttachShell({ hostId, hostName, hostLabel, sessionName }: SshAttachShellProps) {
   const stableKey = `ssh:${hostId}:${sessionName}`;
   const [subscriberCount, setSubscriberCount] = useState(1);
-  const [shareUrl, setShareUrl] = useState('');
-  const [shareExpires, setShareExpires] = useState('');
+  const [shareUrl, setShareUrl] = useState("");
+  const [shareExpires, setShareExpires] = useState("");
   const [sharing, setSharing] = useState(false);
-  const [shareError, setShareError] = useState('');
+  const [shareError, setShareError] = useState("");
   const [shareCopied, setShareCopied] = useState(false);
 
   async function mintShareLink() {
     setSharing(true);
-    setShareError('');
+    setShareError("");
     try {
-      const res = await fetch('/api/share-links', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ sshHostId: hostId, tmuxName: sessionName })
+      const res = await fetch("/api/share-links", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ sshHostId: hostId, tmuxName: sessionName }),
       });
       const body = await res.json().catch(() => ({}));
       if (!res.ok) {
         setShareError(body?.error || `Could not mint share link (HTTP ${res.status})`);
         return;
       }
-      setShareUrl(body.url || '');
-      setShareExpires(body.expiresAt || '');
+      setShareUrl(body.url || "");
+      setShareExpires(body.expiresAt || "");
     } finally {
       setSharing(false);
     }
   }
 
   async function copyShareUrl() {
-    if (!shareUrl) return;
-    try { await navigator.clipboard.writeText(shareUrl); } catch {}
+    if (!shareUrl) {
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(shareUrl);
+    } catch {}
     setShareCopied(true);
     window.setTimeout(() => setShareCopied(false), 1500);
   }
 
   return (
-    <div className="flex h-screen w-screen flex-col bg-bg text-text">
+    <div className="flex h-[var(--termag-viewport-height)] w-full flex-col bg-bg text-text">
       <header className="flex items-center justify-between border-b border-line bg-panel px-3 py-2">
         <div className="min-w-0">
           <div className="truncate text-sm font-semibold">
@@ -74,7 +78,9 @@ export function SshAttachShell({ hostId, hostName, hostLabel, sessionName }: Ssh
               {subscriberCount}
             </span>
           )}
-          <div className="text-xs text-muted">⌨️ keystrokes go straight to the remote tmux session</div>
+          <div className="text-xs text-muted">
+            ⌨️ keystrokes go straight to the remote tmux session
+          </div>
           {/* Share: mints a TTL'd read-only link for the same tmux
               session. Anyone with the link gets a view-only attach via
               the broker's share-terminal WS endpoint. */}
@@ -86,7 +92,7 @@ export function SshAttachShell({ hostId, hostName, hostLabel, sessionName }: Ssh
             title="Mint a 30-minute read-only share link"
           >
             <Share2 className="h-3 w-3" />
-            {sharing ? 'Minting…' : 'Share'}
+            {sharing ? "Minting…" : "Share"}
           </button>
         </div>
       </header>
@@ -95,7 +101,10 @@ export function SshAttachShell({ hostId, hostName, hostLabel, sessionName }: Ssh
           {shareError && <div className="text-bad">{shareError}</div>}
           {shareUrl && (
             <div className="flex items-center gap-2">
-              <span className="text-muted">Read-only link {shareExpires ? `(expires ${new Date(shareExpires).toLocaleTimeString()})` : ''}:</span>
+              <span className="text-muted">
+                Read-only link{" "}
+                {shareExpires ? `(expires ${new Date(shareExpires).toLocaleTimeString()})` : ""}:
+              </span>
               <code className="min-w-0 flex-1 break-all font-mono text-[11px]">{shareUrl}</code>
               <button
                 type="button"
@@ -103,7 +112,7 @@ export function SshAttachShell({ hostId, hostName, hostLabel, sessionName }: Ssh
                 className="inline-flex h-6 items-center gap-1 rounded border border-line bg-bg px-2 text-[10px] hover:bg-panel"
               >
                 {shareCopied ? <Check className="h-3 w-3" /> : <Copy className="h-3 w-3" />}
-                {shareCopied ? 'Copied' : 'Copy'}
+                {shareCopied ? "Copied" : "Copy"}
               </button>
             </div>
           )}
@@ -122,7 +131,8 @@ export function SshAttachShell({ hostId, hostName, hostLabel, sessionName }: Ssh
       {/* Detach hint: closing the tab IS the detach for web — the remote
           tmux session stays alive, other subscribers keep streaming. */}
       <footer className="border-t border-line bg-panel px-3 py-1 text-xs text-muted">
-        Close this tab to detach. The remote tmux session keeps running; reopen anytime to re-attach.
+        Close this tab to detach. The remote tmux session keeps running; reopen anytime to
+        re-attach.
       </footer>
     </div>
   );

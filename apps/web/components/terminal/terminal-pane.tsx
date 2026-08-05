@@ -54,6 +54,7 @@ const LIGHT_THEME: ITheme = {
 };
 
 const PAGE_SUSPEND_MS = 90_000;
+const RECONNECT_RESET_AFTER_MS = 60_000;
 const MAX_INPUT_CHARS = 32 * 1024;
 const XTERM_WRITE_PAUSE_BYTES = 1024 * 1024;
 const XTERM_WRITE_RESUME_BYTES = 256 * 1024;
@@ -202,6 +203,11 @@ function TerminalPaneImpl({
     null
   );
   const [pageActive, setPageActive] = useState(true);
+  const [connectionIssue, setConnectionIssue] = useState<{
+    fatal: boolean;
+    message: string;
+  } | null>(null);
+  const manualReconnectRef = useRef<(() => void) | null>(null);
   const sshHostId = ssh?.hostId;
   const sshTmuxName = ssh?.tmuxName;
   const shareCode = share?.code;
@@ -234,11 +240,14 @@ function TerminalPaneImpl({
     let observer: ResizeObserver | null = null;
     let onKill: ((event: Event) => void) | null = null;
     let onVisibilityRef: (() => void) | null = null;
+    let onOnlineRef: (() => void) | null = null;
+    let onVisualViewportRef: (() => void) | null = null;
     let unsubscribeTheme: (() => void) | null = null;
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
     let titleTimer: ReturnType<typeof setTimeout> | null = null;
     let pendingTitle = "";
     let reconnectAttempts = 0;
+    let connectedAt = 0;
     let fatalMessage = "";
     let resyncRequested = false;
     let queuedWriteBytes = 0;
@@ -280,6 +289,24 @@ function TerminalPaneImpl({
       });
     }
 
+    function fitAndResize() {
+      if (disposed || !term || !fitAddon) {
+        return;
+      }
+      fitAddon.fit();
+      const ws = wsRef.current;
+      if (ws?.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: "resize", cols: term.cols, rows: term.rows }));
+      }
+    }
+
+    function scheduleFit() {
+      if (resizeTimer) {
+        clearTimeout(resizeTimer);
+      }
+      resizeTimer = setTimeout(fitAndResize, 80);
+    }
+
     // WebSocket lifecycle is its own function so we can re-run it on disconnect.
     // All input sites (term.onData, onKill, onVisibility, ResizeObserver) read
     // wsRef.current at call time so they always target the latest socket — no
@@ -314,13 +341,15 @@ function TerminalPaneImpl({
       wsRef.current = ws;
 
       ws.onopen = () => {
+        connectedAt = Date.now();
         brokerPaused = false;
         visibilityPaused = document.visibilityState === "hidden";
         if (reconnectAttempts > 0) {
           writeTerminal("\r\n\x1b[2m[reconnected]\x1b[0m\r\n");
         }
         const justReconnected = reconnectAttempts > 0;
-        reconnectAttempts = 0;
+        fatalMessage = "";
+        setConnectionIssue(null);
         // Driver state is unknown until the agent's first driver-changed
         // message lands. Showing the previous connection's state would be
         // misleading after a reconnect (drive likely went to someone else).
@@ -411,6 +440,7 @@ function TerminalPaneImpl({
         if (event.code === 1008) {
           const reason = fatalMessage || event.reason || "session unavailable";
           writeTerminal(`\r\n\x1b[2m[disconnected: ${reason}]\x1b[0m\r\n`);
+          setConnectionIssue({ fatal: true, message: reason });
           return;
         }
         if (resyncRequested) {
@@ -421,14 +451,20 @@ function TerminalPaneImpl({
           }, 0);
           return;
         }
+        if (connectedAt > 0 && Date.now() - connectedAt >= RECONNECT_RESET_AFTER_MS) {
+          reconnectAttempts = 0;
+        }
+        connectedAt = 0;
         reconnectAttempts += 1;
+        setConnectionIssue({ fatal: false, message: "Connection lost" });
         if (reconnectAttempts === 1) {
           writeTerminal("\r\n\x1b[2m[disconnected, reconnecting…]\x1b[0m\r\n");
         }
         // Exponential backoff capped at 30s. Resets to 1s on next successful
         // open. Tab visibility doesn't pause this; the next visible tick will
         // open the new socket which fast-tracks recovery on a phone wake-up.
-        const delay = Math.min(30_000, 1000 * 2 ** Math.min(reconnectAttempts - 1, 5));
+        const ceiling = Math.min(30_000, 1000 * 2 ** Math.min(reconnectAttempts - 1, 5));
+        const delay = Math.round(ceiling * (0.5 + Math.random() * 0.5));
         reconnectTimer = setTimeout(() => {
           reconnectTimer = null;
           connectWS();
@@ -439,6 +475,36 @@ function TerminalPaneImpl({
         // do here. Suppress the noisy default console error.
       };
     }
+
+    function reconnectImmediately() {
+      if (disposed || !term) {
+        return;
+      }
+      if (reconnectTimer) {
+        clearTimeout(reconnectTimer);
+        reconnectTimer = null;
+      }
+      const current = wsRef.current;
+      if (current?.readyState === WebSocket.OPEN) {
+        return;
+      }
+      if (current) {
+        wsRef.current = null;
+        current.close();
+      }
+      connectWS();
+    }
+
+    manualReconnectRef.current = () => {
+      fatalMessage = "";
+      resyncRequested = false;
+      reconnectAttempts = 0;
+      setConnectionIssue(null);
+      const current = wsRef.current;
+      wsRef.current = null;
+      current?.close();
+      connectWS();
+    };
 
     void (async () => {
       const [{ Terminal }, { FitAddon }] = await Promise.all([
@@ -540,24 +606,29 @@ function TerminalPaneImpl({
       const onVisibility = () => {
         visibilityPaused = document.visibilityState === "hidden";
         syncBrokerPause();
+        if (!visibilityPaused) {
+          scheduleFit();
+          reconnectImmediately();
+        }
       };
       document.addEventListener("visibilitychange", onVisibility);
       onVisibilityRef = onVisibility;
+
+      const onOnline = () => reconnectImmediately();
+      window.addEventListener("online", onOnline);
+      onOnlineRef = onOnline;
+
+      const onVisualViewport = () => scheduleFit();
+      window.visualViewport?.addEventListener("resize", onVisualViewport);
+      window.visualViewport?.addEventListener("scroll", onVisualViewport);
+      window.addEventListener("orientationchange", onVisualViewport);
+      onVisualViewportRef = onVisualViewport;
 
       observer = new ResizeObserver(() => {
         if (disposed) {
           return;
         }
-        if (resizeTimer) {
-          clearTimeout(resizeTimer);
-        }
-        resizeTimer = setTimeout(() => {
-          fit.fit();
-          const ws = wsRef.current;
-          if (ws?.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify({ type: "resize", cols: term!.cols, rows: term!.rows }));
-          }
-        }, 120);
+        scheduleFit();
       });
       observer.observe(hostRef.current!);
 
@@ -591,6 +662,15 @@ function TerminalPaneImpl({
       if (onVisibilityRef) {
         document.removeEventListener("visibilitychange", onVisibilityRef);
       }
+      if (onOnlineRef) {
+        window.removeEventListener("online", onOnlineRef);
+      }
+      if (onVisualViewportRef) {
+        window.visualViewport?.removeEventListener("resize", onVisualViewportRef);
+        window.visualViewport?.removeEventListener("scroll", onVisualViewportRef);
+        window.removeEventListener("orientationchange", onVisualViewportRef);
+      }
+      manualReconnectRef.current = null;
       unsubscribeTheme?.();
       term?.dispose();
       termRef.current = null;
@@ -651,6 +731,20 @@ function TerminalPaneImpl({
         !hideHeader && "rounded-lg border border-line"
       )}
     >
+      {connectionIssue && (
+        <div className="absolute left-2 top-2 z-30 flex max-w-[calc(100%-1rem)] items-center gap-2 rounded-md border border-line bg-panel/95 px-2 py-1 text-[11px] text-muted shadow-lg backdrop-blur">
+          <span className="truncate">
+            {connectionIssue.fatal ? connectionIssue.message : "Reconnecting…"}
+          </span>
+          <button
+            type="button"
+            className="min-h-9 shrink-0 rounded border border-line bg-bg px-2 font-medium text-text hover:bg-panel2 md:min-h-7"
+            onClick={() => manualReconnectRef.current?.()}
+          >
+            Reconnect
+          </button>
+        </div>
+      )}
       {hideHeader && showBadge && (
         <button
           type="button"
@@ -767,26 +861,32 @@ function MobileSoftKeys({ onInput }: { onInput: (data: string) => void }) {
   return (
     <div className="md:hidden">
       {expanded === "fn" && (
-        <div className="flex shrink-0 flex-wrap items-center gap-1 border-t border-line bg-panel2 px-2 py-1">
+        <div className="grid shrink-0 grid-cols-4 gap-1 border-t border-line bg-panel2 px-2 py-1">
           {MOBILE_FN_KEYS.map(([label, data]) => (
             <SoftKeyButton key={label} label={label} onClick={() => onInput(data)} />
           ))}
         </div>
       )}
       {expanded === "extras" && (
-        <div className="flex shrink-0 flex-wrap items-center gap-1 border-t border-line bg-panel2 px-2 py-1">
+        <div className="grid shrink-0 grid-cols-4 gap-1 border-t border-line bg-panel2 px-2 py-1">
           {MOBILE_SECONDARY_KEYS.map(([label, data, title]) => (
             <SoftKeyButton key={label} label={label} title={title} onClick={() => onInput(data)} />
           ))}
         </div>
       )}
-      <div className="flex h-10 shrink-0 items-center gap-1 border-t border-line bg-panel2 px-2">
+      <div className="flex min-h-12 shrink-0 items-center gap-1 overflow-x-auto border-t border-line bg-panel2 px-2">
         {MOBILE_PRIMARY_KEYS.map(([label, data]) => (
-          <SoftKeyButton key={label} label={label} onClick={() => onInput(data)} />
+          <SoftKeyButton
+            key={label}
+            label={label}
+            danger={label === "C-c"}
+            onClick={() => onInput(data)}
+          />
         ))}
         <button
           type="button"
-          className="ml-auto h-7 min-w-8 rounded-md border border-line bg-bg px-2 text-xs"
+          className="ml-auto h-11 min-w-11 shrink-0 rounded-md border border-line bg-bg px-2 text-xs"
+          onPointerDown={event => event.preventDefault()}
           onClick={() => setExpanded(current => (current === "extras" ? "none" : "extras"))}
           aria-pressed={expanded === "extras"}
           title="More keys"
@@ -795,7 +895,8 @@ function MobileSoftKeys({ onInput }: { onInput: (data: string) => void }) {
         </button>
         <button
           type="button"
-          className="h-7 min-w-8 rounded-md border border-line bg-bg px-2 text-xs"
+          className="h-11 min-w-11 shrink-0 rounded-md border border-line bg-bg px-2 text-xs"
+          onPointerDown={event => event.preventDefault()}
           onClick={() => setExpanded(current => (current === "fn" ? "none" : "fn"))}
           aria-pressed={expanded === "fn"}
           title="Function keys"
@@ -810,16 +911,22 @@ function MobileSoftKeys({ onInput }: { onInput: (data: string) => void }) {
 function SoftKeyButton({
   label,
   title,
+  danger,
   onClick,
 }: {
   label: string;
   title?: string;
+  danger?: boolean;
   onClick: () => void;
 }) {
   return (
     <button
       type="button"
-      className="h-7 min-w-8 rounded-md border border-line bg-bg px-2 text-xs"
+      className={cn(
+        "h-11 min-w-11 shrink-0 rounded-md border bg-bg px-2 text-xs",
+        danger ? "border-bad/70 text-bad" : "border-line"
+      )}
+      onPointerDown={event => event.preventDefault()}
       onClick={onClick}
       title={title}
     >

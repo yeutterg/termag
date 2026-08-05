@@ -1,8 +1,8 @@
-'use client';
+"use client";
 
-import { Eye, Clock } from 'lucide-react';
-import { TerminalPane } from '@/components/terminal/terminal-pane';
-import { useEffect, useState } from 'react';
+import { Eye, Clock } from "lucide-react";
+import { TerminalPane } from "@/components/terminal/terminal-pane";
+import { useEffect, useState } from "react";
 
 interface ShareAttachShellProps {
   code: string;
@@ -11,7 +11,12 @@ interface ShareAttachShellProps {
   expiresAt: string;
 }
 
-export function ShareAttachShell({ code, hostName, sessionName, expiresAt }: ShareAttachShellProps) {
+export function ShareAttachShell({
+  code,
+  hostName,
+  sessionName,
+  expiresAt,
+}: ShareAttachShellProps) {
   const stableKey = `share:${code}`;
   const [subscriberCount, setSubscriberCount] = useState(1);
   const [now, setNow] = useState(() => Date.now());
@@ -25,12 +30,14 @@ export function ShareAttachShell({ code, hostName, sessionName, expiresAt }: Sha
   const expired = expiresInMs <= 0;
 
   return (
-    <div className="flex h-screen w-screen flex-col bg-bg text-text">
+    <div className="flex h-[var(--termag-viewport-height)] w-full flex-col bg-bg text-text">
       <header className="flex items-center justify-between border-b border-line bg-panel px-3 py-2">
         <div className="min-w-0">
           <div className="truncate text-sm font-semibold">
             {hostName} <span className="text-muted">/ {sessionName}</span>
-            <span className="ml-2 rounded-md bg-warn/15 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wider text-warn">read-only</span>
+            <span className="ml-2 rounded-md bg-warn/15 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wider text-warn">
+              read-only
+            </span>
           </div>
           <div className="truncate text-xs text-muted">shared session — input is disabled</div>
         </div>
@@ -41,9 +48,15 @@ export function ShareAttachShell({ code, hostName, sessionName, expiresAt }: Sha
               {subscriberCount}
             </span>
           )}
-          <span className={expired ? 'inline-flex items-center gap-1 text-xs text-bad' : 'inline-flex items-center gap-1 text-xs text-muted'}>
+          <span
+            className={
+              expired
+                ? "inline-flex items-center gap-1 text-xs text-bad"
+                : "inline-flex items-center gap-1 text-xs text-muted"
+            }
+          >
             <Clock className="h-3 w-3" />
-            {expired ? 'expired' : formatRemaining(expiresInMs)}
+            {expired ? "expired" : formatRemaining(expiresInMs)}
           </span>
         </div>
       </header>
@@ -71,6 +84,8 @@ function formatRemaining(ms: number): string {
   const totalSec = Math.max(0, Math.floor(ms / 1000));
   const m = Math.floor(totalSec / 60);
   const s = totalSec % 60;
-  if (m >= 60) return `${Math.floor(m / 60)}h ${m % 60}m`;
+  if (m >= 60) {
+    return `${Math.floor(m / 60)}h ${m % 60}m`;
+  }
   return `${m}m ${s}s`;
 }

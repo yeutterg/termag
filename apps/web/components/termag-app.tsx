@@ -1257,7 +1257,7 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
 
   return (
     <PlatformProvider platform={platform}>
-      <main className="flex h-dvh bg-bg text-text">
+      <main className="flex h-[var(--termag-viewport-height)] bg-bg text-text">
         {/* Sidebar: drawer-style on mobile, persistent on md+ */}
         {sidebarOpen && (
           <div
@@ -1270,7 +1270,7 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
           className={cn(
             "flex shrink-0 flex-col bg-panel transition-[width,transform] duration-150",
             // Mobile: full overlay drawer
-            "fixed inset-y-0 left-0 z-40 w-[260px] md:static md:translate-x-0",
+            "fixed inset-y-0 left-0 z-40 w-[min(86vw,320px)] md:static md:w-[260px] md:translate-x-0",
             sidebarOpen ? "translate-x-0" : "-translate-x-full md:w-0 md:overflow-hidden"
           )}
         >
@@ -1282,7 +1282,7 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
             <div className="relative flex items-center gap-0.5">
               <button
                 type="button"
-                className="grid h-7 w-7 place-items-center rounded-md text-muted hover:bg-panel2 hover:text-text"
+                className="grid h-11 w-11 place-items-center rounded-md text-muted hover:bg-panel2 hover:text-text md:h-7 md:w-7"
                 onPointerDown={event => event.stopPropagation()}
                 onClick={() => setCreateMenuOpen(value => !value)}
                 title="New device, session, or tmux connection"
@@ -1353,7 +1353,7 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
               )}
               <button
                 type="button"
-                className="grid h-7 w-7 place-items-center rounded-md text-muted hover:bg-panel2 hover:text-text"
+                className="grid h-11 w-11 place-items-center rounded-md text-muted hover:bg-panel2 hover:text-text md:h-7 md:w-7"
                 onClick={() => setSidebarOpen(false)}
                 title={`Collapse sidebar${shortcutSuffix(["mod", "\\"], platform)}`}
                 aria-label="Collapse sidebar"
@@ -1537,7 +1537,7 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
                               </div>
                               <button
                                 type="button"
-                                className="mr-1 grid h-6 w-6 shrink-0 place-items-center rounded text-muted opacity-0 hover:bg-bg hover:text-text focus:opacity-100 group-hover/project:opacity-100"
+                                className="mr-1 grid h-10 w-10 shrink-0 place-items-center rounded text-muted opacity-100 hover:bg-bg hover:text-text md:h-6 md:w-6 md:opacity-0 md:focus:opacity-100 md:group-hover/project:opacity-100"
                                 onPointerDown={event => event.stopPropagation()}
                                 onClick={event => {
                                   event.stopPropagation();
@@ -1591,7 +1591,7 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
                                         role="button"
                                         tabIndex={0}
                                         className={cn(
-                                          "group/tab flex h-7 w-full cursor-pointer items-center gap-2 rounded-md px-2 text-left text-xs hover:bg-panel2",
+                                          "group/tab flex h-10 w-full cursor-pointer items-center gap-2 rounded-md px-2 text-left text-xs hover:bg-panel2 md:h-7",
                                           isActiveTab && "bg-panel2 shadow-sm"
                                         )}
                                         onClick={() => selectTab(project.id, tab.id)}
@@ -1647,12 +1647,13 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
                                       browser notification for subscribed
                                       tabs only. */}
                                         {notify.permission !== "unsupported" && (
-                                          <span
+                                          <button
+                                            type="button"
                                             className={cn(
-                                              "grid h-4 w-4 shrink-0 place-items-center rounded text-muted hover:bg-bg hover:text-text",
+                                              "grid h-9 w-9 shrink-0 place-items-center rounded text-muted hover:bg-bg hover:text-text md:h-4 md:w-4",
                                               notify.subscribed.has(tab.id)
                                                 ? "opacity-100 text-accent"
-                                                : "opacity-0 group-hover/tab:opacity-100"
+                                                : "opacity-100 md:opacity-0 md:group-hover/tab:opacity-100"
                                             )}
                                             title={
                                               notify.subscribed.has(tab.id)
@@ -1672,11 +1673,12 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
                                             ) : (
                                               <BellOff className="h-3 w-3" />
                                             )}
-                                          </span>
+                                          </button>
                                         )}
                                         {project.tabs.length > 1 && (
-                                          <span
-                                            className="grid h-4 w-4 shrink-0 place-items-center rounded text-muted opacity-0 hover:bg-bg hover:text-text group-hover/tab:opacity-100"
+                                          <button
+                                            type="button"
+                                            className="grid h-9 w-9 shrink-0 place-items-center rounded text-muted opacity-100 hover:bg-bg hover:text-text md:h-4 md:w-4 md:opacity-0 md:group-hover/tab:opacity-100"
                                             title={
                                               tabManaged ? "Delete (kill tmux window)" : "Detach"
                                             }
@@ -1695,7 +1697,7 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
                                             }}
                                           >
                                             ×
-                                          </span>
+                                          </button>
                                         )}
                                       </div>
                                     </Fragment>
@@ -1752,7 +1754,7 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
               {!sidebarOpen && (
                 <button
                   type="button"
-                  className="grid h-8 w-8 shrink-0 place-items-center rounded-md text-muted hover:bg-panel2 hover:text-text"
+                  className="grid h-11 w-11 shrink-0 place-items-center rounded-md text-muted hover:bg-panel2 hover:text-text md:h-8 md:w-8"
                   onClick={() => setSidebarOpen(true)}
                   title={`Open sidebar${shortcutSuffix(["mod", "\\"], platform)}`}
                   aria-label="Open sidebar"
@@ -1842,7 +1844,7 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
               // ctrl shell. On desktop the ctrl shell is the side pane and the
               // pseudo-tab is hidden.
               <section className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-lg border border-line bg-bg">
-                <div className="flex h-9 items-end gap-px overflow-x-auto bg-panel pl-1.5 pr-1">
+                <div className="flex h-12 items-end gap-px overflow-x-auto bg-panel pl-1.5 pr-1 md:h-9">
                   {topTabs.map(tab => {
                     const paneGroup = tab.runtimeTabId
                       ? activeProject.tabs.filter(item => item.runtimeTabId === tab.runtimeTabId)
@@ -1860,7 +1862,7 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
                         role="button"
                         tabIndex={0}
                         className={cn(
-                          "group/tab flex h-7 cursor-pointer items-center gap-2 rounded-t-md px-3 text-xs",
+                          "group/tab flex h-11 cursor-pointer items-center gap-2 rounded-t-md px-3 text-xs md:h-7",
                           isActive ? "bg-bg text-text" : "text-muted hover:text-text"
                         )}
                         onClick={() => {
@@ -1902,8 +1904,9 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
                           onRename={next => renameTab(activeProject.id, tab.id, next, "tab")}
                         />
                         {topTabs.length > 1 && (
-                          <span
-                            className="grid h-4 w-4 shrink-0 place-items-center rounded text-muted opacity-0 hover:bg-panel2 hover:text-text group-hover/tab:opacity-100"
+                          <button
+                            type="button"
+                            className="grid h-11 w-11 shrink-0 place-items-center rounded text-muted opacity-100 hover:bg-panel2 hover:text-text md:h-4 md:w-4 md:opacity-0 md:group-hover/tab:opacity-100"
                             title={tabManaged ? "Delete (kill tmux window)" : "Detach"}
                             onClick={event => {
                               event.stopPropagation();
@@ -1911,14 +1914,14 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
                             }}
                           >
                             ×
-                          </span>
+                          </button>
                         )}
                       </div>
                     );
                   })}
                   <button
                     type="button"
-                    className="ml-1 flex h-7 items-center gap-1.5 rounded-t-md px-2 text-[11px] text-muted hover:text-text"
+                    className="ml-1 flex h-11 items-center gap-1.5 rounded-t-md px-3 text-[11px] text-muted hover:text-text md:h-7 md:px-2"
                     title={`New agent${shortcutSuffix(["mod", "enter"], platform)}`}
                     onClick={() => createTab(activeProject.id)}
                   >
@@ -1931,7 +1934,7 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
                       role="button"
                       tabIndex={0}
                       className={cn(
-                        "group/tab ml-auto flex h-7 cursor-pointer items-center gap-2 rounded-t-md px-3 text-xs md:hidden",
+                        "group/tab ml-auto flex h-11 cursor-pointer items-center gap-2 rounded-t-md px-3 text-xs md:hidden",
                         mobileViewCtrl ? "bg-bg text-text" : "text-muted hover:text-text"
                       )}
                       onClick={() => setMobileViewCtrl(true)}
@@ -2176,7 +2179,7 @@ function IconButton({
   return (
     <button
       className={cn(
-        "grid h-8 w-8 place-items-center rounded-md text-muted hover:bg-panel2 hover:text-text",
+        "grid h-11 w-11 place-items-center rounded-md text-muted hover:bg-panel2 hover:text-text md:h-8 md:w-8",
         className
       )}
       title={title}
