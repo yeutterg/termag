@@ -14,6 +14,7 @@ export default [
       "*.config.mjs",
       "coverage/**",
       "apps/web/.next/**",
+      "apps/web/next-env.d.ts",
       "apps/agent/dist/**"
     ]
   },
@@ -79,7 +80,10 @@ export default [
     }
   },
   {
-    files: ["apps/web/server/broker.js"],
+    files: ["apps/web/**/*.js"],
+    languageOptions: {
+      sourceType: "commonjs"
+    },
     rules: {
       "@typescript-eslint/no-require-imports": "off"
     }

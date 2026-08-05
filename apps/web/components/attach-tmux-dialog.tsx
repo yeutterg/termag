@@ -1,7 +1,7 @@
-'use client';
+"use client";
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
-import { Check, Copy, RefreshCw, Search } from 'lucide-react';
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { Check, Copy, RefreshCw, Search } from "lucide-react";
 
 type TmuxWindow = {
   index: number;
@@ -22,27 +22,37 @@ type TmuxSession = {
 interface AttachTmuxDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  onAttach: (session: { rootKey: string; sessionName: string }) => Promise<{ ok: boolean; error?: string }>;
+  onAttach: (session: {
+    rootKey: string;
+    sessionName: string;
+  }) => Promise<{ ok: boolean; error?: string }>;
 }
 
 export function AttachTmuxDialog({ open, onOpenChange, onAttach }: AttachTmuxDialogProps) {
   const [sessions, setSessions] = useState<TmuxSession[]>([]);
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState('');
-  const [attaching, setAttaching] = useState('');
-  const [query, setQuery] = useState('');
-  const [copied, setCopied] = useState('');
+  const [error, setError] = useState("");
+  const [attaching, setAttaching] = useState("");
+  const [query, setQuery] = useState("");
+  const [copied, setCopied] = useState("");
 
   const groups = useMemo(() => {
     const next = new Map<string, TmuxSession[]>();
     const needle = query.trim().toLowerCase();
     const visible = needle
-      ? sessions.filter((session) => [
-        session.rootKey,
-        session.name,
-        session.path,
-        ...session.windows.flatMap((window) => [window.name, window.id, window.target, window.path])
-      ].some((value) => value?.toLowerCase().includes(needle)))
+      ? sessions.filter(session =>
+          [
+            session.rootKey,
+            session.name,
+            session.path,
+            ...session.windows.flatMap(window => [
+              window.name,
+              window.id,
+              window.target,
+              window.path,
+            ]),
+          ].some(value => value?.toLowerCase().includes(needle))
+        )
       : sessions;
     for (const session of visible) {
       next.set(session.rootKey, [...(next.get(session.rootKey) ?? []), session]);
@@ -52,13 +62,15 @@ export function AttachTmuxDialog({ open, onOpenChange, onAttach }: AttachTmuxDia
 
   const loadSessions = useCallback(async () => {
     setLoading(true);
-    setError('');
+    setError("");
     try {
-      const res = await fetch('/api/tmux/sessions');
-      if (!res.ok) throw new Error('Could not load tmux sessions');
+      const res = await fetch("/api/tmux/sessions");
+      if (!res.ok) {
+        throw new Error("Could not load tmux sessions");
+      }
       setSessions(await res.json());
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Could not load tmux sessions');
+      setError(err instanceof Error ? err.message : "Could not load tmux sessions");
       setSessions([]);
     } finally {
       setLoading(false);
@@ -66,17 +78,21 @@ export function AttachTmuxDialog({ open, onOpenChange, onAttach }: AttachTmuxDia
   }, []);
 
   useEffect(() => {
-    if (open) void loadSessions();
+    if (!open) {
+      return;
+    }
+    const timer = window.setTimeout(() => void loadSessions(), 0);
+    return () => window.clearTimeout(timer);
   }, [loadSessions, open]);
 
   async function attach(session: TmuxSession) {
     const key = `${session.rootKey}:${session.name}`;
     setAttaching(key);
-    setError('');
+    setError("");
     const result = await onAttach({ rootKey: session.rootKey, sessionName: session.name });
-    setAttaching('');
+    setAttaching("");
     if (!result.ok) {
-      setError(result.error || 'Could not attach that tmux session.');
+      setError(result.error || "Could not attach that tmux session.");
       await loadSessions();
       return;
     }
@@ -87,37 +103,48 @@ export function AttachTmuxDialog({ open, onOpenChange, onAttach }: AttachTmuxDia
     try {
       await navigator.clipboard.writeText(value);
     } catch {
-      const textarea = document.createElement('textarea');
+      const textarea = document.createElement("textarea");
       textarea.value = value;
-      textarea.style.position = 'fixed';
-      textarea.style.opacity = '0';
+      textarea.style.position = "fixed";
+      textarea.style.opacity = "0";
       document.body.appendChild(textarea);
       textarea.select();
-      document.execCommand('copy');
+      document.execCommand("copy");
       document.body.removeChild(textarea);
     }
     setCopied(id);
-    window.setTimeout(() => setCopied((current) => (current === id ? '' : current)), 1500);
+    window.setTimeout(() => setCopied(current => (current === id ? "" : current)), 1500);
   }
 
-  if (!open) return null;
+  if (!open) {
+    return null;
+  }
   return (
     <div className="fixed inset-0 z-50 bg-black/35 p-4" onClick={() => onOpenChange(false)}>
-      <section className="mx-auto mt-[8vh] flex max-h-[82vh] max-w-2xl flex-col rounded-lg border border-line bg-panel p-4 shadow-2xl" onClick={(event) => event.stopPropagation()}>
+      <section
+        className="mx-auto mt-[8vh] flex max-h-[82vh] max-w-2xl flex-col rounded-lg border border-line bg-panel p-4 shadow-2xl"
+        onClick={event => event.stopPropagation()}
+      >
         <div className="mb-4 flex items-start justify-between gap-3">
           <div>
             <h2 className="text-base font-semibold">Connect tmux session</h2>
-            <p className="mt-1 text-sm text-muted">Pick a running tmux session and Termag will add its windows as tabs.</p>
+            <p className="mt-1 text-sm text-muted">
+              Pick a running tmux session and Termag will add its windows as tabs.
+            </p>
           </div>
           <div className="flex shrink-0 items-center gap-1">
             <button
               type="button"
               className="inline-flex h-8 items-center gap-1.5 rounded-md border border-line bg-bg px-2 text-xs text-muted hover:bg-panel2 hover:text-text"
-              onClick={() => copyText('adopt', 'termag adopt')}
+              onClick={() => copyText("adopt", "termag adopt")}
               title="Copy shell command to connect the current tmux session"
             >
-              {copied === 'adopt' ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
-              {copied === 'adopt' ? 'Copied' : 'termag adopt'}
+              {copied === "adopt" ? (
+                <Check className="h-3.5 w-3.5" />
+              ) : (
+                <Copy className="h-3.5 w-3.5" />
+              )}
+              {copied === "adopt" ? "Copied" : "termag adopt"}
             </button>
             <button
               type="button"
@@ -137,30 +164,42 @@ export function AttachTmuxDialog({ open, onOpenChange, onAttach }: AttachTmuxDia
             <Search className="h-3.5 w-3.5 shrink-0 text-muted" />
             <input
               value={query}
-              onChange={(event) => setQuery(event.target.value)}
+              onChange={event => setQuery(event.target.value)}
               placeholder="Filter sessions or windows"
               className="min-w-0 flex-1 bg-transparent outline-none placeholder:text-muted"
             />
           </label>
-          {loading && <div className="rounded-md border border-line bg-bg p-3 text-sm text-muted">Loading connected devices...</div>}
+          {loading && (
+            <div className="rounded-md border border-line bg-bg p-3 text-sm text-muted">
+              Loading connected devices...
+            </div>
+          )}
           {!loading && groups.length === 0 && (
             <div className="rounded-md border border-line bg-bg p-3 text-sm text-muted">
-              {sessions.length === 0 ? 'No unattached tmux sessions found on connected devices.' : 'No tmux sessions match the filter.'}
+              {sessions.length === 0
+                ? "No unattached tmux sessions found on connected devices."
+                : "No tmux sessions match the filter."}
             </div>
           )}
           <div className="space-y-4">
             {groups.map(([device, deviceSessions]) => (
               <section key={device}>
-                <div className="mb-1 px-1 text-[10px] font-medium uppercase tracking-wider text-muted">{device}</div>
+                <div className="mb-1 px-1 text-[10px] font-medium uppercase tracking-wider text-muted">
+                  {device}
+                </div>
                 <div className="space-y-2">
-                  {deviceSessions.map((session) => {
+                  {deviceSessions.map(session => {
                     const sessionKey = `${session.rootKey}:${session.name}`;
                     return (
                       <div key={sessionKey} className="rounded-md border border-line bg-bg p-3">
                         <div className="flex items-start justify-between gap-3">
                           <div className="min-w-0">
                             <div className="truncate text-sm font-medium">{session.name}</div>
-                            {session.path && <div className="mt-0.5 truncate font-mono text-[11px] text-muted">{session.path}</div>}
+                            {session.path && (
+                              <div className="mt-0.5 truncate font-mono text-[11px] text-muted">
+                                {session.path}
+                              </div>
+                            )}
                           </div>
                           <button
                             type="button"
@@ -168,14 +207,21 @@ export function AttachTmuxDialog({ open, onOpenChange, onAttach }: AttachTmuxDia
                             disabled={attaching === sessionKey}
                             onClick={() => attach(session)}
                           >
-                            {attaching === sessionKey ? 'Attaching' : 'Attach'}
+                            {attaching === sessionKey ? "Attaching" : "Attach"}
                           </button>
                         </div>
                         <div className="mt-3 space-y-1 pl-2">
-                          {session.windows.map((window) => (
-                            <div key={window.target} className="flex h-7 items-center gap-2 rounded px-2 text-xs text-muted">
-                              <span className="w-6 shrink-0 font-mono text-[10px]">{window.index}</span>
-                              <span className="min-w-0 flex-1 truncate text-text">{window.name || window.id}</span>
+                          {session.windows.map(window => (
+                            <div
+                              key={window.target}
+                              className="flex h-7 items-center gap-2 rounded px-2 text-xs text-muted"
+                            >
+                              <span className="w-6 shrink-0 font-mono text-[10px]">
+                                {window.index}
+                              </span>
+                              <span className="min-w-0 flex-1 truncate text-text">
+                                {window.name || window.id}
+                              </span>
                               <span className="shrink-0 font-mono text-[10px]">{window.id}</span>
                             </div>
                           ))}

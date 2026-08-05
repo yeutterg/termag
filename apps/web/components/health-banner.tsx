@@ -1,12 +1,12 @@
-'use client';
+"use client";
 
-import { useEffect, useState } from 'react';
-import { AlertTriangle, Info, ShieldAlert, X } from 'lucide-react';
-import { cn } from '@/lib/utils';
+import { useEffect, useState } from "react";
+import { AlertTriangle, Info, ShieldAlert, X } from "lucide-react";
+import { cn } from "@/lib/utils";
 
 type ConfigWarning = {
   id: string;
-  level: 'critical' | 'warn' | 'info';
+  level: "critical" | "warn" | "info";
   title: string;
   detail: string;
   action?: { label: string; href: string } | null;
@@ -19,14 +19,18 @@ type ConfigWarning = {
 // usually merits attention again anyway).
 
 const POLL_INTERVAL_MS = 60_000;
-const DISMISS_STORAGE_KEY = 'termag.health.dismissed.v1';
+const DISMISS_STORAGE_KEY = "termag.health.dismissed.v1";
 
 function readDismissed(): string[] {
   try {
     const raw = localStorage.getItem(DISMISS_STORAGE_KEY);
-    if (!raw) return [];
+    if (!raw) {
+      return [];
+    }
     const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed.filter((value): value is string => typeof value === 'string') : [];
+    return Array.isArray(parsed)
+      ? parsed.filter((value): value is string => typeof value === "string")
+      : [];
   } catch {
     return [];
   }
@@ -40,15 +44,18 @@ function writeDismissed(ids: string[]): void {
 
 export function HealthBanner() {
   const [warnings, setWarnings] = useState<ConfigWarning[]>([]);
-  const [dismissed, setDismissed] = useState<string[]>([]);
+  const [dismissed, setDismissed] = useState<string[]>(() =>
+    typeof window === "undefined" ? [] : readDismissed()
+  );
 
   useEffect(() => {
-    setDismissed(readDismissed());
     let cancelled = false;
     async function load() {
       try {
-        const res = await fetch('/api/health');
-        if (!res.ok) return;
+        const res = await fetch("/api/health");
+        if (!res.ok) {
+          return;
+        }
         const body = await res.json();
         if (!cancelled && Array.isArray(body?.warnings)) {
           setWarnings(body.warnings);
@@ -71,26 +78,32 @@ export function HealthBanner() {
     writeDismissed(next);
   }
 
-  const visible = warnings.filter((w) => !dismissed.includes(w.id));
-  if (visible.length === 0) return null;
+  const visible = warnings.filter(w => !dismissed.includes(w.id));
+  if (visible.length === 0) {
+    return null;
+  }
 
   return (
     <div className="flex flex-col gap-1.5 border-b border-line bg-bg px-3 py-2">
-      {visible.map((w) => (
+      {visible.map(w => (
         <div
           key={w.id}
-          role={w.level === 'critical' ? 'alert' : 'note'}
+          role={w.level === "critical" ? "alert" : "note"}
           className={cn(
-            'flex items-start gap-2 rounded-md border px-3 py-2 text-xs',
-            w.level === 'critical' && 'border-bad/40 bg-bad/10 text-bad',
-            w.level === 'warn' && 'border-warn/40 bg-warn/10 text-warn',
-            w.level === 'info' && 'border-line bg-panel2 text-muted'
+            "flex items-start gap-2 rounded-md border px-3 py-2 text-xs",
+            w.level === "critical" && "border-bad/40 bg-bad/10 text-bad",
+            w.level === "warn" && "border-warn/40 bg-warn/10 text-warn",
+            w.level === "info" && "border-line bg-panel2 text-muted"
           )}
         >
           <span className="mt-0.5 shrink-0">
-            {w.level === 'critical' ? <ShieldAlert className="h-3.5 w-3.5" /> :
-              w.level === 'warn' ? <AlertTriangle className="h-3.5 w-3.5" /> :
-                <Info className="h-3.5 w-3.5" />}
+            {w.level === "critical" ? (
+              <ShieldAlert className="h-3.5 w-3.5" />
+            ) : w.level === "warn" ? (
+              <AlertTriangle className="h-3.5 w-3.5" />
+            ) : (
+              <Info className="h-3.5 w-3.5" />
+            )}
           </span>
           <div className="min-w-0 flex-1">
             <div className="font-medium">{w.title}</div>

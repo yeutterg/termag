@@ -5,35 +5,41 @@ The latter claimed "ALL FEATURES COMPLETED (22 out of 21)" in one section and
 "Remaining Implementations (9 out of 21)" in another, so neither could be
 trusted as a status record.
 
-Status below is by module presence in `apps/web`, not by any prior claim. A
-module existing does not mean the feature is wired into the UI or that it
-typechecks — see `docs/COMMAND_PALETTE.md` for the parts that do not.
+Status below is by a reachable path from the live app. Merely having a module
+on disk is not counted as a feature.
 
 ## Shipped and wired
 
-| Feature                 | Where                                                             |
-| ----------------------- | ----------------------------------------------------------------- |
-| Toast notifications     | `components/toast-provider.tsx`, `components/toast-container.tsx` |
-| Keyboard shortcut help  | `components/termag-app.tsx`                                       |
-| Drag-and-drop tabs      | `components/draggable-tab.tsx`                                    |
-| Terminal search         | `components/search-dialog.tsx`                                    |
-| Theme and font controls | `app/globals.css`, `tailwind.config.ts`                           |
-| Touch gestures          | `lib/use-touch-gestures.ts`                                       |
-| Offline handling        | `lib/offline-manager.ts`, `public/sw.js`                          |
-| Accessibility helpers   | `lib/accessibility.ts`, `components/skip-links.tsx`               |
+| Feature                         | Where                                             |
+| ------------------------------- | ------------------------------------------------- |
+| Keyboard shortcut help          | `components/termag-app.tsx`                       |
+| Project and tab reordering      | `components/termag-app.tsx`                       |
+| Theme and font controls         | `app/globals.css`, `tailwind.config.ts`           |
+| Terminal touch/swipe navigation | `components/terminal/terminal-pane.tsx`           |
+| Accessible labels and dialogs   | live components under `components/`               |
+| Runtime-safe command palette    | `components/command-palette.tsx`, navigation only |
 
 ## Present but not fully integrated
 
 These have a module and no complete path from the UI, or depend on the v1-only
 command channel:
 
-| Feature                  | Where                                                              | Blocker                                         |
-| ------------------------ | ------------------------------------------------------------------ | ----------------------------------------------- |
-| Command snippets         | `lib/command-snippets.ts`                                          | not surfaced in the palette                     |
-| Session bookmarks        | `lib/session-bookmarks.ts`                                         | not surfaced in the palette                     |
-| Session templates        | `lib/session-templates.ts`                                         | creation path is v1-only                        |
-| Session history/recovery | `lib/session-history.ts`, `components/session-recovery-dialog.tsx` | `lib/session-integration.ts` does not typecheck |
-| Clipboard history        | `lib/clipboard-history.ts`                                         | no UI entry point                               |
+| Feature           | Where                      | Blocker                     |
+| ----------------- | -------------------------- | --------------------------- |
+| Command snippets  | `lib/command-snippets.ts`  | not surfaced in the palette |
+| Session bookmarks | `lib/session-bookmarks.ts` | not surfaced in the palette |
+| Session templates | `lib/session-templates.ts` | no live creation UI         |
+| Session history   | `lib/session-history.ts`   | no live recovery UI         |
+| Clipboard history | `lib/clipboard-history.ts` | no live dialog              |
+
+## Retired scaffolding
+
+The old example command-palette execution tree, arbitrary shell-command
+facade, unmounted toast/dialog tree, duplicate touch hook, and standalone
+observability experiments were deleted. They had no importer from the live
+application and several referenced database fields that no longer exist.
+Future git or filesystem actions must use typed Protocol v2 operations rather
+than reviving the arbitrary `execute-command` channel.
 
 ## Not implemented
 

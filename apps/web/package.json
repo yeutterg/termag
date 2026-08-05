@@ -8,7 +8,7 @@
     "start": "NODE_ENV=production node server.js",
     "lint": "eslint . --ext .ts,.tsx,.js",
     "lint:fix": "eslint . --ext .ts,.tsx,.js --fix",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "prisma generate && next typegen && tsc --noEmit",
     "db:generate": "prisma generate",
     "db:migrate": "prisma migrate dev",
     "db:deploy": "prisma migrate deploy",

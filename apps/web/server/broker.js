@@ -2472,18 +2472,6 @@ function createBroker({ prisma, wss }) {
       }
       return sendToAgent(userId, deviceName, operation, payload, timeoutMs);
     },
-    async executeCommand(userId, deviceName, command, workingDirectory, timeoutMs = 30000) {
-      if (!agentForUser(userId, deviceName)) {
-        throw new Error("Agent offline");
-      }
-      return sendToAgent(
-        userId,
-        deviceName,
-        "execute-command",
-        { command, workingDirectory },
-        timeoutMs
-      );
-    },
     async startCaffeinate(userId, deviceName, mode, reason, durationMs) {
       const agent = agentForUser(userId, deviceName);
       if (!agent) {

@@ -40,13 +40,6 @@ type Broker = {
     sessions?: Array<{ name: string; windowCount: number; path: string }>;
   }>;
   forgetSshHost?: (userId: string, hostId: string) => void;
-  executeCommand?: (
-    userId: string,
-    deviceName: string,
-    command: string,
-    workingDirectory?: string,
-    timeoutMs?: number
-  ) => Promise<{ output: string; exitCode: number }>;
   startCaffeinate?: (
     userId: string,
     deviceName: string,
@@ -311,23 +304,6 @@ export async function probeRegisteredSshHost(userId: string, hostId: string) {
  */
 export function forgetSshHostInBroker(userId: string, hostId: string): void {
   broker()?.forgetSshHost?.(userId, hostId);
-}
-
-/**
- * Execute a shell command on a device's agent
- */
-export async function executeCommandOnDevice(
-  userId: string,
-  deviceName: string,
-  command: string,
-  workingDirectory?: string,
-  timeoutMs: number = 30000
-): Promise<{ output: string; exitCode: number }> {
-  const live = broker();
-  if (!live?.executeCommand) {
-    throw new Error("Broker offline or does not support command execution");
-  }
-  return live.executeCommand(userId, deviceName, command, workingDirectory, timeoutMs);
 }
 
 /**

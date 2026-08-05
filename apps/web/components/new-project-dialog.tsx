@@ -49,7 +49,9 @@ export function NewProjectDialog({
 }: NewProjectDialogProps) {
   const devices = useMemo(() => {
     const names = new Set<string>(knownDeviceNames);
-    for (const device of agentDevices) names.add(device.name);
+    for (const device of agentDevices) {
+      names.add(device.name);
+    }
     return [...names];
   }, [agentDevices, knownDeviceNames]);
 
@@ -67,18 +69,23 @@ export function NewProjectDialog({
   const [runtimeSessionId, setRuntimeSessionId] = useState("");
 
   useEffect(() => {
-    if (!open) return;
+    if (!open) {
+      return;
+    }
     let cancelled = false;
-    setTokensLoaded(false);
     fetch("/api/agent-tokens")
       .then(res => (res.ok ? res.json() : []))
       .then(next => {
-        if (cancelled) return;
+        if (cancelled) {
+          return;
+        }
         setTokens(Array.isArray(next) ? next : []);
         setTokensLoaded(true);
       })
       .catch(() => {
-        if (cancelled) return;
+        if (cancelled) {
+          return;
+        }
         setTokens([]);
         setTokensLoaded(true);
       });
@@ -88,21 +95,20 @@ export function NewProjectDialog({
   }, [open]);
 
   useEffect(() => {
-    if (!open) return;
-    if (selectedDevice && devices.includes(selectedDevice)) {
-      setDeviceName(selectedDevice);
-    } else if (deviceName && devices.includes(deviceName)) {
-      // keep
-    } else if (devices.length > 0) {
-      setDeviceName(devices[0]);
-    } else {
-      setDeviceName("");
+    if (!open) {
+      return;
     }
-    setError("");
-    setSubmitting(false);
-    setRuntime(null);
-    setRuntimeSessionId("");
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    queueMicrotask(() => {
+      setDeviceName(current => {
+        if (selectedDevice && devices.includes(selectedDevice)) {
+          return selectedDevice;
+        }
+        if (current && devices.includes(current)) {
+          return current;
+        }
+        return devices[0] ?? "";
+      });
+    });
   }, [open, selectedDevice, devices.join("\0")]);
 
   const currentDevice = useMemo(
@@ -127,7 +133,9 @@ export function NewProjectDialog({
       currentDevice?.roots && Object.keys(currentDevice.roots).length > 0
         ? currentDevice.roots
         : null;
-    if (reported) return reported;
+    if (reported) {
+      return reported;
+    }
     // Fallback: the device hasn't reported health yet but we know its name —
     // assume the convention (rootKey == deviceName, path unknown). The user
     // can still type a path via the browser's "type a path" mode.
@@ -139,22 +147,27 @@ export function NewProjectDialog({
 
   // When the device or its defaults change, reset the picker.
   useEffect(() => {
-    if (!open) return;
-    setRootKey(
-      defaultRootKey && deviceRoots[defaultRootKey] !== undefined
-        ? defaultRootKey
-        : (Object.keys(deviceRoots)[0] ?? "")
-    );
-    setRelativePath(
-      defaultRootKey && deviceRoots[defaultRootKey] !== undefined ? defaultRelativePath : ""
-    );
-    setError("");
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    if (!open) {
+      return;
+    }
+    queueMicrotask(() => {
+      setRootKey(
+        defaultRootKey && deviceRoots[defaultRootKey] !== undefined
+          ? defaultRootKey
+          : (Object.keys(deviceRoots)[0] ?? "")
+      );
+      setRelativePath(
+        defaultRootKey && deviceRoots[defaultRootKey] !== undefined ? defaultRelativePath : ""
+      );
+      setError("");
+    });
   }, [open, deviceName, tokensLoaded, defaultRootKey, defaultRelativePath]);
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (submitting) return;
+    if (submitting) {
+      return;
+    }
     if (!deviceName) {
       setError("Create a device first.");
       return;
@@ -195,7 +208,9 @@ export function NewProjectDialog({
     onOpenChange(false);
   }
 
-  if (!open) return null;
+  if (!open) {
+    return null;
+  }
   return (
     <div className="fixed inset-0 z-50 bg-black/35 p-4" onClick={() => onOpenChange(false)}>
       <section
@@ -272,6 +287,7 @@ export function NewProjectDialog({
             </div>
             {deviceName ? (
               <DirectoryBrowser
+                key={`${deviceName}:${defaultRootKey}:${defaultRelativePath}`}
                 deviceName={deviceName}
                 roots={deviceRoots}
                 initialRootKey={rootKey || defaultRootKey || undefined}
