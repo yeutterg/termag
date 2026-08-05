@@ -1,3 +1,4 @@
+mod cli;
 mod config;
 mod fs_policy;
 mod herdr;
@@ -41,8 +42,7 @@ const RECONNECT_RESET_AFTER: Duration = Duration::from_secs(60);
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
-    if matches!(std::env::args().nth(1).as_deref(), Some("--version" | "-V")) {
-        println!("termag-agent {VERSION}");
+    if cli::run(VERSION).await? {
         return Ok(());
     }
     let config = Arc::new(Config::load()?);
@@ -354,9 +354,6 @@ async fn handle_request(
             }
             kind if kind.starts_with("runtime.") || kind.starts_with("tmux-") => {
                 handle_runtime_request(config, &incoming).await
-            }
-            "execute-command" => {
-                anyhow::bail!("execute-command was removed in protocol v2; use a typed operation")
             }
             _ => anyhow::bail!("unknown command: {}", incoming.kind),
         }
