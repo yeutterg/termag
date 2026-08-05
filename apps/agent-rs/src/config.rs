@@ -96,8 +96,8 @@ impl Config {
             .ok()
             .and_then(|v| v.parse().ok())
             .or(file.inventory_interval_ms)
-            .unwrap_or(2_000)
-            .clamp(500, 60_000);
+            .unwrap_or(5_000)
+            .clamp(1_000, 60_000);
 
         Ok(Self {
             url,

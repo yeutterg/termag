@@ -23,13 +23,15 @@ Stable runtime IDs (HerdR `w*/t*/p*`, tmux `$*/@*/%*`) are persisted separately 
 
 ## HerdR coexistence
 
-Termag does not patch, fork, launch, or own HerdR. It discovers running HerdR sessions with `herdr session list --json`, reads snapshots over each documented Unix socket, and uses the documented terminal observer/controller commands. Session discovery is cached for 30 seconds; live state comes directly from the socket.
+Termag does not patch, fork, launch, or own HerdR. It discovers running HerdR sessions with `herdr session list --json`, reads snapshots and subscribes to organization/status events over each documented Unix socket, and refreshes only the changed runtime. Session discovery is cached for 30 seconds. Terminal bytes stay behind HerdR's public `herdr terminal session observe/control` process boundary; one helper is shared per open target and no helper remains while the cloud viewer is closed.
 
-The cloud mirrors HerdR spaces, tabs, panes, split rectangles, agent statuses, and the configured dot/symbol status style. Typed create, rename, close, and pane operations call HerdR's public API and are reflected back by the next inventory snapshot.
+The cloud mirrors HerdR spaces, tabs, panes, split rectangles, and agent statuses, and renders HerdR's native dot/icon glyph vocabulary. Typed create, rename, close, and pane operations call HerdR's public API and are reflected back by the next inventory snapshot.
 
 ## Terminal ownership
 
-One local stream is shared by every cloud viewer of the same runtime target. New viewers are observers. A writable driver is assigned only after an explicit `terminal-claim-drive`. When the HerdR driver disconnects, the controller is released and the shared stream returns to observer mode.
+One local stream is shared by every cloud viewer of the same runtime target. Terminal output is binary and is emitted once per target, then fanned out by the broker. Bounded full checkpoints make reconnects deterministic without an unbounded cloud ANSI log. If a bounded output queue ever fills, the agent sends an explicit continuity-gap event and the browser reconnects for a new checkpoint; bytes are never silently omitted from a supposedly valid replay. New viewers are observers. A writable driver is assigned only after an explicit `terminal-claim-drive`, and the lease expires after five minutes without input. When the HerdR driver disconnects, the controller is released and the shared stream returns to observer mode.
+
+tmux viewers use a control-mode client with `ignore-size`, filter output to the stable pane ID, and inject input directly into that pane. They never select a tmux window or pane and never resize the shared window, so opening or resizing a browser terminal cannot move or reflow the terminal shown on the physical machine. Non-target panes are disabled on the control client to keep background traffic low.
 
 ## Directory policy
 
@@ -42,7 +44,7 @@ Existing sessions are always discoverable. New sessions and tabs are restricted 
 - `ac-awake`: `caffeinate -s`
 - `off`: stop only the child process owned by this daemon
 
-Duration is optional. This cannot keep a Mac awake with the lid physically closed.
+Protocol-v2 power requests are renewable, client-scoped leases. The strongest live lease determines the single owned `caffeinate` child; expired leases are reaped automatically. The child also watches the daemon PID, so a crash or forced service stop releases the assertion. Duration is optional on the legacy compatibility request. This cannot keep a Mac awake with the lid physically closed.
 
 ## Compatibility and limits
 

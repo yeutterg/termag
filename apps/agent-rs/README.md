@@ -4,7 +4,7 @@ This is the Protocol v2 replacement for the Node laptop agent. It is an outbound
 
 There is no menu-bar process or desktop UI. Terminal helpers are spawned only while a cloud viewer is attached; idle inventory uses a single current-thread async runtime.
 
-It mirrors every local tmux session and every running HerdR session. HerdR metadata comes from its documented local socket API; terminal viewing/control uses the public `herdr terminal session observe/control` commands on demand. When HerdR is absent, tmux remains fully available.
+It mirrors every local tmux session and every running HerdR session. HerdR metadata comes from its documented local socket API; terminal viewing/control stays behind HerdR's public `herdr terminal session observe/control` process boundary. One helper is shared by all cloud viewers of a pane and exists only while that pane is open. Termag does not copy, patch, launch, or own HerdR. When HerdR is absent, tmux remains fully available.
 
 ## Build and run
 
@@ -27,12 +27,12 @@ Creation and browsing are restricted to the user's home directory by default. Co
 }
 ```
 
-Power modes are `off`, `terminals-awake` (`caffeinate -i`), `display-awake` (`caffeinate -d -i`), and `ac-awake` (`caffeinate -s`). The daemon only signals the child process it created.
+Power modes are `off`, `terminals-awake` (`caffeinate -i`), `display-awake` (`caffeinate -d -i`), and `ac-awake` (`caffeinate -s`). Protocol-v2 clients use renewable machine-scoped leases, so one browser cannot cancel another browser's lease and abandoned leases expire. The daemon only signals the child process it created.
 
 ## Footprint targets
 
-- stripped release binary: at most 15 MiB (968 KiB measured on Apple Silicon)
-- idle RSS: at most 20 MiB (7 MiB measured with a live HerdR session)
-- idle CPU: below 0.5% (0.0% measured during the integration run)
+- stripped release binary: at most 15 MiB (1.0 MiB measured on Apple Silicon)
+- idle RSS: at most 20 MiB (6.8 MiB measured while connected with a live HerdR session)
+- idle CPU: below 0.5% when runtimes are quiet; active HerdR event mirroring scales with real state changes
 
 CI builds and tests on macOS and Linux and enforces the binary-size ceiling.

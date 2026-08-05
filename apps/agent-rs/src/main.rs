@@ -17,11 +17,16 @@ use std::{
     collections::BTreeMap,
     time::{Duration, Instant},
 };
-use terminal::{Registry, Target};
+use terminal::{
+    next_terminal_sequence, terminal_checkpoint_flags, terminal_chunk_count, terminal_frame,
+    Outbound, Registry, Target, MAX_TERMINAL_DATA_BYTES,
+};
 use tokio::time::{interval, sleep, MissedTickBehavior};
 use tokio_tungstenite::{
-    connect_async,
-    tungstenite::{client::IntoClientRequest, http::HeaderValue, Message},
+    connect_async_with_config,
+    tungstenite::{
+        client::IntoClientRequest, http::HeaderValue, protocol::WebSocketConfig, Message,
+    },
 };
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -62,20 +67,39 @@ async fn run_connection(config: &Config) -> Result<ConnectionEnd> {
         "authorization",
         HeaderValue::from_str(&format!("Bearer {}", config.token))?,
     );
-    let (mut socket, _) = connect_async(request)
+    // Tungstenite defaults to two eager 128 KiB buffers and accepts 64 MiB
+    // messages. Agent protocol messages are capped at 1 MiB and terminal
+    // frames at 240 KiB, so smaller buffers materially reduce idle RSS while
+    // preserving bounded backpressure during a broker/network failure.
+    let socket_config = WebSocketConfig::default()
+        .read_buffer_size(8 * 1024)
+        .write_buffer_size(32 * 1024)
+        .max_write_buffer_size(1024 * 1024)
+        .max_message_size(Some(1024 * 1024))
+        .max_frame_size(Some(1024 * 1024));
+    let (mut socket, _) = connect_async_with_config(request, Some(socket_config), false)
         .await
         .context("could not connect to broker")?;
     eprintln!("[termag-agent] connected to {}", config.url);
     let started = Instant::now();
     let mut terminal = Registry::new();
     let mut power = PowerManager::new();
-    let mut inventory_tick = interval(Duration::from_millis(config.inventory_interval_ms));
-    inventory_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    let mut tmux_tick = interval(Duration::from_millis(config.inventory_interval_ms));
+    tmux_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    let mut inventory_safety_tick = interval(Duration::from_secs(60));
+    inventory_safety_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
     let mut health_tick = interval(Duration::from_secs(30));
     health_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
     let mut ping_tick = interval(Duration::from_secs(30));
     ping_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
-    let mut last_inventory: Option<InventorySnapshot> = None;
+    let mut driver_lease_tick = interval(Duration::from_secs(15));
+    driver_lease_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    let mut power_lease_tick = interval(Duration::from_secs(15));
+    power_lease_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    let mut inventory = inventory::Collector::new();
+    let initial_inventory = inventory.initialize(config).await;
+    send_inventory(&mut socket, &initial_inventory).await?;
+    let mut herdr_events = herdr::spawn_event_watchers();
 
     loop {
         tokio::select! {
@@ -98,23 +122,45 @@ async fn run_connection(config: &Config) -> Result<ConnectionEnd> {
             }
             event = terminal.next_event() => {
                 if let Some(event) = event {
-                    for message in terminal.handle_event(event) { socket.send(Message::Text(message.to_string().into())).await?; }
+                    for message in terminal.handle_event(event) { send_outbound(&mut socket, message).await?; }
                 }
             }
-            _ = inventory_tick.tick() => {
-                let snapshot = inventory::collect(config).await;
-                let changed = last_inventory.as_ref().is_none_or(|previous| previous.roots != snapshot.roots || previous.runtimes != snapshot.runtimes);
-                if changed {
+            _ = tmux_tick.tick() => {
+                if let Some(snapshot) = inventory.refresh_tmux(config).await {
                     send_inventory(&mut socket, &snapshot).await?;
-                    last_inventory = Some(snapshot);
+                }
+            }
+            event = herdr_events.recv() => {
+                if event.is_some() {
+                    while herdr_events.try_recv().is_ok() {}
+                    if let Some(snapshot) = inventory.refresh_herdr(config).await {
+                        send_inventory(&mut socket, &snapshot).await?;
+                    }
+                }
+            }
+            _ = inventory_safety_tick.tick() => {
+                if let Some(snapshot) = inventory.refresh_all(config).await {
+                    send_inventory(&mut socket, &snapshot).await?;
                 }
             }
             _ = health_tick.tick() => {
-                let snapshot = if let Some(snapshot) = &last_inventory { snapshot.clone() } else { inventory::collect(config).await };
-                let health = health_message(config, &snapshot, terminal.len(), started.elapsed().as_secs());
+                let health = health_message(
+                    config,
+                    inventory.tmux(),
+                    terminal.len(),
+                    started.elapsed().as_secs(),
+                );
                 socket.send(Message::Text(health.to_string().into())).await?;
             }
             _ = ping_tick.tick() => socket.send(Message::Ping(Vec::new().into())).await?,
+            _ = driver_lease_tick.tick() => {
+                for message in terminal.expire_drivers(Duration::from_secs(5 * 60)).await {
+                    socket.send(Message::Text(message.to_string().into())).await?;
+                }
+            }
+            _ = power_lease_tick.tick() => {
+                let _ = power.reap().await;
+            }
             _ = tokio::signal::ctrl_c() => {
                 let _ = power.stop().await;
                 let _ = socket.close(None).await;
@@ -122,6 +168,46 @@ async fn run_connection(config: &Config) -> Result<ConnectionEnd> {
             }
         }
     }
+}
+
+async fn send_outbound<S>(
+    socket: &mut tokio_tungstenite::WebSocketStream<S>,
+    message: Outbound,
+) -> Result<()>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    match message {
+        Outbound::Json(value) => socket.send(Message::Text(value.to_string().into())).await?,
+        Outbound::Terminal {
+            stream_id,
+            first_sequence,
+            checkpoint,
+            bytes,
+        } => {
+            let chunk_count = terminal_chunk_count(bytes.len());
+            let mut sequence = first_sequence;
+            if bytes.is_empty() {
+                let flags = terminal_checkpoint_flags(checkpoint, 0, chunk_count);
+                socket
+                    .send(Message::Binary(
+                        terminal_frame(&stream_id, sequence, flags, &[]).into(),
+                    ))
+                    .await?;
+            } else {
+                for (index, chunk) in bytes.chunks(MAX_TERMINAL_DATA_BYTES).enumerate() {
+                    let flags = terminal_checkpoint_flags(checkpoint, index, chunk_count);
+                    socket
+                        .send(Message::Binary(
+                            terminal_frame(&stream_id, sequence, flags, chunk).into(),
+                        ))
+                        .await?;
+                    sequence = next_terminal_sequence(sequence);
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 async fn handle_request(
@@ -136,11 +222,22 @@ async fn handle_request(
             "terminal-attach" => {
                 let stream_id = incoming.string("streamId").context("streamId is required")?;
                 let target = Target::from_value(incoming.value("runtimeTarget"), incoming.string("tmuxName"))?;
-                let driver = terminal.attach(stream_id, target.clone(), incoming.u16("cols", 80), incoming.u16("rows", 24), incoming.bool("readOnly")).await?;
+                let driver = terminal.attach(
+                    stream_id,
+                    target.clone(),
+                    incoming.u16("cols", 80),
+                    incoming.u16("rows", 24),
+                    incoming.bool("readOnly"),
+                    incoming.bool("requestCheckpoint"),
+                ).await?;
                 Ok((json!({ "runtime": target.runtime, "externalId": target.external_id, "tmuxName": target.external_id }), driver))
             }
             "terminal-input" => {
-                terminal.input(&incoming.string("streamId").unwrap_or_default(), incoming.string("data").unwrap_or_default().into_bytes()).await;
+                let data = incoming.string("data").unwrap_or_default().into_bytes();
+                if data.len() > 256 * 1024 {
+                    anyhow::bail!("terminal input exceeded 256 KiB");
+                }
+                terminal.input(&incoming.string("streamId").unwrap_or_default(), data).await;
                 Ok((json!({ "ok": true }), Vec::new()))
             }
             "terminal-resize" => {
@@ -173,8 +270,18 @@ async fn handle_request(
                 let duration = incoming.value("durationMs").and_then(Value::as_u64).map(Duration::from_millis);
                 Ok((json!({ "success": true, "state": power.start(mode, duration).await? }), Vec::new()))
             }
+            "power.acquire" | "power.renew" => {
+                let lease_id = incoming.string("leaseId").context("leaseId is required")?;
+                let mode = incoming.string("mode").as_deref().and_then(PowerMode::parse).unwrap_or(PowerMode::TerminalsAwake);
+                let duration = incoming.value("durationMs").and_then(Value::as_u64).map(Duration::from_millis);
+                Ok((json!({ "success": true, "state": power.acquire(&lease_id, mode, duration).await? }), Vec::new()))
+            }
+            "power.release" => {
+                let lease_id = incoming.string("leaseId").context("leaseId is required")?;
+                Ok((json!({ "success": true, "state": power.release(&lease_id).await? }), Vec::new()))
+            }
             "power.stop" | "caffeinate-stop" => Ok((json!({ "success": true, "state": power.stop().await? }), Vec::new())),
-            "power.get" | "caffeinate-status" => Ok((json!({ "state": power.state() }), Vec::new())),
+            "power.get" | "caffeinate-status" => Ok((json!({ "state": power.reap().await? }), Vec::new())),
             "runtime.create-session" => {
                 let runtime = incoming.string("runtime").unwrap_or_else(|| "tmux".to_owned());
                 let name = incoming.string("name").context("name is required")?;
@@ -323,7 +430,7 @@ where
 
 fn health_message(
     config: &Config,
-    snapshot: &InventorySnapshot,
+    tmux: Option<&RuntimeInventory>,
     stream_count: usize,
     uptime: u64,
 ) -> Value {
@@ -334,13 +441,23 @@ fn health_message(
         .collect();
     json!({
         "type": "health", "protocolVersion": PROTOCOL_VERSION, "version": VERSION,
-        "streamCount": stream_count, "uptimeSec": uptime, "memMb": rss_mb(), "roots": roots,
-        "tmux": { "sessions": legacy_tmux(snapshot) },
+        "streamCount": stream_count, "uptimeSec": uptime,
+        "memMb": current_rss_mb(), "memPeakMb": peak_rss_mb(), "roots": roots,
+        "tmux": { "sessions": legacy_tmux_runtime(tmux) },
     })
 }
 
 fn legacy_tmux(snapshot: &InventorySnapshot) -> Vec<Value> {
-    snapshot.runtimes.iter().find_map(|runtime| match runtime {
+    legacy_tmux_runtime(
+        snapshot
+            .runtimes
+            .iter()
+            .find(|runtime| matches!(runtime, RuntimeInventory::Tmux { .. })),
+    )
+}
+
+fn legacy_tmux_runtime(runtime: Option<&RuntimeInventory>) -> Vec<Value> {
+    runtime.and_then(|runtime| match runtime {
         RuntimeInventory::Tmux { sessions, .. } => Some(sessions.iter().map(|session| {
             let tabs = session.spaces.first().map(|space| &space.tabs);
             json!({
@@ -356,7 +473,7 @@ fn legacy_tmux(snapshot: &InventorySnapshot) -> Vec<Value> {
     }).unwrap_or_default()
 }
 
-fn rss_mb() -> u64 {
+fn peak_rss_mb() -> u64 {
     let mut usage = std::mem::MaybeUninit::<libc::rusage>::uninit();
     if unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) } != 0 {
         return 0;
@@ -367,4 +484,71 @@ fn rss_mb() -> u64 {
     } else {
         rss / 1024
     }
+}
+
+#[cfg(target_os = "macos")]
+fn current_rss_mb() -> u64 {
+    #[repr(C)]
+    #[derive(Default)]
+    struct ProcTaskInfo {
+        virtual_size: u64,
+        resident_size: u64,
+        total_user: u64,
+        total_system: u64,
+        threads_user: u64,
+        threads_system: u64,
+        policy: i32,
+        faults: i32,
+        pageins: i32,
+        cow_faults: i32,
+        messages_sent: i32,
+        messages_received: i32,
+        syscalls_mach: i32,
+        syscalls_unix: i32,
+        context_switches: i32,
+        thread_count: i32,
+        running_threads: i32,
+        priority: i32,
+    }
+    unsafe extern "C" {
+        fn proc_pidinfo(
+            pid: i32,
+            flavor: i32,
+            arg: u64,
+            buffer: *mut libc::c_void,
+            buffer_size: i32,
+        ) -> i32;
+    }
+    const PROC_PIDTASKINFO: i32 = 4;
+    let mut info = ProcTaskInfo::default();
+    let size = std::mem::size_of::<ProcTaskInfo>() as i32;
+    let read = unsafe {
+        proc_pidinfo(
+            std::process::id() as i32,
+            PROC_PIDTASKINFO,
+            0,
+            (&mut info as *mut ProcTaskInfo).cast(),
+            size,
+        )
+    };
+    if read == size {
+        info.resident_size / (1024 * 1024)
+    } else {
+        peak_rss_mb()
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn current_rss_mb() -> u64 {
+    let pages = std::fs::read_to_string("/proc/self/statm")
+        .ok()
+        .and_then(|value| value.split_whitespace().nth(1)?.parse::<u64>().ok())
+        .unwrap_or(0);
+    let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) }.max(0) as u64;
+    pages.saturating_mul(page_size) / (1024 * 1024)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn current_rss_mb() -> u64 {
+    peak_rss_mb()
 }

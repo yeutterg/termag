@@ -45,7 +45,10 @@ pub async fn inventory() -> RuntimeInventory {
             sessions,
         },
         Err(_) => RuntimeInventory::Tmux {
-            available: true,
+            // Preserve the cloud mirror on transient tmux command failures.
+            // A successful empty list means "no sessions"; an error means
+            // inventory is incomplete and must not archive prior state.
+            available: false,
             sessions: Vec::new(),
         },
     }
@@ -90,6 +93,11 @@ async fn collect() -> Result<Vec<RuntimeSession>> {
     for line in String::from_utf8_lossy(&output.stdout).lines() {
         let columns: Vec<&str> = line.split('\t').collect();
         if columns.len() < 15 || columns[0].is_empty() {
+            continue;
+        }
+        // Ignore transport sessions left by older Termag agent builds. The
+        // current control-mode transport does not create tmux sessions.
+        if columns[1].starts_with("__termag_view_") {
             continue;
         }
         let session = sessions
@@ -261,13 +269,16 @@ fn is_shell(command: &str) -> bool {
 }
 
 fn aggregate<'a>(statuses: impl Iterator<Item = &'a str>) -> String {
-    let all: Vec<&str> = statuses.collect();
-    for candidate in ["blocked", "working", "done", "idle", "unknown"] {
-        if all.contains(&candidate) {
-            return candidate.to_owned();
-        }
-    }
-    "unknown".to_owned()
+    statuses
+        .map(|status| match status {
+            "blocked" => (0, "blocked"),
+            "working" => (1, "working"),
+            "done" => (2, "done"),
+            "idle" => (3, "idle"),
+            _ => (4, "unknown"),
+        })
+        .min_by_key(|(priority, _)| *priority)
+        .map_or_else(|| "unknown".to_owned(), |(_, status)| status.to_owned())
 }
 
 fn nonempty(value: &str) -> Option<String> {

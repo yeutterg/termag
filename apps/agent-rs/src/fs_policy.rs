@@ -59,7 +59,10 @@ pub fn resolve_creation_path(
         }
     }
     ensure_allowed(config, &canonical_parent)?;
-    Ok(candidate)
+    // Pass the canonicalized path to HerdR/tmux. Returning the original
+    // symlinked spelling would reopen a TOCTOU window where a local process
+    // swaps the symlink after policy validation but before runtime creation.
+    Ok(canonical_parent)
 }
 
 pub fn list_directory(config: &Config, root_key: &str, relative: &str) -> Result<DirectoryListing> {
