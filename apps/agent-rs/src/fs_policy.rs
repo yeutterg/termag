@@ -2,6 +2,7 @@ use crate::config::Config;
 use anyhow::{bail, Context, Result};
 use serde::Serialize;
 use std::{
+    collections::BTreeMap,
     fs,
     path::{Component, Path, PathBuf},
 };
@@ -29,6 +30,10 @@ pub struct DirectoryListing {
     parent: Option<DirectoryParent>,
     entries: Vec<DirectoryEntry>,
     truncated: bool,
+    // The Node agent returns the full root map alongside every listing and
+    // lib/broker.ts types it as required, so omitting it made the browse API
+    // shape depend on which agent answered.
+    roots: BTreeMap<String, String>,
 }
 
 const MAX_ENTRIES: usize = 500;
@@ -123,6 +128,11 @@ pub fn list_directory(config: &Config, root_key: &str, relative: &str) -> Result
         }),
         entries,
         truncated,
+        roots: config
+            .roots
+            .iter()
+            .map(|(key, path)| (key.clone(), path.to_string_lossy().into_owned()))
+            .collect(),
     })
 }
 
