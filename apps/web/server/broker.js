@@ -2,8 +2,11 @@ const crypto = require("node:crypto");
 const { WebSocket } = require("ws");
 const { getToken } = require("next-auth/jwt");
 const { appendScrollback, readScrollback, startScrollbackPrune } = require("./scrollback");
-const { createSshStreamRegistry } = require("./ssh-session-stream");
+const { createSshHostLifecycle } = require("./ssh-host-lifecycle");
 const { reconcileInventory } = require("./inventory-v2");
+const { createBrokerRpc } = require("./broker-rpc");
+const { createTerminalCheckpointStore } = require("./terminal-checkpoint-store");
+const { createTmuxStatusClassifier } = require("./tmux-status");
 
 // Wire-protocol constant shared with the agent. Keep in sync with
 // Keep this in sync with the Rust agent's replacement close handling.
@@ -433,54 +436,15 @@ function createBroker({ prisma, wss }) {
   const inventoryReconciliations = new Map();
   const browserStreams = new Map();
   const sessionPrimary = new Map();
-  // SSH host state. sshHosts is userId → Map(hostId → { spec, status,
-  // sessions, pollHandle }) — the in-memory mirror of the SshHost rows
-  // and their last probe result. The shared pty per (host, tmuxName) lives
-  // in the SshSessionStream registry below, which handles multi-subscriber
-  // fan-out and scrollback persistence.
-  const sshHosts = new Map();
-  const sshStreamRegistry = createSshStreamRegistry({ prisma });
-  const SSH_POLL_INTERVAL_MS = 30_000;
   // Last PTY fast-path status we received per session, with the epoch-ms it
   // landed. The poll classifier prefers this over poll facts while it's
   // fresh AND the session still has an attached browser stream — the PTY
   // path reacts to live output/BEL faster than the 30s health tick.
   const ptyStatusBySession = new Map(); // sessionId -> { status, at }
-  const terminalSequenceBySession = new Map();
-  const terminalCheckpoints = new Map();
-  const terminalCheckpointRequests = new Map();
-  const MAX_CHECKPOINT_CACHE_BYTES = 64 * 1024 * 1024;
-  let terminalCheckpointBytes = 0;
-
-  function deleteTerminalCheckpoint(sessionId) {
-    const checkpoint = terminalCheckpoints.get(sessionId);
-    if (!checkpoint) {
-      return;
-    }
-    terminalCheckpointBytes = Math.max(
-      0,
-      terminalCheckpointBytes - checkpoint.fullBytes - checkpoint.tailBytes
-    );
-    terminalCheckpoints.delete(sessionId);
-  }
-
-  function trimCheckpointCache(exemptSessionId) {
-    while (terminalCheckpointBytes > MAX_CHECKPOINT_CACHE_BYTES) {
-      let oldest = null;
-      for (const [sessionId, checkpoint] of terminalCheckpoints) {
-        if (sessionId === exemptSessionId) {
-          continue;
-        }
-        if (!oldest || checkpoint.at < oldest.checkpoint.at) {
-          oldest = { sessionId, checkpoint };
-        }
-      }
-      if (!oldest) {
-        break;
-      }
-      deleteTerminalCheckpoint(oldest.sessionId);
-    }
-  }
+  const terminalState = createTerminalCheckpointStore({
+    activeSessionIds: () =>
+      new Set([...browserStreams.values()].map(stream => stream.sessionId).filter(Boolean)),
+  });
   // A window whose last output is younger than this counts as actively
   // working — fresh output beats a stale bell flag. Env-overridable to match
   // the health interval used by the Rust agent.
@@ -488,6 +452,21 @@ function createBroker({ prisma, wss }) {
   // How long a PTY-reported status stays authoritative before the poll
   // classifier takes back over (the PTY path stops refreshing on output stop).
   const PTY_FRESH_MS = Number(process.env.TERMAG_PTY_FRESH_MS) || 5000;
+  const tmuxStatus = createTmuxStatusClassifier({
+    ptyStatuses: ptyStatusBySession,
+    workingThresholdSec: WORKING_THRESHOLD_SEC,
+    ptyFreshMs: PTY_FRESH_MS,
+    hasAttachedViewer: sessionId =>
+      [...browserStreams.values()].some(
+        stream => stream.sessionId === sessionId && stream.attached === true
+      ),
+  });
+  const sshLifecycle = createSshHostLifecycle({
+    prisma,
+    broadcastStatus,
+    sendJson,
+    sanitizeText: sanitizeAgentText,
+  });
   const TRANSIENT_STATE_TTL_MS = 10 * 60 * 1000;
   let seq = 0;
 
@@ -501,16 +480,7 @@ function createBroker({ prisma, wss }) {
         ptyStatusBySession.delete(sessionId);
       }
     }
-    for (const [sessionId, state] of terminalSequenceBySession) {
-      if (state.at < cutoff && !activeSessions.has(sessionId)) {
-        terminalSequenceBySession.delete(sessionId);
-      }
-    }
-    for (const [sessionId, state] of terminalCheckpoints) {
-      if (state.at < cutoff && !activeSessions.has(sessionId)) {
-        deleteTerminalCheckpoint(sessionId);
-      }
-    }
+    terminalState.sweep();
   }, 60_000);
   transientStateSweep.unref?.();
 
@@ -551,47 +521,7 @@ function createBroker({ prisma, wss }) {
   }
 
   function deviceStatuses(userId) {
-    return [
-      ...connectedAgents(userId).map(publicAgentStatus),
-      ...[...sshHostsForUser(userId).values()].map(publicSshHostStatus),
-    ];
-  }
-
-  function normalizeTmuxSessions(input) {
-    const sessions = Array.isArray(input) ? input : [];
-    return sessions
-      .map(session => ({
-        name: typeof session?.name === "string" ? session.name : "",
-        path: typeof session?.path === "string" ? session.path : undefined,
-        windowCount: Number.isFinite(Number(session?.windowCount))
-          ? Number(session.windowCount)
-          : undefined,
-        windows: Array.isArray(session?.windows)
-          ? session.windows
-              .map(window => ({
-                index: Number.isFinite(Number(window?.index)) ? Number(window.index) : 0,
-                id: typeof window?.id === "string" ? window.id : "",
-                name: typeof window?.name === "string" ? window.name : "",
-                target: typeof window?.target === "string" ? window.target : "",
-                path: typeof window?.path === "string" ? window.path : undefined,
-                // Poll facts the agent attaches per window for the broker's status
-                // classifier. All optional — older agents omit them and the
-                // classifier falls through to its existing branches. Coerce with
-                // the same Number.isFinite/typeof guards used for the core fields.
-                activityAgeSec: Number.isFinite(Number(window?.activityAgeSec))
-                  ? Number(window.activityAgeSec)
-                  : undefined,
-                bell: typeof window?.bell === "boolean" ? window.bell : undefined,
-                currentCommand:
-                  typeof window?.currentCommand === "string" ? window.currentCommand : undefined,
-                lastExit: Number.isFinite(Number(window?.lastExit))
-                  ? Number(window.lastExit)
-                  : undefined,
-              }))
-              .filter(window => window.target || window.id || window.name)
-          : [],
-      }))
-      .filter(session => session.name);
+    return [...connectedAgents(userId).map(publicAgentStatus), ...sshLifecycle.statuses(userId)];
   }
 
   function streamBelongsToAgent(stream, userId, deviceName) {
@@ -607,18 +537,12 @@ function createBroker({ prisma, wss }) {
       return;
     }
 
-    const previous = terminalSequenceBySession.get(anchor.sessionId);
-    const expectedSequence = previous
-      ? previous.sequence === 0xffffffff
-        ? 1
-        : previous.sequence + 1
-      : frame.sequence;
-    if (!frame.full && previous && frame.sequence !== expectedSequence) {
+    const checkpointResult = terminalState.ingest(anchor.sessionId, frame);
+    if (checkpointResult.gap) {
       // A checkpoint plus ANSI deltas is only replayable as one contiguous
       // byte sequence. Once any frame is missing, retaining/appending to that
       // cache would make the next viewer's screen plausibly but silently
       // corrupt, so discard it and force a fresh runtime checkpoint.
-      deleteTerminalCheckpoint(anchor.sessionId);
       for (const stream of browserStreams.values()) {
         if (
           stream.sessionId === anchor.sessionId &&
@@ -628,74 +552,8 @@ function createBroker({ prisma, wss }) {
           scheduleFlush(stream, BACKPRESSURE_RETRY_MS);
         }
       }
-      terminalSequenceBySession.set(anchor.sessionId, {
-        sequence: frame.sequence,
-        at: Date.now(),
-      });
       return;
     }
-    terminalSequenceBySession.set(anchor.sessionId, {
-      sequence: frame.sequence,
-      at: Date.now(),
-    });
-
-    let checkpoint = terminalCheckpoints.get(anchor.sessionId);
-    if (frame.full) {
-      terminalCheckpointRequests.delete(anchor.sessionId);
-      deleteTerminalCheckpoint(anchor.sessionId);
-      checkpoint = {
-        full: [Buffer.from(frame.data)],
-        fullBytes: frame.data.length,
-        building: !frame.checkpointEnd,
-        tail: [],
-        tailBytes: 0,
-        sequence: frame.sequence,
-        at: Date.now(),
-      };
-      terminalCheckpoints.set(anchor.sessionId, checkpoint);
-      terminalCheckpointBytes += checkpoint.fullBytes;
-    } else if (frame.checkpointContinuation) {
-      if (checkpoint?.building) {
-        checkpoint.full.push(Buffer.from(frame.data));
-        checkpoint.fullBytes += frame.data.length;
-        terminalCheckpointBytes += frame.data.length;
-        checkpoint.sequence = frame.sequence;
-        checkpoint.at = Date.now();
-        checkpoint.building = !frame.checkpointEnd;
-      } else {
-        // A continuation without its start cannot seed future replay. It is
-        // still fanned to already-live viewers below, which may have received
-        // the start before this broker lost cache state.
-        deleteTerminalCheckpoint(anchor.sessionId);
-        checkpoint = null;
-      }
-      if (checkpoint?.fullBytes > 4 * 1024 * 1024) {
-        deleteTerminalCheckpoint(anchor.sessionId);
-        checkpoint = null;
-      }
-    } else if (checkpoint?.building) {
-      // A checkpoint start must be followed only by explicitly-marked
-      // continuation frames through checkpointEnd. Treat any other frame as
-      // a protocol gap instead of caching a partial terminal state.
-      deleteTerminalCheckpoint(anchor.sessionId);
-      checkpoint = null;
-    } else if (checkpoint) {
-      const tailChunk = Buffer.from(frame.data);
-      checkpoint.tail.push(tailChunk);
-      checkpoint.tailBytes += tailChunk.length;
-      terminalCheckpointBytes += tailChunk.length;
-      checkpoint.sequence = frame.sequence;
-      checkpoint.at = Date.now();
-      // ANSI deltas are ordered state transitions: dropping the middle and
-      // retaining only a tail would produce a plausible-looking but corrupt
-      // replay. Invalidate the cache instead; the next viewer asks the local
-      // runtime for a fresh bounded checkpoint.
-      if (checkpoint.tailBytes > 1024 * 1024) {
-        deleteTerminalCheckpoint(anchor.sessionId);
-        checkpoint = null;
-      }
-    }
-    trimCheckpointCache(anchor.sessionId);
 
     for (const stream of browserStreams.values()) {
       if (
@@ -870,180 +728,8 @@ function createBroker({ prisma, wss }) {
     return status;
   }
 
-  function addTmuxTarget(targets, value) {
-    if (typeof value !== "string") {
-      return;
-    }
-    const trimmed = value.trim();
-    if (trimmed) {
-      targets.add(trimmed);
-    }
-  }
-
-  function scopedTmuxTarget(sessionName, target) {
-    return `${sessionName}\u0000${target}`;
-  }
-
-  function buildLiveTmuxState(tmuxSessions) {
-    const state = {
-      sessions: new Set(),
-      windows: new Set(),
-      globalWindows: new Set(),
-      // window-target-key -> { activityAgeSec, bell, currentCommand, lastExit }.
-      // Keyed by the SAME scoped + global keys we add to the Sets above so the
-      // classifier can look up the poll facts for whichever target matched a
-      // session (tmuxSessionIsLive scopes by project, falls back to global).
-      facts: new Map(),
-    };
-    const sessions = Array.isArray(tmuxSessions) ? tmuxSessions : [];
-    for (const session of sessions) {
-      const sessionName = typeof session?.name === "string" ? session.name.trim() : "";
-      if (!sessionName) {
-        continue;
-      }
-      state.sessions.add(sessionName);
-      const windows = Array.isArray(session.windows) ? session.windows : [];
-      for (const window of windows) {
-        const targets = new Set();
-        addTmuxTarget(targets, window?.target);
-        addTmuxTarget(targets, window?.id);
-        addTmuxTarget(targets, window?.name);
-        const facts = {
-          activityAgeSec: window?.activityAgeSec,
-          bell: window?.bell,
-          currentCommand: window?.currentCommand,
-          lastExit: window?.lastExit,
-        };
-        for (const target of targets) {
-          state.globalWindows.add(target);
-          state.windows.add(scopedTmuxTarget(sessionName, target));
-          // Store the facts under both the global and the scoped key so the
-          // matched-target lookup works regardless of which path matched.
-          state.facts.set(target, facts);
-          state.facts.set(scopedTmuxTarget(sessionName, target), facts);
-        }
-      }
-    }
-    return state;
-  }
-
-  function sessionTargetCandidates(session, projectSessionName) {
-    const candidates = new Set();
-    addTmuxTarget(candidates, session.tmuxName);
-    addTmuxTarget(candidates, session.tmuxWindowName);
-    if (projectSessionName && typeof session.tmuxName === "string") {
-      const prefix = `${projectSessionName}:`;
-      if (session.tmuxName.startsWith(prefix)) {
-        addTmuxTarget(candidates, session.tmuxName.slice(prefix.length));
-      }
-    }
-    return candidates;
-  }
-
-  function tmuxSessionIsLive(session, tmuxState) {
-    const projectSessionName =
-      typeof session.project?.tmuxSessionName === "string"
-        ? session.project.tmuxSessionName.trim()
-        : "";
-    const tmuxName = typeof session.tmuxName === "string" ? session.tmuxName.trim() : "";
-    if (projectSessionName) {
-      if (tmuxName === projectSessionName && tmuxState.sessions.has(projectSessionName)) {
-        return true;
-      }
-      for (const candidate of sessionTargetCandidates(session, projectSessionName)) {
-        if (tmuxState.windows.has(scopedTmuxTarget(projectSessionName, candidate))) {
-          return true;
-        }
-      }
-      return false;
-    }
-    if (tmuxState.sessions.has(tmuxName)) {
-      return true;
-    }
-    for (const candidate of sessionTargetCandidates(session, "")) {
-      if (tmuxState.globalWindows.has(candidate)) {
-        return true;
-      }
-    }
-    return false;
-  }
-
-  // Find the poll facts for whichever live window this session matched. Mirrors
-  // the match order in tmuxSessionIsLive: scoped-by-project first (when the
-  // project has a tmux session name), else the global window keys. Returns the
-  // facts object stored by buildLiveTmuxState, or null if no window matched
-  // (e.g. the session is live via the session-name Set, not a window).
-  function pollFactsForSession(session, tmuxState) {
-    const projectSessionName =
-      typeof session.project?.tmuxSessionName === "string"
-        ? session.project.tmuxSessionName.trim()
-        : "";
-    if (projectSessionName) {
-      for (const candidate of sessionTargetCandidates(session, projectSessionName)) {
-        const facts = tmuxState.facts.get(scopedTmuxTarget(projectSessionName, candidate));
-        if (facts) {
-          return facts;
-        }
-      }
-      return null;
-    }
-    for (const candidate of sessionTargetCandidates(session, "")) {
-      const facts = tmuxState.facts.get(candidate);
-      if (facts) {
-        return facts;
-      }
-    }
-    return null;
-  }
-
-  // Shell process names that mean the prompt has returned (program exited) —
-  // login shells show with a leading dash. Used by the classifier's idle branch.
-  const SHELL_COMMAND_RE = /^(zsh|bash|sh|fish|ksh|dash|-zsh|-bash)$/;
-
-  // Classify a LIVE session per the shared wire contract. PTY fast-path wins
-  // while fresh AND a browser is attached; otherwise derive from poll facts.
-  function classifyLiveTmuxSession(session, facts) {
-    // Precedence: a recent PTY status for a session with an attached browser
-    // stream reflects live output/BEL faster than the ~10s health poll. Without an
-    // attached stream there's no PTY feeding us, so the fast-path is stale.
-    const pty = ptyStatusBySession.get(session.id);
-    if (pty && Date.now() - pty.at < PTY_FRESH_MS) {
-      for (const stream of browserStreams.values()) {
-        if (stream.sessionId === session.id && stream.attached === true) {
-          return pty.status;
-        }
-      }
-    }
-    if (facts) {
-      // (a) fresh output beats a stale bell flag.
-      if (
-        typeof facts.activityAgeSec === "number" &&
-        facts.activityAgeSec < WORKING_THRESHOLD_SEC
-      ) {
-        return "working";
-      }
-      // (b) bell rung (BEL or window-flags '!') and not actively outputting.
-      if (facts.bell === true) {
-        return "waiting";
-      }
-      // (c) last command exited non-zero.
-      if (typeof facts.lastExit === "number" && facts.lastExit !== 0) {
-        return "error";
-      }
-      // (d) a shell prompt is back — the program finished and isn't an error.
-      if (typeof facts.currentCommand === "string" && SHELL_COMMAND_RE.test(facts.currentCommand)) {
-        return "idle";
-      }
-      // (e) something is running but not outputting — treat as waiting.
-      return "waiting";
-    }
-    // No window facts (live via session-name only / older agent): preserve the
-    // previous non-sleeping status, defaulting to idle, as before.
-    return session.status && session.status !== "sleeping" ? session.status : "idle";
-  }
-
   async function reconcileDeviceTmuxStatus(userId, deviceName, tmuxSessions) {
-    const tmuxState = buildLiveTmuxState(tmuxSessions);
+    const tmuxState = tmuxStatus.buildLiveState(tmuxSessions);
     const sessions = await prisma.session.findMany({
       where: { project: { userId, rootKey: deviceName } },
       select: {
@@ -1064,9 +750,9 @@ function createBroker({ prisma, wss }) {
 
     for (const session of sessions) {
       projectStatuses.set(session.projectId, session.project.status);
-      const live = tmuxSessionIsLive(session, tmuxState);
+      const live = tmuxStatus.isLive(session, tmuxState);
       const nextStatus = live
-        ? classifyLiveTmuxSession(session, pollFactsForSession(session, tmuxState))
+        ? tmuxStatus.classify(session, tmuxStatus.factsFor(session, tmuxState))
         : "sleeping";
       if (session.status !== nextStatus) {
         changed = true;
@@ -1258,7 +944,7 @@ function createBroker({ prisma, wss }) {
           memMb: Number.isFinite(Number(msg.memMb)) ? Number(msg.memMb) : 0,
           memPeakMb: Number.isFinite(Number(msg.memPeakMb)) ? Number(msg.memPeakMb) : 0,
           roots: msg.roots && typeof msg.roots === "object" ? msg.roots : {},
-          tmuxSessions: normalizeTmuxSessions(msg.tmux?.sessions),
+          tmuxSessions: tmuxStatus.normalizeSessions(msg.tmux?.sessions),
         };
         const changed =
           agent.protocolVersion >= 2
@@ -1380,9 +1066,7 @@ function createBroker({ prisma, wss }) {
         if (!streamBelongsToAgent(anchor, record.userId, deviceName)) {
           return;
         }
-        deleteTerminalCheckpoint(anchor.sessionId);
-        terminalSequenceBySession.delete(anchor.sessionId);
-        terminalCheckpointRequests.delete(anchor.sessionId);
+        terminalState.drop(anchor.sessionId);
         for (const stream of browserStreams.values()) {
           if (
             stream.sessionId === anchor.sessionId &&
@@ -1544,7 +1228,7 @@ function createBroker({ prisma, wss }) {
         ws.close(1008, "code required");
         return;
       }
-      await handleShareAttach(ws, code, cols, rows);
+      await sshLifecycle.handleShareAttach(ws, code, cols, rows);
       return;
     }
 
@@ -1562,8 +1246,8 @@ function createBroker({ prisma, wss }) {
       // whatever we have synchronously and let the probe broadcast a
       // status update when it lands. refreshSshHosts() itself short-
       // circuits when the user is already loaded, so this is cheap.
-      if (!sshHosts.has(userId)) {
-        refreshSshHosts(userId, { broadcast: true }).catch(() => {});
+      if (!sshLifecycle.hasUser(userId)) {
+        sshLifecycle.refresh(userId, { broadcast: true }).catch(() => {});
       }
       const devices = deviceStatuses(userId);
       sendJson(ws, { type: "agent", connected: devices.some(device => device.connected), devices });
@@ -1583,10 +1267,10 @@ function createBroker({ prisma, wss }) {
       // record by id. We only block if we don't have the user's hosts
       // yet (e.g., right after broker restart); subsequent attaches
       // skip the load. The handler does its own session-not-known check.
-      if (!sshHosts.has(userId)) {
-        await refreshSshHosts(userId, { broadcast: false });
+      if (!sshLifecycle.hasUser(userId)) {
+        await sshLifecycle.refresh(userId, { broadcast: false });
       }
-      await handleSshAttach(ws, userId, hostId, tmuxName, cols, rows);
+      await sshLifecycle.handleAttach(ws, userId, hostId, tmuxName, cols, rows);
       return;
     }
 
@@ -1679,9 +1363,7 @@ function createBroker({ prisma, wss }) {
       releasePrimary(sessionId, streamId);
       if (![...browserStreams.values()].some(other => other.sessionId === sessionId)) {
         ptyStatusBySession.delete(sessionId);
-        terminalSequenceBySession.delete(sessionId);
-        deleteTerminalCheckpoint(sessionId);
-        terminalCheckpointRequests.delete(sessionId);
+        terminalState.drop(sessionId);
       }
       if (wasAttached) {
         sendAgentEvent(userId, session.project.rootKey, "terminal-close", { streamId }, 1000);
@@ -1697,13 +1379,13 @@ function createBroker({ prisma, wss }) {
     };
 
     if (session.project.mirrored) {
-      const checkpoint = terminalCheckpoints.get(sessionId);
+      const checkpoint = terminalState.replay(sessionId);
       if (checkpoint) {
         const replayEpoch = stream.replayEpoch;
         sendJson(ws, { type: "checkpoint", sequence: checkpoint.sequence });
         const replayed = await sendReplayChunks(
           ws,
-          [...checkpoint.full, ...checkpoint.tail],
+          checkpoint.chunks,
           () => stream.replayEpoch === replayEpoch
         );
         // A fresh full checkpoint intentionally supersedes stale replay and
@@ -1795,12 +1477,7 @@ function createBroker({ prisma, wss }) {
               other.sessionId === sessionId &&
               (other.attached || other.attachPromise)
           );
-          const lastCheckpointRequest = terminalCheckpointRequests.get(sessionId) || 0;
-          const requestCheckpoint =
-            !terminalCheckpoints.has(sessionId) && Date.now() - lastCheckpointRequest > 5000;
-          if (requestCheckpoint) {
-            terminalCheckpointRequests.set(sessionId, Date.now());
-          }
+          const requestCheckpoint = terminalState.claimCheckpointRequest(sessionId);
           const attachResult = await sendToAgent(
             userId,
             session.project.rootKey,
@@ -1890,7 +1567,7 @@ function createBroker({ prisma, wss }) {
           sendJson(ws, { type: "ready" });
           return true;
         } catch {
-          terminalCheckpointRequests.delete(sessionId);
+          terminalState.releaseCheckpointRequest(sessionId);
           stream.attached = false;
           // If we were holding the primary slot but failed to attach (e.g.
           // tmux session was destroyed during agent restart), hand it off
@@ -1993,600 +1670,20 @@ function createBroker({ prisma, wss }) {
     });
   }
 
-  // ─── SSH host state machinery ──────────────────────────────────────────
-  //
-  // Each SshHost row becomes an in-memory record with a 30s poller that
-  // refreshes reachability + tmux session list. The records back the
-  // connectedDevices() + listTmuxSessions() responses so SSH hosts appear
-  // in the web UI's device list and in `termag list` alongside agents.
-
-  function sshHostsForUser(userId) {
-    return sshHosts.get(userId) || new Map();
-  }
-
-  function publicSshHostStatus(record) {
-    return {
-      name: record.spec.name,
-      connected: Boolean(record.connected),
-      lastSeenAt: record.lastSeenAt?.toISOString?.() || null,
-      kind: "ssh",
-      version: "ssh",
-      lastError: record.lastError || null,
-      deviceId: record.spec.id,
-      tmuxSessions: record.tmuxSessions.map(session => ({
-        name: session.name,
-        path: session.path || "",
-        windowCount: session.windowCount || 0,
-        windows: [],
-      })),
-    };
-  }
-
-  // Idempotent: reload SshHost rows from the DB, start polling new ones,
-  // stop polling removed ones, leave still-present rows alone.
-  async function refreshSshHosts(userId, options = {}) {
-    let rows;
-    try {
-      rows = await prisma.sshHost.findMany({
-        where: { userId },
-        select: {
-          id: true,
-          name: true,
-          host: true,
-          port: true,
-          user: true,
-          lastSeenAt: true,
-          lastError: true,
-        },
-      });
-    } catch (err) {
-      console.error("[ssh] could not load hosts for user", userId, err.message);
-      return;
-    }
-    if (!sshHosts.has(userId)) {
-      sshHosts.set(userId, new Map());
-    }
-    const current = sshHosts.get(userId);
-    const wantIds = new Set(rows.map(row => row.id));
-
-    // Stop polling removed hosts.
-    for (const [hostId, record] of current) {
-      if (!wantIds.has(hostId)) {
-        if (record.pollHandle) {
-          clearInterval(record.pollHandle);
-        }
-        current.delete(hostId);
-      }
-    }
-
-    for (const row of rows) {
-      const spec = { id: row.id, name: row.name, host: row.host, port: row.port, user: row.user };
-      const existing = current.get(row.id);
-      if (existing) {
-        // Update spec in case the host/user/port changed in the DB.
-        existing.spec = spec;
-        continue;
-      }
-      const record = {
-        spec,
-        connected: false,
-        lastSeenAt: row.lastSeenAt || null,
-        lastError: row.lastError || null,
-        tmuxSessions: [],
-        pollHandle: null,
-      };
-      current.set(row.id, record);
-      // Kick off an immediate probe so newly-added hosts feel responsive,
-      // then schedule the recurring poll.
-      probeAndStoreSshHost(userId, row.id).catch(() => {});
-      const handle = setInterval(() => {
-        probeAndStoreSshHost(userId, row.id).catch(() => {});
-      }, SSH_POLL_INTERVAL_MS);
-      handle.unref();
-      record.pollHandle = handle;
-    }
-    if (current.size === 0) {
-      sshHosts.delete(userId);
-    }
-    if (options.broadcast !== false) {
-      broadcastStatus(userId, true);
-    }
-  }
-
-  async function probeAndStoreSshHost(userId, hostId) {
-    const record = sshHostsForUser(userId).get(hostId);
-    if (!record) {
-      return { ok: false, error: "host not registered" };
-    }
-    // Coalesce concurrent probes for the same host. The 30s poll can
-    // overlap with a manual "Test connection" or an attach-time probe; we
-    // don't want two ssh subprocesses racing to write the same record.
-    // Whoever started first wins; latecomers wait on its promise.
-    if (record.probeInFlight) {
-      return record.probeInFlight;
-    }
-
-    record.probeInFlight = (async () => {
-      try {
-        // Capture pre-probe state so we only broadcast when something
-        // changed. Polling every 30s × N users × M hosts would otherwise
-        // spam every browser's status WS even when nothing is different.
-        const prevConnected = record.connected;
-        const prevError = record.lastError;
-        const prevSessionFingerprint = sessionFingerprint(record.tmuxSessions);
-
-        // Lazy require so the ssh helper (and its node-pty dep) only
-        // loads when SSH features are actually exercised.
-        const { probeSshHost, listSshTmuxSessions } = require("./ssh");
-        const probe = await probeSshHost(record.spec);
-        // The host may have been removed while the probe was in flight.
-        if (!sshHostsForUser(userId).has(hostId)) {
-          return { ok: false, error: "host removed during probe" };
-        }
-        if (probe.ok) {
-          record.connected = true;
-          record.lastSeenAt = new Date();
-          record.lastError = null;
-          record.tmuxSessions = await listSshTmuxSessions(record.spec);
-        } else {
-          record.connected = false;
-          record.lastError = probe.error || "probe failed";
-          record.tmuxSessions = [];
-        }
-        if (!sshHostsForUser(userId).has(hostId)) {
-          return { ok: probe.ok, error: probe.error || null, sessions: [] };
-        }
-        prisma.sshHost
-          .update({
-            where: { id: hostId },
-            data: { lastSeenAt: record.lastSeenAt, lastError: record.lastError },
-          })
-          .catch(() => {});
-        const changed =
-          prevConnected !== record.connected ||
-          prevError !== record.lastError ||
-          prevSessionFingerprint !== sessionFingerprint(record.tmuxSessions);
-        if (changed) {
-          broadcastStatus(userId, true);
-        }
-        return { ok: probe.ok, error: probe.error || null, sessions: record.tmuxSessions };
-      } finally {
-        record.probeInFlight = null;
-      }
-    })();
-    return record.probeInFlight;
-  }
-
-  function sessionFingerprint(sessions) {
-    if (!Array.isArray(sessions)) {
-      return "";
-    }
-    return sessions.map(s => `${s.name}|${s.windowCount}|${s.path || ""}`).join("\n");
-  }
-
-  function forgetSshHost(userId, hostId) {
-    const map = sshHostsForUser(userId);
-    const record = map.get(hostId);
-    if (!record) {
-      return;
-    }
-    if (record.pollHandle) {
-      clearInterval(record.pollHandle);
-    }
-    map.delete(hostId);
-    // Tear down any shared streams pointing at this host. The registry
-    // closes each subscriber's ws and kills the pty in one shot.
-    sshStreamRegistry.forgetHost(userId, hostId);
-    if (map.size === 0) {
-      sshHosts.delete(userId);
-    }
-    broadcastStatus(userId, true);
-  }
-
-  function sshDeviceSnapshots(userId) {
-    return [...sshHostsForUser(userId).values()].map(record => ({
-      rootKey: record.spec.name,
-      sessions: record.tmuxSessions.map(session => ({
-        name: session.name,
-        path: session.path || "",
-        windowCount: session.windowCount || 0,
-        windows: [],
-      })),
-    }));
-  }
-
-  async function handleSshAttach(ws, userId, hostId, tmuxName, cols, rows) {
-    const record = sshHostsForUser(userId).get(hostId);
-    if (!record) {
-      ws.close(1008, "ssh host not registered");
-      return;
-    }
-    // Friendly allowlist: the requested tmux session must show up in our
-    // cached probe. Catches typos and prevents a hostile client from
-    // blind-firing arbitrary session names. (The pty spawn re-validates
-    // the name with a strict regex on the way to the remote shell — this
-    // check is for UX.)
-    //
-    // If the cache doesn't have it AND the cache is stale (>15s since last
-    // probe), force an inline probe and recheck — covers the case where
-    // the user just created a tmux session on the remote and the 30s poll
-    // hasn't run yet. Without this, freshly-created sessions feel broken
-    // for up to half a minute after first creation.
-    let known = record.tmuxSessions.some(session => session.name === tmuxName);
-    if (!known) {
-      const cacheAge = record.lastSeenAt ? Date.now() - record.lastSeenAt.getTime() : Infinity;
-      if (cacheAge > 15_000) {
-        try {
-          await probeAndStoreSshHost(userId, hostId);
-        } catch {}
-        const fresh = sshHostsForUser(userId).get(hostId);
-        known = fresh?.tmuxSessions?.some(session => session.name === tmuxName) ?? false;
-      }
-    }
-    if (!known) {
-      ws.close(1008, "unknown tmux session — refresh device status");
-      return;
-    }
-    let stream;
-    try {
-      stream = sshStreamRegistry.getOrCreate({
-        userId,
-        hostSpec: record.spec,
-        tmuxName,
-        cols,
-        rows,
-      });
-    } catch (err) {
-      sendJson(ws, {
-        type: "fatal",
-        message: sanitizeAgentText(err?.message || "ssh spawn failed", 200),
-      });
-      ws.close(1011, "ssh spawn failed");
-      return;
-    }
-    try {
-      // subscribe() wires its own ws.on('close') for unsubscribe — the
-      // caller doesn't need a teardown handle. Wiring it inside subscribe
-      // closes a race where the WS could close during the async scrollback
-      // replay before the caller had a chance to attach a close handler.
-      await stream.subscribe(ws, cols, rows);
-    } catch (err) {
-      sendJson(ws, {
-        type: "fatal",
-        message: sanitizeAgentText(err?.message || "subscribe failed", 200),
-      });
-      ws.close(1011, "subscribe failed");
-      return;
-    }
-    // Audit: record the attach. SSH attaches give shell access to a
-    // remote machine, so this is one of the higher-value forensic
-    // events. We log on attach (not detach) — pair with the
-    // SshSessionStream lifecycle to derive detach times if needed.
-    writeSshAttachAudit(userId, record.spec, tmuxName, ws).catch(() => {});
-  }
-
-  /**
-   * Public share-link attach. The code authenticates the viewer; we
-   * resolve it to (userId, sshHostId, tmuxName), validate TTL +
-   * revocation, then subscribe as a read-only viewer to the owner's
-   * existing SshSessionStream. We do NOT call refreshSshHosts here —
-   * the link's existence implies the owner had the host loaded recently.
-   */
-  async function handleShareAttach(ws, code, cols, rows) {
-    let link;
-    try {
-      link = await prisma.shareLink.findUnique({
-        where: { code },
-        select: {
-          id: true,
-          userId: true,
-          sshHostId: true,
-          tmuxName: true,
-          expiresAt: true,
-          revokedAt: true,
-          sshHost: { select: { id: true, name: true, host: true, port: true, user: true } },
-        },
-      });
-    } catch (err) {
-      console.error("[share-attach] DB lookup failed:", err?.message || err);
-      ws.close(1011, "lookup failed");
-      return;
-    }
-    if (
-      !link ||
-      link.revokedAt ||
-      link.expiresAt < new Date() ||
-      !link.sshHostId ||
-      !link.sshHost ||
-      !link.tmuxName
-    ) {
-      ws.close(1008, "share link unavailable");
-      return;
-    }
-    // Ensure the SshSessionStream for the owner exists by reusing the
-    // same getOrCreate path (it'll spawn a pty if no one's attached yet).
-    // We pass the owner's userId so accounting matches the host owner.
-    let stream;
-    try {
-      stream = sshStreamRegistry.getOrCreate({
-        userId: link.userId,
-        hostSpec: link.sshHost,
-        tmuxName: link.tmuxName,
-        cols,
-        rows,
-      });
-    } catch (err) {
-      sendJson(ws, {
-        type: "fatal",
-        message: sanitizeAgentText(err?.message || "ssh spawn failed", 200),
-      });
-      ws.close(1011, "ssh spawn failed");
-      return;
-    }
-    try {
-      await stream.subscribe(ws, cols, rows, { readOnly: true });
-    } catch (err) {
-      sendJson(ws, {
-        type: "fatal",
-        message: sanitizeAgentText(err?.message || "subscribe failed", 200),
-      });
-      ws.close(1011, "subscribe failed");
-      return;
-    }
-    // Audit + bookkeeping: increment use count, update lastUsedAt.
-    // Fire-and-forget so a slow DB doesn't hold up the live stream.
-    prisma.shareLink
-      .update({
-        where: { id: link.id },
-        data: { useCount: { increment: 1 }, lastUsedAt: new Date() },
-      })
-      .catch(() => {});
-    prisma.auditEvent
-      .create({
-        data: {
-          action: "attach",
-          subjectType: "session",
-          deviceName: link.sshHost.name,
-          ip: ws._socket?.remoteAddress || null,
-          userAgent: null,
-          payload: JSON.stringify({
-            kind: "share-attach",
-            code: link.code || code,
-            tmuxName: link.tmuxName,
-          }),
-          userId: link.userId,
-        },
-      })
-      .catch(() => {});
-  }
-
-  function writeSshAttachAudit(userId, hostSpec, tmuxName, ws) {
-    // Pull the originating request's IP off the upgrade socket. The WS
-    // request itself was consumed by `handleUpgrade`, so we read from
-    // the underlying socket's remoteAddress as a best-effort. Same XFF
-    // policy as the audit lib: only honored when behind a trusted proxy.
-    const ip =
-      process.env.TERMAG_TRUSTED_PROXY === "true"
-        ? null // header-based ip would require keeping the upgrade headers around — skip for now
-        : ws._socket?.remoteAddress || null;
-    return prisma.auditEvent.create({
-      data: {
-        action: "attach",
-        subjectType: "session",
-        subjectId: null,
-        deviceName: hostSpec.name,
-        ip,
-        userAgent: null,
-        payload: JSON.stringify({ kind: "ssh", host: hostSpec.host, tmuxName }),
-        userId,
-      },
-    });
-  }
-
   return {
     registerAgent,
     registerBrowser,
-    refreshUser(userId) {
-      broadcastStatus(userId, true);
-    },
-    connectedDevices(userId) {
-      // Merge agent-backed devices with SSH-host devices. SSH hosts that
-      // haven't been loaded yet (e.g., first call after broker restart)
-      // get loaded asynchronously here — the first call returns whatever
-      // is in-memory; subsequent calls see the full list. The status WS
-      // path also calls refreshSshHosts on connect, so browsers don't see
-      // an incomplete picture in practice.
-      if (!sshHosts.has(userId)) {
-        refreshSshHosts(userId).catch(() => {});
-      }
-      return [
-        ...connectedAgents(userId).map(publicAgentStatus),
-        ...[...sshHostsForUser(userId).values()].map(publicSshHostStatus),
-      ];
-    },
-    refreshSshHosts,
-    probeSshHost: probeAndStoreSshHost,
-    forgetSshHost,
-    // Fire-and-forget poke that asks a specific device's agent to send a
-    // fresh health ping right now. Used by the publish API so the UI sees
-    // the new tmux state without waiting for the next scheduled health
-    // tick (HEALTH_INTERVAL_MS gap would otherwise show false missing-targets).
-    requestHealthRefresh(userId, deviceName) {
-      const agent = agentForUser(userId, deviceName);
-      if (!agent) {
-        return;
-      }
-      sendJson(agent.ws, { type: "health-request" });
-    },
-    async listTmuxSessions(userId) {
-      const liveAgents = connectedAgents(userId);
-      const agentResults = await Promise.all(
-        liveAgents.map(async agent => {
-          try {
-            const data = await sendToAgent(userId, agent.deviceName, "tmux-list", {}, 5000);
-            const sessions = Array.isArray(data?.sessions) ? data.sessions : [];
-            return sessions.map(session => ({ ...session, rootKey: agent.deviceName }));
-          } catch {
-            return [];
-          }
-        })
-      );
-      // Merge in cached SSH-host tmux sessions. Each session takes the
-      // host's name as its rootKey so the existing per-device grouping
-      // in the UI / CLI just works.
-      const sshResults = sshDeviceSnapshots(userId).flatMap(snap =>
-        snap.sessions.map(session => ({ ...session, rootKey: snap.rootKey }))
-      );
-      return [...agentResults.flat(), ...sshResults];
-    },
-    async listDirectory(userId, deviceName, rootKey, relativePath) {
-      if (!agentForUser(userId, deviceName)) {
-        throw new Error("Agent offline");
-      }
-      return sendToAgent(
-        userId,
-        deviceName,
-        "list-directory",
-        { rootKey, relativePath: relativePath || "" },
-        5000
-      );
-    },
-    async mutateRuntime(userId, deviceName, operation, payload = {}, timeoutMs = 10000) {
-      const allowed = new Set([
-        "runtime.create-session",
-        "runtime.create-space",
-        "runtime.create-tab",
-        "runtime.rename-space",
-        "runtime.rename-tab",
-        "runtime.rename-pane",
-        "runtime.close-tab",
-        "runtime.close-pane",
-        "runtime.close-space",
-        "runtime.close-session",
-      ]);
-      if (!allowed.has(operation)) {
-        throw new Error("Unsupported runtime operation");
-      }
-      if (!agentForUser(userId, deviceName)) {
-        throw new Error("Agent offline");
-      }
-      return sendToAgent(userId, deviceName, operation, payload, timeoutMs);
-    },
-    async startCaffeinate(userId, deviceName, mode, reason, durationMs) {
-      const agent = agentForUser(userId, deviceName);
-      if (!agent) {
-        throw new Error("Agent offline");
-      }
-      const wireMode =
-        agent.protocolVersion >= 2
-          ? mode
-          : mode === "terminals-awake"
-            ? "while-task"
-            : mode === "display-awake"
-              ? "forever"
-              : mode === "ac-awake"
-                ? "while-task"
-                : mode;
-      return sendToAgent(
-        userId,
-        deviceName,
-        "caffeinate-start",
-        { mode: wireMode, reason, durationMs },
-        5000
-      );
-    },
-    async stopCaffeinate(userId, deviceName) {
-      if (!agentForUser(userId, deviceName)) {
-        throw new Error("Agent offline");
-      }
-      return sendToAgent(userId, deviceName, "caffeinate-stop", {}, 5000);
-    },
-    async acquirePowerLease(userId, deviceName, leaseId, mode, reason, durationMs, renew = false) {
-      const agent = agentForUser(userId, deviceName);
-      if (!agent) {
-        throw new Error("Agent offline");
-      }
-      if (agent.protocolVersion < 2 || !agent.capabilities?.powerPolicy) {
-        throw new Error("Agent does not support renewable power leases");
-      }
-      return sendToAgent(
-        userId,
-        deviceName,
-        renew ? "power.renew" : "power.acquire",
-        { leaseId, mode, reason, durationMs },
-        5000
-      );
-    },
-    async releasePowerLease(userId, deviceName, leaseId) {
-      const agent = agentForUser(userId, deviceName);
-      if (!agent) {
-        throw new Error("Agent offline");
-      }
-      if (agent.protocolVersion < 2 || !agent.capabilities?.powerPolicy) {
-        throw new Error("Agent does not support renewable power leases");
-      }
-      return sendToAgent(userId, deviceName, "power.release", { leaseId }, 5000);
-    },
-    async getCaffeinateStatus(userId, deviceName) {
-      if (!agentForUser(userId, deviceName)) {
-        throw new Error("Agent offline");
-      }
-      const result = await sendToAgent(userId, deviceName, "caffeinate-status", {}, 5000);
-      return result?.state || result;
-    },
-    killTmuxSession(userId, deviceName, tmuxSessionName, timeoutMs = 5000) {
-      if (!tmuxSessionName || !agentForUser(userId, deviceName)) {
-        return Promise.resolve(false);
-      }
-      return sendToAgent(userId, deviceName, "tmux-kill-session", { tmuxSessionName }, timeoutMs)
-        .then(() => true)
-        .catch(() => false);
-    },
-    killTmuxWindow(userId, deviceName, tmuxName, timeoutMs = 5000) {
-      if (!tmuxName || !agentForUser(userId, deviceName)) {
-        return Promise.resolve(false);
-      }
-      return sendToAgent(userId, deviceName, "tmux-kill-window", { tmuxName }, timeoutMs)
-        .then(() => true)
-        .catch(() => false);
-    },
-    renameTmuxWindow(userId, deviceName, tmuxName, name, timeoutMs = 5000) {
-      if (!tmuxName || !name || !agentForUser(userId, deviceName)) {
-        return Promise.resolve(null);
-      }
-      return sendToAgent(
-        userId,
-        deviceName,
-        "tmux-rename-window",
-        { tmuxName, name },
-        timeoutMs
-      ).catch(() => null);
-    },
-    disconnectAgentToken(userId, tokenId) {
-      let kicked = false;
-      for (const agent of agentsForUser(userId).values()) {
-        if (agent.tokenId === tokenId && agent.ws.readyState === WebSocket.OPEN) {
-          agent.ws.close(1008, "token revoked");
-          kicked = true;
-        }
-      }
-      // The ws.close above eventually triggers broadcastStatus on the
-      // close handler, but that runs *after* the close round-trip. Fire
-      // an immediate broadcast so the web UI's "connected" dot updates
-      // instantly rather than waiting up to ~30s for the next health
-      // tick (or the close to round-trip back).
-      if (kicked) {
-        broadcastStatus(userId, true);
-      }
-    },
-    killTmux(userId, tmuxName, timeoutMs = 5000) {
-      if (!tmuxName || !agentForUser(userId)) {
-        return Promise.resolve(false);
-      }
-      return sendToAgent(userId, undefined, "tmux-kill", { tmuxName }, timeoutMs)
-        .then(() => true)
-        .catch(() => false);
-    },
+    ...createBrokerRpc({
+      WebSocket,
+      agentsForUser,
+      connectedAgents,
+      publicAgentStatus,
+      agentForUser,
+      sendJson,
+      sendToAgent,
+      broadcastStatus,
+      sshLifecycle,
+    }),
   };
 }
 
