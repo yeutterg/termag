@@ -16,9 +16,6 @@ services:
       TERMAG_PASSWORD: ${TERMAG_PASSWORD:-}
       TERMAG_ROOTS: '${TERMAG_ROOTS:-{}}'
       # Staging-specific variables
-      SENTRY_DSN: ${SENTRY_DSN}
-      SENTRY_ENVIRONMENT: staging
-      SENTRY_TRACES_SAMPLE_RATE: 0.5
       LOG_LEVEL: debug
       # OAuth vars (optional for staging)
       GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
