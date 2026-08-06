@@ -1,11 +1,10 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
-import { logAudit } from "@/lib/audit";
 import { readJsonBody, withAuth } from "@/lib/auth";
 import { runGitOperation } from "@/lib/broker";
-import { prisma } from "@/lib/prisma";
+import { findProject } from "@/lib/runtime-projects";
 
-const projectId = z.string().trim().min(1).max(64);
+const projectId = z.string().trim().min(1).max(4096);
 const singleLine = (max: number) =>
   z
     .string()
@@ -47,12 +46,15 @@ export const POST = withAuth(async (user, request: Request) => {
     return NextResponse.json({ error: "Invalid git operation" }, { status: 400 });
   }
   const { projectId: selectedProjectId, operation } = parsed.data;
-  const project = await prisma.project.findFirst({
-    where: { id: selectedProjectId, userId: user.id, archivedAt: null },
-    select: { id: true, rootKey: true, relativePath: true },
-  });
+  const project = await findProject(user.id, selectedProjectId);
   if (!project) {
     return NextResponse.json({ error: "Project not found" }, { status: 404 });
+  }
+  if (!project.directoryRootKey) {
+    return NextResponse.json(
+      { error: "This terminal directory is outside the device's configured roots" },
+      { status: 409 }
+    );
   }
 
   const operationPayload =
@@ -66,20 +68,9 @@ export const POST = withAuth(async (user, request: Request) => {
   try {
     const result = await runGitOperation(user.id, project.rootKey, operation, {
       ...operationPayload,
-      rootKey: project.rootKey,
+      rootKey: project.directoryRootKey,
       relativePath: project.relativePath,
     });
-    if (operation !== "git.status") {
-      logAudit({
-        userId: user.id,
-        action: "git-operation",
-        subjectType: "project",
-        subjectId: project.id,
-        deviceName: project.rootKey,
-        request,
-        payload: { operation, ok: result.ok, exitCode: result.exitCode },
-      });
-    }
     return NextResponse.json(result);
   } catch (error) {
     const message = error instanceof Error ? error.message : "Git operation failed";

@@ -531,7 +531,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "termag-agent"
+name = "terminalz"
 version = "0.2.0"
 dependencies = [
  "anyhow",

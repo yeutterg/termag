@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Database Restore Script for termag-next
+# Database restore script for Terminalz
 # This script restores a SQLite database from a backup
 
 set -e
@@ -8,12 +8,12 @@ set -e
 # Configuration
 DB_DIR="${DB_DIR:-./data}"
 BACKUP_DIR="${BACKUP_DIR:-./backups}"
-DB_FILE="${DB_FILE:-termag.db}"
+DB_FILE="${DB_FILE:-terminalz.db}"
 
 # Function to show usage
 usage() {
     echo "Usage: $0 <backup_file>"
-    echo "Example: $0 termag.db.backup.20231215-143000.gz"
+    echo "Example: $0 terminalz.db.backup.20260805-143000.gz"
     echo "Example: $0 latest"
     exit 1
 }

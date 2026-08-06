@@ -3,12 +3,13 @@
 import { memo, useCallback, useEffect, useRef, useState } from "react";
 import type { TouchEvent as ReactTouchEvent } from "react";
 import type { ITheme, Terminal as XTerm } from "@xterm/xterm";
+import { prefersLowDataMode } from "@/lib/mobile-data";
 import { cn, statusDot } from "@/lib/utils";
 
 // Palettes hoisted so they're stable references — set as term.options.theme
 // on init AND swapped live whenever the html.dark class flips.
 const DARK_THEME: ITheme = {
-  background: "#00000000",
+  background: "#0A0A0A",
   foreground: "#E4E4E7",
   cursor: "#FAFAFA",
   selectionBackground: "#404040",
@@ -31,7 +32,7 @@ const DARK_THEME: ITheme = {
 };
 
 const LIGHT_THEME: ITheme = {
-  background: "#00000000",
+  background: "#FFFFFF",
   foreground: "#18181B",
   cursor: "#18181B",
   selectionBackground: "#D4D4D8",
@@ -157,28 +158,6 @@ interface TerminalPaneProps {
   onTitleChange?: (sessionId: string, title: string) => void;
   /** Suppress the pane's own header — used when tabs above provide it. */
   hideHeader?: boolean;
-  /**
-   * When set, the pane connects to the SSH-attach WebSocket endpoint
-   * (`/api/ws/ssh-terminal`) instead of the per-session endpoint. The
-   * `sessionId` prop is still required (used as the local React key /
-   * title-change identifier) but ignored for routing.
-   */
-  ssh?: { hostId: string; tmuxName: string };
-  /**
-   * Read-only share viewer mode. Connects to the broker's
-   * /api/ws/share-terminal?code= endpoint, which resolves the
-   * (sshHostId, tmuxName) on the server side from the code. Inputs are
-   * suppressed both at the pane (no input messages sent) and at the
-   * broker (read-only subscriber flag).
-   */
-  share?: { code: string };
-  /**
-   * Optional callback fired with the latest subscriber count for the
-   * session. Parents (e.g., the SSH attach shell) use this to render a
-   * "👁 N" chip when more than one client is attached. Only the SSH path
-   * sends these messages today; agent attaches will follow.
-   */
-  onSubscriberCount?: (count: number) => void;
 }
 
 function TerminalPaneImpl({
@@ -188,43 +167,30 @@ function TerminalPaneImpl({
   status,
   onTitleChange,
   hideHeader,
-  ssh,
-  share,
-  onSubscriberCount,
 }: TerminalPaneProps) {
   const hostRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<XTerm | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
   // Driver/read-only state is null until the agent's first driver-changed
-  // message arrives, so we don't render a stale "Take control" badge during
-  // the brief reconnect window. After the first message lands, we trust the
-  // agent and re-render on every update.
+  // message arrives. The most recent focus/click/keystroke owns the
+  // single-writer lease; only a true read-only state needs UI.
   const [driverState, setDriverState] = useState<{ driver: boolean; readOnly: boolean } | null>(
     null
   );
+  const driverStateRef = useRef<{ driver: boolean; readOnly: boolean } | null>(null);
   const [pageActive, setPageActive] = useState(true);
   const [connectionIssue, setConnectionIssue] = useState<{
     fatal: boolean;
     message: string;
   } | null>(null);
   const manualReconnectRef = useRef<(() => void) | null>(null);
-  const sshHostId = ssh?.hostId;
-  const sshTmuxName = ssh?.tmuxName;
-  const shareCode = share?.code;
   // Capture latest onTitleChange so the xterm listener (set up once) always
   // invokes the current callback without rebinding the terminal.
   const onTitleChangeRef = useRef(onTitleChange);
-  // Same trick for the subscriber-count callback so the WS message
-  // handler (set up once) always sees the latest callback.
-  const onSubscriberCountRef = useRef(onSubscriberCount);
 
   useEffect(() => {
     onTitleChangeRef.current = onTitleChange;
   }, [onTitleChange]);
-
-  useEffect(() => {
-    onSubscriberCountRef.current = onSubscriberCount;
-  }, [onSubscriberCount]);
 
   useEffect(() => subscribePageActivity(setPageActive), []);
 
@@ -232,13 +198,13 @@ function TerminalPaneImpl({
     if (!active || !pageActive || !hostRef.current) {
       return;
     }
+    const lowData = prefersLowDataMode();
     let disposed = false;
     let term: XTerm | null = null;
     let fitAddon: { fit: () => void } | null = null;
     let raf = 0;
     let resizeTimer: ReturnType<typeof setTimeout> | null = null;
     let observer: ResizeObserver | null = null;
-    let onKill: ((event: Event) => void) | null = null;
     let onVisibilityRef: (() => void) | null = null;
     let onOnlineRef: (() => void) | null = null;
     let onVisualViewportRef: (() => void) | null = null;
@@ -308,7 +274,7 @@ function TerminalPaneImpl({
     }
 
     // WebSocket lifecycle is its own function so we can re-run it on disconnect.
-    // All input sites (term.onData, onKill, onVisibility, ResizeObserver) read
+    // All input sites (term.onData, onVisibility, ResizeObserver) read
     // wsRef.current at call time so they always target the latest socket — no
     // stale closure over a closed WS after a reconnect.
     function connectWS() {
@@ -320,23 +286,23 @@ function TerminalPaneImpl({
         reconnectTimer = null;
       }
       const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-      // Hint the broker to trim initial scrollback when the user is on a
-      // metered/cellular connection or has Low Data Mode on.
-      type ConnectionLike = { saveData?: boolean; effectiveType?: string };
-      const conn = (navigator as Navigator & { connection?: ConnectionLike }).connection;
-      const saveDataHint =
-        conn?.saveData || /^(slow-2g|2g|3g)$/.test(conn?.effectiveType ?? "") ? "&saveData=1" : "";
-      // Three connection modes. Share routes through a public WS path
-      // that authenticates via the share code; SSH attaches use hostId
-      // + tmuxName; everything else is sessionId-keyed. The on-wire
-      // protocol is identical from this point on (binary frames for
-      // output, JSON for control), so nothing else here has to branch.
-      const wsUrl = shareCode
-        ? `${protocol}//${window.location.host}/api/ws/share-terminal?code=${encodeURIComponent(shareCode)}&cols=${term.cols}&rows=${term.rows}`
-        : sshHostId && sshTmuxName
-          ? `${protocol}//${window.location.host}/api/ws/ssh-terminal?hostId=${encodeURIComponent(sshHostId)}&tmuxName=${encodeURIComponent(sshTmuxName)}&cols=${term.cols}&rows=${term.rows}`
-          : `${protocol}//${window.location.host}/api/ws/terminal?sessionId=${sessionId}&cols=${term.cols}&rows=${term.rows}${saveDataHint}`;
-      const ws = new WebSocket(wsUrl);
+      const params = new URLSearchParams({
+        sessionId,
+        cols: String(term.cols),
+        rows: String(term.rows),
+        ...(lowData ? { dataMode: "low" } : {}),
+      });
+      const wsUrl = `${protocol}//${window.location.host}/api/ws/terminal?${params}`;
+      let ws: WebSocket;
+      try {
+        ws = new WebSocket(wsUrl);
+      } catch (error) {
+        setConnectionIssue({
+          fatal: true,
+          message: error instanceof Error ? error.message : "Unable to open terminal connection",
+        });
+        return;
+      }
       ws.binaryType = "arraybuffer";
       wsRef.current = ws;
 
@@ -353,6 +319,7 @@ function TerminalPaneImpl({
         // Driver state is unknown until the agent's first driver-changed
         // message lands. Showing the previous connection's state would be
         // misleading after a reconnect (drive likely went to someone else).
+        driverStateRef.current = null;
         setDriverState(null);
         fitAddon?.fit();
         ws.send(JSON.stringify({ type: "resize", cols: term!.cols, rows: term!.rows }));
@@ -381,9 +348,6 @@ function TerminalPaneImpl({
         } catch {
           return;
         }
-        if (msg.type === "output") {
-          writeTerminal(msg.data ?? "");
-        } // legacy/control fallback
         // Queue RIS through xterm's parser so bytes already waiting in its
         // write buffer cannot land after a synchronous reset and corrupt the
         // newly-arriving full checkpoint.
@@ -408,17 +372,16 @@ function TerminalPaneImpl({
             ws.close(1008, "terminal unavailable");
           } catch {}
         }
-        if (msg.type === "subscribers" && typeof (msg as { count?: unknown }).count === "number") {
-          onSubscriberCountRef.current?.((msg as { count: number }).count);
-        }
         if (msg.type === "driver-changed") {
           // Multi-subscriber model: agent's SessionStream broadcasts on every
           // driver change so each viewer knows whether they're driving or
           // riding along. UI just reads two flags out of state.
-          setDriverState({
+          const nextDriverState = {
             driver: Boolean((msg as { driver?: unknown }).driver),
             readOnly: Boolean((msg as { readOnly?: unknown }).readOnly),
-          });
+          };
+          driverStateRef.current = nextDriverState;
+          setDriverState(nextDriverState);
         }
       };
       ws.onclose = event => {
@@ -525,19 +488,13 @@ function TerminalPaneImpl({
       const fontFamily = [monoVar, '"DM Mono"', "SFMono-Regular", "Consolas", "monospace"]
         .filter(Boolean)
         .join(", ");
-      type ConnectionLike = { saveData?: boolean; effectiveType?: string };
-      const connection = (navigator as Navigator & { connection?: ConnectionLike }).connection;
-      const constrained =
-        Boolean(connection?.saveData) ||
-        /^(slow-2g|2g|3g)$/.test(connection?.effectiveType ?? "") ||
-        window.matchMedia("(max-width: 767px)").matches;
       term = new Terminal({
-        allowTransparency: true,
+        allowTransparency: false,
         cursorBlink: true,
         fontFamily,
         fontSize: 12,
         lineHeight: 1.4,
-        scrollback: constrained ? 500 : 2000,
+        scrollback: lowData ? 500 : 2000,
         theme: currentTheme(),
       });
 
@@ -555,7 +512,7 @@ function TerminalPaneImpl({
       term.loadAddon(fit);
       term.open(hostRef.current);
       termRef.current = term;
-      if (!constrained && window.matchMedia("(hover: hover) and (pointer: fine)").matches) {
+      if (!lowData && window.matchMedia("(hover: hover) and (pointer: fine)").matches) {
         void import("@xterm/addon-web-links").then(({ WebLinksAddon }) => {
           if (!disposed && term) {
             term.loadAddon(new WebLinksAddon());
@@ -584,20 +541,8 @@ function TerminalPaneImpl({
       // assigned to wsRef.current. After a reconnect, the new WS just gets
       // the keystrokes naturally.
       term.onData(data => {
-        const ws = wsRef.current;
-        if (ws?.readyState === WebSocket.OPEN) {
-          sendTerminalInput(ws, data);
-        }
+        sendInput(data);
       });
-
-      onKill = (event: Event) => {
-        const custom = event as CustomEvent<{ sessionId: string }>;
-        const ws = wsRef.current;
-        if (custom.detail?.sessionId === sessionId && ws?.readyState === WebSocket.OPEN) {
-          ws.send(JSON.stringify({ type: "kill" }));
-        }
-      };
-      window.addEventListener("termag:kill-session", onKill);
 
       // Pause the output stream when the tab/app is hidden — saves a lot of
       // cellular data when a phone is locked or backgrounded. The broker
@@ -639,7 +584,13 @@ function TerminalPaneImpl({
         fit.fit();
         connectWS();
       });
-    })();
+    })().catch(error => {
+      console.error("[termag] terminal initialization failed", error);
+      setConnectionIssue({
+        fatal: true,
+        message: error instanceof Error ? error.message : "Terminal initialization failed",
+      });
+    });
 
     return () => {
       disposed = true;
@@ -656,9 +607,6 @@ function TerminalPaneImpl({
       }
       wsRef.current?.close();
       wsRef.current = null;
-      if (onKill) {
-        window.removeEventListener("termag:kill-session", onKill);
-      }
       if (onVisibilityRef) {
         document.removeEventListener("visibilitychange", onVisibilityRef);
       }
@@ -675,16 +623,30 @@ function TerminalPaneImpl({
       term?.dispose();
       termRef.current = null;
     };
-  }, [active, pageActive, sessionId, shareCode, sshHostId, sshTmuxName]);
+  }, [active, pageActive, sessionId]);
 
   function claimDrive() {
     const ws = wsRef.current;
-    if (ws?.readyState === WebSocket.OPEN && !driverState?.readOnly) {
-      ws.send(JSON.stringify({ type: "claim-drive" }));
+    if (ws?.readyState !== WebSocket.OPEN || driverStateRef.current?.readOnly) {
+      return;
     }
+    // Send even when our cached state says we are the driver. Another viewer
+    // may have focused the same terminal a moment ago and its state update can
+    // still be in flight; server ordering makes the latest interaction win.
+    ws.send(JSON.stringify({ type: "claim-drive" }));
   }
 
-  const showBadge = driverState !== null && !driverState.driver;
+  function sendInput(data: string) {
+    const ws = wsRef.current;
+    if (ws?.readyState !== WebSocket.OPEN || driverStateRef.current?.readOnly) {
+      return;
+    }
+    // terminal-input is an atomic claim+write at the agent. That makes the
+    // latest keystroke authoritative without a second browser→broker frame or
+    // a race where control changes between separate claim and input messages.
+    sendTerminalInput(ws, data);
+  }
+
   const isReadOnly = driverState?.readOnly === true;
 
   // Two-finger horizontal swipe → tab switch. Tracked here so the
@@ -745,17 +707,14 @@ function TerminalPaneImpl({
           </button>
         </div>
       )}
-      {hideHeader && showBadge && (
-        <button
-          type="button"
-          onClick={claimDrive}
-          disabled={isReadOnly}
-          className="absolute right-2 top-2 z-20 inline-flex h-6 items-center gap-1 rounded border border-line bg-panel/95 px-2 text-[10px] text-muted shadow hover:text-text disabled:cursor-not-allowed disabled:opacity-60"
-          title={isReadOnly ? "Read-only session" : "Take keyboard control from the current driver"}
+      {hideHeader && isReadOnly && (
+        <div
+          className="absolute right-2 top-2 z-20 inline-flex h-6 items-center gap-1 rounded border border-line bg-panel/95 px-2 text-[10px] text-muted shadow"
+          title="Read-only session"
         >
           <span className="h-1.5 w-1.5 rounded-full bg-muted" />
-          {isReadOnly ? "Read-only" : "Take control"}
-        </button>
+          Read-only
+        </div>
       )}
       {!hideHeader && (
         <header className="flex h-9 shrink-0 items-center justify-between bg-panel px-3 text-xs">
@@ -764,19 +723,14 @@ function TerminalPaneImpl({
             <span className="truncate font-medium">{title}</span>
           </div>
           <div className="flex items-center gap-2">
-            {showBadge && (
-              <button
-                type="button"
-                onClick={claimDrive}
-                disabled={isReadOnly}
-                className="inline-flex h-6 items-center gap-1 rounded border border-line bg-panel2 px-2 text-[10px] text-muted hover:text-text disabled:cursor-not-allowed disabled:opacity-60"
-                title={
-                  isReadOnly ? "Read-only session" : "Take keyboard control from the current driver"
-                }
+            {isReadOnly && (
+              <span
+                className="inline-flex h-6 items-center gap-1 rounded border border-line bg-panel2 px-2 text-[10px] text-muted"
+                title="Read-only session"
               >
                 <span className="h-1.5 w-1.5 rounded-full bg-muted" />
-                {isReadOnly ? "Read-only" : "Take control"}
-              </button>
+                Read-only
+              </span>
             )}
             <span className="font-mono text-[10px] text-muted">{status ?? "sleeping"}</span>
           </div>
@@ -785,6 +739,8 @@ function TerminalPaneImpl({
       <div
         ref={hostRef}
         className="min-h-0 flex-1 bg-bg"
+        onPointerDown={claimDrive}
+        onFocusCapture={claimDrive}
         // iPad-first: two-finger horizontal swipe switches tabs. The
         // gesture dispatches a window-level CustomEvent ('termag:tab-swipe')
         // that termag-app resolves against the active project's tab order.
@@ -794,10 +750,7 @@ function TerminalPaneImpl({
       />
       <MobileSoftKeys
         onInput={data => {
-          const ws = wsRef.current;
-          if (ws?.readyState === WebSocket.OPEN) {
-            sendTerminalInput(ws, data);
-          }
+          sendInput(data);
           termRef.current?.focus();
         }}
       />

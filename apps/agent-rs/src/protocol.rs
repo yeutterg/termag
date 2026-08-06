@@ -119,6 +119,13 @@ impl Incoming {
             .and_then(|v| u16::try_from(v).ok())
             .unwrap_or(fallback)
     }
+    pub fn u32(&self, key: &str, fallback: u32) -> u32 {
+        self.data
+            .get(key)
+            .and_then(Value::as_u64)
+            .and_then(|v| u32::try_from(v).ok())
+            .unwrap_or(fallback)
+    }
     pub fn value(&self, key: &str) -> Option<&Value> {
         self.data.get(key)
     }

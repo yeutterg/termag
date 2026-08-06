@@ -1,0 +1,6 @@
+services:
+  web:
+    image: terminalz-web:dev
+    build:
+      context: ..
+      dockerfile: apps/web/Dockerfile

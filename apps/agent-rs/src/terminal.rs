@@ -8,60 +8,80 @@ use std::{
     time::{Duration, Instant},
 };
 use tokio::{
-    io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines},
+    io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader},
     process::{Child, ChildStdin, ChildStdout, Command},
     sync::mpsc,
     time::{interval, timeout, Interval, MissedTickBehavior},
 };
 
 static TMUX_CONTROL_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+const DEFAULT_CHECKPOINT_HISTORY_LINES: u16 = 2000;
+const DEFAULT_CHECKPOINT_MAX_BYTES: usize = 1024 * 1024;
+const MIN_CHECKPOINT_HISTORY_LINES: u16 = 100;
+const MIN_CHECKPOINT_MAX_BYTES: usize = 64 * 1024;
+
+#[derive(Debug, Clone, Copy)]
+struct CheckpointPolicy {
+    history_lines: u16,
+    max_bytes: usize,
+}
+
+impl CheckpointPolicy {
+    fn new(history_lines: u16, max_bytes: usize) -> Self {
+        Self {
+            history_lines: history_lines.clamp(
+                MIN_CHECKPOINT_HISTORY_LINES,
+                DEFAULT_CHECKPOINT_HISTORY_LINES,
+            ),
+            max_bytes: max_bytes.clamp(MIN_CHECKPOINT_MAX_BYTES, DEFAULT_CHECKPOINT_MAX_BYTES),
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Target {
     pub runtime: String,
     pub runtime_session_id: String,
     pub external_id: String,
-    pub tmux_session: Option<String>,
     pub cwd: Option<String>,
 }
 
 impl Target {
-    pub fn from_value(value: Option<&Value>, fallback_tmux_name: Option<String>) -> Result<Self> {
-        let raw = value.and_then(Value::as_object);
+    pub fn from_value(value: Option<&Value>) -> Result<Self> {
+        let raw = value
+            .and_then(Value::as_object)
+            .context("runtimeTarget is required")?;
         let runtime = raw
-            .and_then(|v| v.get("runtime"))
+            .get("runtime")
             .and_then(Value::as_str)
-            .unwrap_or("tmux")
+            .context("runtimeTarget.runtime is required")?
             .to_owned();
+        if runtime != "herdr" && runtime != "tmux" {
+            bail!("runtimeTarget.runtime must be herdr or tmux");
+        }
         let runtime_session_id = raw
-            .and_then(|v| v.get("runtimeSessionId"))
+            .get("runtimeSessionId")
             .and_then(Value::as_str)
             .map(ToOwned::to_owned)
-            .or_else(|| fallback_tmux_name.clone())
-            .unwrap_or_default();
+            .context("runtimeTarget.runtimeSessionId is required")?;
         let external_id = raw
-            .and_then(|v| v.get("paneId"))
+            .get("paneId")
             .and_then(Value::as_str)
-            .or_else(|| {
-                raw.and_then(|v| v.get("externalId"))
-                    .and_then(Value::as_str)
-            })
             .map(ToOwned::to_owned)
-            .or(fallback_tmux_name)
-            .unwrap_or_default();
-        if runtime_session_id.is_empty() || external_id.is_empty() {
+            .context("runtimeTarget.paneId is required")?;
+        if runtime_session_id.is_empty()
+            || external_id.is_empty()
+            || runtime_session_id.len() > 512
+            || external_id.len() > 512
+        {
             bail!("runtime target is incomplete");
         }
         Ok(Self {
             runtime,
             runtime_session_id,
             external_id,
-            tmux_session: raw
-                .and_then(|v| v.get("tmuxSession"))
-                .and_then(Value::as_str)
-                .map(ToOwned::to_owned),
             cwd: raw
-                .and_then(|v| v.get("cwd"))
+                .get("cwd")
                 .and_then(Value::as_str)
                 .map(ToOwned::to_owned),
         })
@@ -74,7 +94,7 @@ enum StreamCommand {
     Resize(u16, u16),
     TakeControl,
     ReleaseControl,
-    Checkpoint,
+    Checkpoint(CheckpointPolicy),
     Stop,
 }
 
@@ -137,12 +157,23 @@ pub enum Outbound {
     },
 }
 
+pub struct AttachOptions {
+    pub cols: u16,
+    pub rows: u16,
+    pub read_only: bool,
+    pub request_checkpoint: bool,
+    pub checkpoint_history_lines: u16,
+    pub checkpoint_max_bytes: usize,
+}
+
 pub const MAX_TERMINAL_DATA_BYTES: usize = 240 * 1024;
 
 // A runtime task stops polling its command queue while it captures a
 // checkpoint (bounded at 5s). Size the queue so an ordinary paste still fits
 // in that window rather than being rejected as backpressure.
-const COMMAND_QUEUE_DEPTH: usize = 256;
+const COMMAND_QUEUE_DEPTH: usize = 64;
+const EVENT_QUEUE_DEPTH: usize = 16;
+const MAX_HERDR_FRAME_BYTES: usize = 2 * 1024 * 1024;
 
 pub fn next_terminal_sequence(sequence: u32) -> u32 {
     sequence.wrapping_add(1).max(1)
@@ -199,7 +230,7 @@ impl Registry {
         // PTY readers await this bounded queue, allowing the kernel/runtime
         // socket to provide natural backpressure instead of retaining a large
         // burst per active terminal in the daemon heap.
-        let (event_tx, event_rx) = mpsc::channel(32);
+        let (event_tx, event_rx) = mpsc::channel(EVENT_QUEUE_DEPTH);
         Self {
             targets: HashMap::new(),
             by_stream: HashMap::new(),
@@ -217,13 +248,16 @@ impl Registry {
         &mut self,
         stream_id: String,
         target: Target,
-        cols: u16,
-        rows: u16,
-        read_only: bool,
-        request_checkpoint: bool,
+        options: AttachOptions,
     ) -> Result<Vec<Value>> {
         self.close(&stream_id);
         let already_streaming = self.targets.contains_key(&target);
+        let checkpoint_policy = CheckpointPolicy::new(
+            options.checkpoint_history_lines,
+            options.checkpoint_max_bytes,
+        );
+        let cols = options.cols;
+        let rows = options.rows;
         if !already_streaming {
             let (tx, rx) = mpsc::channel(COMMAND_QUEUE_DEPTH);
             self.next_generation += 1;
@@ -237,7 +271,7 @@ impl Registry {
                 let result = if spawn_sink.target().runtime == "herdr" {
                     run_herdr(spawn_sink.clone(), cols, rows, rx).await
                 } else {
-                    run_tmux(spawn_sink.clone(), cols, rows, rx).await
+                    run_tmux(spawn_sink.clone(), cols, rows, checkpoint_policy, rx).await
                 };
                 if result.is_err() {
                     spawn_sink.send(StreamEventKind::Exit).await;
@@ -262,7 +296,7 @@ impl Registry {
         shared.subscribers.insert(
             stream_id.clone(),
             Subscriber {
-                read_only,
+                read_only: options.read_only,
                 cols,
                 rows,
                 last_input: Instant::now() - Duration::from_secs(60),
@@ -272,27 +306,46 @@ impl Registry {
             shared.anchor = stream_id.clone();
         }
         self.by_stream.insert(stream_id.clone(), target.clone());
-        if already_streaming && request_checkpoint {
-            let _ = shared.tx.try_send(StreamCommand::Checkpoint);
+        if already_streaming && options.request_checkpoint {
+            let _ = shared
+                .tx
+                .try_send(StreamCommand::Checkpoint(checkpoint_policy));
         }
         self.resize_target(&target);
         Ok(self.driver_messages(&target))
     }
 
-    pub fn input(&mut self, stream_id: &str, data: Vec<u8>) -> Result<()> {
+    pub fn input(&mut self, stream_id: &str, data: Vec<u8>) -> Result<Vec<Value>> {
         let Some(target) = self.by_stream.get(stream_id).cloned() else {
-            return Ok(());
+            return Ok(Vec::new());
         };
         let Some(shared) = self.targets.get_mut(&target) else {
-            return Ok(());
+            return Ok(Vec::new());
         };
-        let Some(subscriber) = shared.subscribers.get_mut(stream_id) else {
-            return Ok(());
-        };
-        if subscriber.read_only || shared.driver.as_deref() != Some(stream_id) {
-            return Ok(());
+        if shared
+            .subscribers
+            .get(stream_id)
+            .is_none_or(|subscriber| subscriber.read_only)
+        {
+            return Ok(Vec::new());
         }
-        subscriber.last_input = Instant::now();
+        let driver_changed = shared.driver.as_deref() != Some(stream_id);
+        if driver_changed {
+            shared.driver = Some(stream_id.to_owned());
+            if let Some(subscriber) = shared.subscribers.get(stream_id) {
+                shared.cols = subscriber.cols;
+                shared.rows = subscriber.rows;
+            }
+            let _ = shared
+                .tx
+                .try_send(StreamCommand::Resize(shared.cols, shared.rows));
+            if target.runtime == "herdr" {
+                let _ = shared.tx.try_send(StreamCommand::TakeControl);
+            }
+        }
+        if let Some(subscriber) = shared.subscribers.get_mut(stream_id) {
+            subscriber.last_input = Instant::now();
+        }
         // A full queue means the runtime task has not drained a deep buffer,
         // which in practice only happens while it is blocked mid-checkpoint.
         // Report it instead of awaiting: silently reordering the keystroke
@@ -300,7 +353,11 @@ impl Registry {
         if shared.tx.try_send(StreamCommand::Input(data)).is_err() {
             bail!("terminal is not accepting input right now");
         }
-        Ok(())
+        Ok(if driver_changed {
+            self.driver_messages(&target)
+        } else {
+            Vec::new()
+        })
     }
 
     pub fn resize(&mut self, stream_id: &str, cols: u16, rows: u16) {
@@ -330,6 +387,12 @@ impl Registry {
             .get(stream_id)
             .is_some_and(|sub| sub.read_only)
         {
+            return Vec::new();
+        }
+        if shared.driver.as_deref() == Some(stream_id) {
+            if let Some(subscriber) = shared.subscribers.get_mut(stream_id) {
+                subscriber.last_input = Instant::now();
+            }
             return Vec::new();
         }
         shared.driver = Some(stream_id.to_owned());
@@ -537,13 +600,11 @@ async fn run_tmux(
     sink: EventSink,
     _cols: u16,
     _rows: u16,
+    initial_checkpoint_policy: CheckpointPolicy,
     mut rx: mpsc::Receiver<StreamCommand>,
 ) -> Result<()> {
     let target = sink.target().clone();
-    let tmux_session = target
-        .tmux_session
-        .clone()
-        .unwrap_or_else(|| target.runtime_session_id.clone());
+    let tmux_session = target.runtime_session_id.clone();
     let (pane_id, session_panes) = tmux_target(&target, &tmux_session).await?;
 
     // A normal tmux client can isolate its current window with a grouped
@@ -583,6 +644,7 @@ async fn run_tmux(
             false,
             &sink,
             &mut output_gap,
+            initial_checkpoint_policy,
         ),
     )
     .await
@@ -608,7 +670,7 @@ async fn run_tmux(
                 Some(StreamCommand::Resize(_, _)) => {},
                 Some(StreamCommand::TakeControl) => {},
                 Some(StreamCommand::ReleaseControl) => {},
-                Some(StreamCommand::Checkpoint) => {
+                Some(StreamCommand::Checkpoint(checkpoint_policy)) => {
                     let checkpoint = timeout(
                         Duration::from_secs(5),
                         capture_tmux_control_checkpoint(
@@ -618,6 +680,7 @@ async fn run_tmux(
                             true,
                             &sink,
                             &mut output_gap,
+                            checkpoint_policy,
                         ),
                     ).await.context("tmux checkpoint timed out")??;
                     emit_terminal_data(&sink, &mut output_gap, checkpoint, true);
@@ -712,9 +775,10 @@ async fn capture_tmux_control_checkpoint(
     forward_prior_output: bool,
     sink: &EventSink,
     output_gap: &mut bool,
+    policy: CheckpointPolicy,
 ) -> Result<Vec<u8>> {
     let marker = format!(
-        "TERMAG_CHECKPOINT_{}_{}",
+        "TERMINALZ_CHECKPOINT_{}_{}",
         std::process::id(),
         TMUX_CONTROL_SEQUENCE.fetch_add(1, Ordering::Relaxed)
     );
@@ -722,11 +786,16 @@ async fn capture_tmux_control_checkpoint(
         .write_all(format!("display-message -p {marker}\n").as_bytes())
         .await?;
     stdin
-        .write_all(format!("capture-pane -p -e -J -S -2000 -t {pane_id}\n").as_bytes())
+        .write_all(
+            format!(
+                "capture-pane -p -e -J -S -{} -t {pane_id}\n",
+                policy.history_lines
+            )
+            .as_bytes(),
+        )
         .await?;
     stdin.flush().await?;
 
-    const MAX_CHECKPOINT_BYTES: usize = 2 * 1024 * 1024;
     const CHECKPOINT_TRIM_SLOP: usize = 64 * 1024;
     let mut line = Vec::with_capacity(32 * 1024);
     let mut active_guard: Option<Vec<u8>> = None;
@@ -757,7 +826,7 @@ async fn capture_tmux_control_checkpoint(
             // without returning to column 0 and the restored screen stair-
             // steps. Re-add the carriage return the pane itself would have.
             checkpoint.extend_from_slice(b"\r\n");
-            trim_tmux_checkpoint(&mut checkpoint, MAX_CHECKPOINT_BYTES, CHECKPOINT_TRIM_SLOP);
+            trim_tmux_checkpoint(&mut checkpoint, policy.max_bytes, CHECKPOINT_TRIM_SLOP);
             continue;
         }
 
@@ -787,7 +856,7 @@ async fn capture_tmux_control_checkpoint(
             }
         }
     }
-    trim_tmux_checkpoint(&mut checkpoint, MAX_CHECKPOINT_BYTES, 0);
+    trim_tmux_checkpoint(&mut checkpoint, policy.max_bytes, 0);
     Ok(checkpoint)
 }
 
@@ -926,7 +995,7 @@ fn retry_terminal_gap(sink: &EventSink, output_gap: &mut bool) {
 struct HerdrChild {
     child: Child,
     stdin: Option<ChildStdin>,
-    lines: Lines<BufReader<ChildStdout>>,
+    reader: BufReader<ChildStdout>,
     controller: bool,
 }
 
@@ -955,15 +1024,45 @@ async fn spawn_herdr(
         .kill_on_drop(true);
     let mut child = command
         .spawn()
-        .context("could not start HerdR terminal helper")?;
+        .context("could not start Herdr terminal helper")?;
     let stdin = child.stdin.take();
-    let stdout = child.stdout.take().context("HerdR helper has no stdout")?;
+    let stdout = child.stdout.take().context("Herdr helper has no stdout")?;
     Ok(HerdrChild {
         child,
         stdin,
-        lines: BufReader::new(stdout).lines(),
+        reader: BufReader::with_capacity(32 * 1024, stdout),
         controller,
     })
+}
+
+async fn read_herdr_line<R: AsyncBufRead + Unpin>(
+    reader: &mut R,
+    line: &mut Vec<u8>,
+) -> Result<bool> {
+    line.clear();
+    loop {
+        let (consumed, newline) = {
+            let available = reader.fill_buf().await?;
+            if available.is_empty() {
+                return Ok(!line.is_empty());
+            }
+            let newline = available.iter().position(|byte| *byte == b'\n');
+            let consumed = newline.map_or(available.len(), |index| index + 1);
+            if line.len() + consumed > MAX_HERDR_FRAME_BYTES {
+                bail!("Herdr terminal frame exceeded 2 MiB");
+            }
+            let content_bytes = consumed - usize::from(newline.is_some());
+            line.extend_from_slice(&available[..content_bytes]);
+            (consumed, newline.is_some())
+        };
+        reader.consume(consumed);
+        if newline {
+            if line.last() == Some(&b'\r') {
+                line.pop();
+            }
+            return Ok(true);
+        }
+    }
 }
 
 async fn run_herdr_cli(
@@ -976,20 +1075,21 @@ async fn run_herdr_cli(
     let mut helper = spawn_herdr(&target, cols, rows, false).await?;
     let mut output_gap = false;
     let mut gap_tick = gap_retry_interval();
+    let mut line = Vec::with_capacity(32 * 1024);
     loop {
         tokio::select! {
-            line = helper.lines.next_line() => match line? {
-                Some(line) => {
-                    let value: Value = match serde_json::from_str(&line) { Ok(value) => value, Err(_) => continue };
+            read = read_herdr_line(&mut helper.reader, &mut line) => {
+                if !read? {
+                    break;
+                }
+                let value: Value = match serde_json::from_slice(&line) { Ok(value) => value, Err(_) => continue };
                     if value.get("type").and_then(Value::as_str) == Some("terminal.frame") {
                         if let Some(bytes) = value.get("bytes").and_then(Value::as_str).and_then(|v| BASE64.decode(v).ok()) {
                             let full = value.get("full").and_then(Value::as_bool).unwrap_or(false);
                             emit_terminal_data(&sink, &mut output_gap, bytes, full);
                         }
                     } else if value.get("type").and_then(Value::as_str) == Some("terminal.closed") { break; }
-                }
-                None => break,
-            },
+            }
             command = rx.recv() => match command {
                 Some(StreamCommand::Input(data)) if helper.controller => {
                     if let Some(stdin) = helper.stdin.as_mut() {
@@ -1022,7 +1122,7 @@ async fn run_herdr_cli(
                     sink.send(StreamEventKind::Controller(false)).await;
                 }
                 Some(StreamCommand::ReleaseControl) => {}
-                Some(StreamCommand::Checkpoint) => {
+                Some(StreamCommand::Checkpoint(_)) => {
                     let controller = helper.controller;
                     let _ = helper.child.start_kill(); let _ = helper.child.wait().await;
                     helper = spawn_herdr(&target, cols, rows, controller).await?;
@@ -1049,7 +1149,7 @@ async fn run_herdr(
     rows: u16,
     rx: mpsc::Receiver<StreamCommand>,
 ) -> Result<()> {
-    // Keep HerdR behind its public process boundary. One helper is shared by
+    // Keep Herdr behind its public process boundary. One helper is shared by
     // every browser viewing this target and exists only while that target is
     // open in the cloud; idle inventory never retains a helper process.
     run_herdr_cli(sink, cols, rows, rx).await
@@ -1064,7 +1164,6 @@ mod tests {
             runtime: "tmux".to_owned(),
             runtime_session_id: "$1".to_owned(),
             external_id: "%1".to_owned(),
-            tmux_session: Some("test".to_owned()),
             cwd: None,
         }
     }
@@ -1074,7 +1173,7 @@ mod tests {
         target: &Target,
         generation: u64,
     ) -> mpsc::Receiver<StreamCommand> {
-        let (tx, rx) = mpsc::channel(1);
+        let (tx, rx) = mpsc::channel(8);
         registry.targets.insert(
             target.clone(),
             SharedStream {
@@ -1109,6 +1208,58 @@ mod tests {
             generation,
             kind,
         }
+    }
+
+    #[test]
+    fn latest_keystroke_atomically_takes_the_driver_lease() {
+        let mut registry = Registry::new();
+        let target = test_target();
+        let mut rx = seed(&mut registry, &target, 1);
+        let shared = registry.targets.get_mut(&target).unwrap();
+        shared.subscribers.get_mut("stream-1").unwrap().read_only = false;
+        shared.subscribers.insert(
+            "stream-2".to_owned(),
+            Subscriber {
+                read_only: false,
+                cols: 100,
+                rows: 30,
+                last_input: Instant::now(),
+            },
+        );
+        registry
+            .by_stream
+            .insert("stream-2".to_owned(), target.clone());
+
+        let first = registry.input("stream-1", b"a".to_vec()).unwrap();
+        assert!(first
+            .iter()
+            .any(|message| { message["streamId"] == "stream-1" && message["driver"] == true }));
+        assert_eq!(
+            registry.targets.get(&target).unwrap().driver.as_deref(),
+            Some("stream-1")
+        );
+
+        let second = registry.input("stream-2", b"b".to_vec()).unwrap();
+        assert!(second
+            .iter()
+            .any(|message| { message["streamId"] == "stream-2" && message["driver"] == true }));
+        assert!(second
+            .iter()
+            .any(|message| { message["streamId"] == "stream-1" && message["driver"] == false }));
+        assert_eq!(
+            registry.targets.get(&target).unwrap().driver.as_deref(),
+            Some("stream-2")
+        );
+
+        assert!(registry
+            .input("stream-2", b"c".to_vec())
+            .unwrap()
+            .is_empty());
+        assert!(matches!(rx.try_recv(), Ok(StreamCommand::Resize(80, 24))));
+        assert!(matches!(rx.try_recv(), Ok(StreamCommand::Input(data)) if data == b"a"));
+        assert!(matches!(rx.try_recv(), Ok(StreamCommand::Resize(100, 30))));
+        assert!(matches!(rx.try_recv(), Ok(StreamCommand::Input(data)) if data == b"b"));
+        assert!(matches!(rx.try_recv(), Ok(StreamCommand::Input(data)) if data == b"c"));
     }
 
     #[test]
@@ -1285,5 +1436,32 @@ mod tests {
         assert!(!valid_tmux_pane_id("%"));
         assert!(!valid_tmux_pane_id("session:0.1"));
         assert!(!valid_tmux_pane_id("%1; kill-server"));
+    }
+
+    #[test]
+    fn checkpoint_policy_is_bounded_for_untrusted_browser_values() {
+        assert_eq!(CheckpointPolicy::new(1, 1).history_lines, 100);
+        assert_eq!(CheckpointPolicy::new(1, 1).max_bytes, 64 * 1024);
+        assert_eq!(
+            CheckpointPolicy::new(u16::MAX, usize::MAX).history_lines,
+            2000
+        );
+        assert_eq!(
+            CheckpointPolicy::new(u16::MAX, usize::MAX).max_bytes,
+            1024 * 1024
+        );
+    }
+
+    #[tokio::test]
+    async fn herdr_terminal_frames_are_bounded() {
+        let mut ordinary = BufReader::new(&b"{\"type\":\"terminal.closed\"}\r\n"[..]);
+        let mut line = Vec::new();
+        assert!(read_herdr_line(&mut ordinary, &mut line).await.unwrap());
+        assert_eq!(line, b"{\"type\":\"terminal.closed\"}");
+
+        let mut oversized = vec![b'x'; MAX_HERDR_FRAME_BYTES + 1];
+        oversized.push(b'\n');
+        let mut reader = BufReader::new(oversized.as_slice());
+        assert!(read_herdr_line(&mut reader, &mut line).await.is_err());
     }
 }

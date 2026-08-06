@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 
 // Simple in-memory rate limiter for development
-// In production, consider using Redis-backed rate limiting
+// This single-instance broker keeps a bounded in-process limiter.
 interface RateLimitEntry {
   count: number;
   resetTime: number;
@@ -118,7 +118,7 @@ class RateLimiter {
 export function clientIpFromRequest(request: Request): string {
   // Forwarded IP headers are attacker-controlled unless the deployment has
   // explicitly declared its reverse proxy trusted.
-  if (process.env.TERMAG_TRUSTED_PROXY !== "true") {
+  if (process.env.TERMINALZ_TRUSTED_PROXY !== "true") {
     return "direct";
   }
   const forwarded = request.headers.get("x-forwarded-for")?.split(",")[0]?.trim();

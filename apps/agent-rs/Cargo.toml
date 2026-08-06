@@ -1,13 +1,13 @@
 [package]
-name = "termag-agent"
+name = "terminalz"
 version = "0.2.0"
 edition = "2021"
 rust-version = "1.82"
 license = "MIT"
-description = "Low-footprint outbound agent for Termag"
+description = "Low-footprint outbound agent and CLI for Terminalz"
 
 [[bin]]
-name = "termag-agent"
+name = "terminalz"
 path = "src/main.rs"
 
 [dependencies]

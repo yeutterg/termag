@@ -1,7 +1,6 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { createRawToken, hashToken, tokenPrefix } from "@/lib/tokens";
-import { logAudit } from "@/lib/audit";
 
 // Public endpoint — no auth, just the code. The code IS the credential
 // for this one-shot exchange; we keep them short-TTL (15 min) and
@@ -54,6 +53,7 @@ export async function POST(_request: Request, { params }: Params) {
         data: {
           userId: row.userId,
           name: deviceName,
+          activeName: deviceName,
           tokenHash: hashToken(rawToken),
           tokenPrefix: tokenPrefix(rawToken),
         },
@@ -65,9 +65,7 @@ export async function POST(_request: Request, { params }: Params) {
       });
       return {
         kind: "ok" as const,
-        userId: row.userId,
         deviceName: token.name,
-        tokenId: token.id,
         rawToken,
       };
     });
@@ -82,15 +80,6 @@ export async function POST(_request: Request, { params }: Params) {
       return NextResponse.json({ error: "Bootstrap code expired" }, { status: 410 });
     }
 
-    logAudit({
-      userId: result.userId,
-      action: "create-token",
-      subjectType: "token",
-      subjectId: result.tokenId,
-      deviceName: result.deviceName,
-      payload: { kind: "bootstrap-claim" },
-    });
-
     // Mirror what the Devices dialog returns so the CLI can write a
     // complete config.json from one response. roots is intentionally
     // left for the user to fill in — we don't know what directories
@@ -100,7 +89,7 @@ export async function POST(_request: Request, { params }: Params) {
         url: deriveAgentUrl(_request),
         token: result.rawToken,
         deviceName: result.deviceName,
-        hint: "Set TERMAG_AGENT_ROOTS in ~/.termag/config.json (or via `termag config set roots …`).",
+        hint: "Set TERMINALZ_AGENT_ROOTS in ~/.terminalz/config.json (or via `terminalz config set roots …`).",
       },
       { status: 200 }
     );
@@ -114,7 +103,7 @@ export async function POST(_request: Request, { params }: Params) {
       return NextResponse.json(
         {
           error:
-            "A device with that name already exists. Bootstrap code unspent — pick a different deviceName when you redeem.",
+            "A device with that name already exists. This code is still unspent; create a new bootstrap code with a different device name.",
         },
         { status: 409 }
       );

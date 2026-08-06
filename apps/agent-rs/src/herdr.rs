@@ -1,6 +1,6 @@
 use crate::protocol::{RuntimeInventory, RuntimePane, RuntimeSession, RuntimeTab, Space};
 use anyhow::{bail, Context, Result};
-use serde::Deserialize;
+use serde::{de::IgnoredAny, Deserialize};
 use serde_json::{json, Value};
 use std::{
     collections::{HashMap, HashSet},
@@ -20,6 +20,7 @@ use tokio::{
 
 const MAX_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
 const SESSION_DISCOVERY_TTL: Duration = Duration::from_secs(30);
+const EVENT_SUBSCRIPTION_REFRESH: Duration = Duration::from_secs(10 * 60);
 
 type SessionCache = Mutex<Option<(Instant, Vec<HerdrSession>)>>;
 static SESSION_CACHE: OnceLock<SessionCache> = OnceLock::new();
@@ -36,6 +37,12 @@ pub struct HerdrSession {
 #[derive(Deserialize)]
 struct SessionList {
     sessions: Vec<HerdrSession>,
+}
+
+#[derive(Deserialize)]
+struct EventHeader {
+    event: Option<String>,
+    error: Option<IgnoredAny>,
 }
 
 pub async fn inventory() -> RuntimeInventory {
@@ -87,7 +94,7 @@ async fn snapshot(session: &HerdrSession, indicator_style: &str) -> Result<Runti
     let response = request(&session.socket_path, "session.snapshot", json!({})).await?;
     let snapshot = response
         .pointer("/result/snapshot")
-        .context("HerdR snapshot missing result.snapshot")?;
+        .context("Herdr snapshot missing result.snapshot")?;
     let layouts: HashMap<&str, &Value> = snapshot
         .get("layouts")
         .and_then(Value::as_array)
@@ -245,7 +252,7 @@ pub async fn mutate(session_name: &str, method: &str, params: Value) -> Result<V
     let session = sessions
         .into_iter()
         .find(|session| session.name == session_name && session.running)
-        .with_context(|| format!("HerdR session {session_name:?} is not running"))?;
+        .with_context(|| format!("Herdr session {session_name:?} is not running"))?;
     request(&session.socket_path, method, params).await
 }
 
@@ -253,6 +260,7 @@ pub fn spawn_event_watchers() -> mpsc::Receiver<()> {
     let (event_tx, event_rx) = mpsc::channel(1);
     tokio::spawn(async move {
         let mut watchers: HashMap<String, JoinHandle<()>> = HashMap::new();
+        let mut last_running: Option<HashSet<String>> = None;
         loop {
             let sessions = discover_sessions().await.unwrap_or_default();
             let running = sessions
@@ -260,6 +268,15 @@ pub fn spawn_event_watchers() -> mpsc::Receiver<()> {
                 .filter(|session| session.running)
                 .map(|session| session.name.clone())
                 .collect::<HashSet<_>>();
+            if last_running
+                .as_ref()
+                .is_some_and(|previous| previous != &running)
+            {
+                // A new/stopped Herdr session has no existing session socket
+                // that can announce the global list change.
+                let _ = event_tx.try_send(());
+            }
+            last_running = Some(running.clone());
             watchers.retain(|name, task| {
                 if !running.contains(name) || task.is_finished() {
                     task.abort();
@@ -295,7 +312,9 @@ pub fn spawn_event_watchers() -> mpsc::Receiver<()> {
                 }
                 break;
             }
-            sleep(Duration::from_secs(5)).await;
+            // Discovery itself is cached for 30 seconds, so waking every five
+            // seconds only churns the runtime while returning the same list.
+            sleep(SESSION_DISCOVERY_TTL).await;
         }
     });
     event_rx
@@ -322,22 +341,24 @@ async fn subscribe_once(session: &HerdrSession, event_tx: &mpsc::Sender<()>) -> 
         json!({ "type": "workspace.renamed" }),
         json!({ "type": "workspace.moved" }),
         json!({ "type": "workspace.closed" }),
-        json!({ "type": "workspace.focused" }),
         json!({ "type": "tab.created" }),
         json!({ "type": "tab.closed" }),
-        json!({ "type": "tab.focused" }),
         json!({ "type": "tab.renamed" }),
         json!({ "type": "tab.moved" }),
         json!({ "type": "pane.created" }),
         json!({ "type": "pane.closed" }),
-        json!({ "type": "pane.updated" }),
-        json!({ "type": "pane.focused" }),
         json!({ "type": "pane.moved" }),
         json!({ "type": "pane.exited" }),
         json!({ "type": "pane.agent_detected" }),
         json!({ "type": "layout.updated" }),
     ];
-    // Multi-workspace reorder events were added with HerdR protocol 19.
+    // Herdr emits focus and generic pane-updated events for every pane on its
+    // render tick even when normalized state is unchanged. Subscribing to
+    // those wakes an idle agent dozens of times per second. Structural,
+    // naming, layout, and parameterized status events stay push-driven;
+    // focused/cwd/title metadata is reconciled by the 60-second safety
+    // snapshot in run_inventory.
+    // Multi-workspace reorder events were added with Herdr protocol 19.
     // Sending the unknown tagged variant makes protocol-17/0.7.5 reject the
     // entire subscription, so keep the baseline list version-compatible.
     if protocol >= 19 {
@@ -355,7 +376,7 @@ async fn subscribe_once(session: &HerdrSession, event_tx: &mpsc::Sender<()>) -> 
     )
     .await??;
     let subscribe = json!({
-        "id": "termag:events",
+        "id": "terminalz:events",
         "method": "events.subscribe",
         "params": { "subscriptions": subscriptions },
     });
@@ -364,9 +385,15 @@ async fn subscribe_once(session: &HerdrSession, event_tx: &mpsc::Sender<()>) -> 
         .await?;
     stream.write_all(b"\n").await?;
     let mut reader = BufReader::new(stream);
-    // Reconnect periodically so newly-created panes gain parameterized status
-    // subscriptions without retaining stale per-pane server state forever.
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    // Herdr replays the current structural state immediately after accepting
+    // a subscription. Those pane_created records describe panes already in
+    // `pane_ids`; treating them as live creation would reconnect forever.
+    let live_structural_events_after = tokio::time::Instant::now() + Duration::from_secs(1);
+    // Pane creation/closure causes an immediate reconnect so the next socket
+    // has the exact parameterized status subscriptions it needs. The long
+    // fallback refresh only protects against a missed structural event; the
+    // old 30-second reconnect reparsed a full session snapshot while idle.
+    let deadline = tokio::time::Instant::now() + EVENT_SUBSCRIPTION_REFRESH;
     while tokio::time::Instant::now() < deadline {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         let line = match timeout(remaining, next_bounded_line(&mut reader, 256 * 1024)).await {
@@ -376,20 +403,37 @@ async fn subscribe_once(session: &HerdrSession, event_tx: &mpsc::Sender<()>) -> 
         let Some(line) = line else {
             break;
         };
-        let value = serde_json::from_slice::<Value>(&line)?;
-        if let Some(error) = value.get("error") {
-            bail!("HerdR event subscription failed: {error}");
+        // Ignore event payloads here: the authoritative normalized snapshot
+        // is fetched by the collector. Deserializing every full pane payload
+        // into Value allocated heavily during active terminal rendering.
+        let header = serde_json::from_slice::<EventHeader>(&line)?;
+        if header.error.is_some() {
+            let value = serde_json::from_slice::<Value>(&line)?;
+            let error = value
+                .get("error")
+                .context("Herdr returned an empty error")?;
+            bail!("Herdr event subscription failed: {error}");
         }
-        if value.get("event").is_some() {
+        if let Some(event) = header.event {
             let _ = event_tx.try_send(());
+            if event_requires_resubscribe(
+                &event,
+                tokio::time::Instant::now() >= live_structural_events_after,
+            ) {
+                break;
+            }
         }
     }
     Ok(())
 }
 
+fn event_requires_resubscribe(event: &str, replay_complete: bool) -> bool {
+    replay_complete && matches!(event, "pane_created" | "pane_closed")
+}
+
 async fn request(socket: &Path, method: &str, params: Value) -> Result<Value> {
     let mut stream = timeout(Duration::from_secs(2), UnixStream::connect(socket)).await??;
-    let request = json!({ "id": "termag", "method": method, "params": params });
+    let request = json!({ "id": "terminalz", "method": method, "params": params });
     stream
         .write_all(serde_json::to_string(&request)?.as_bytes())
         .await?;
@@ -400,10 +444,10 @@ async fn request(socket: &Path, method: &str, params: Value) -> Result<Value> {
         next_bounded_line(&mut reader, MAX_RESPONSE_BYTES),
     )
     .await??
-    .context("HerdR API closed without a response")?;
+    .context("Herdr API closed without a response")?;
     let value: Value = serde_json::from_slice(&line)?;
     if let Some(error) = value.get("error") {
-        bail!("HerdR API error: {error}");
+        bail!("Herdr API error: {error}");
     }
     Ok(value)
 }
@@ -467,7 +511,7 @@ where
             .position(|byte| *byte == b'\n')
             .map_or(available.len(), |index| index + 1);
         if line.len() + consumed > max_bytes {
-            bail!("HerdR response exceeded {max_bytes} bytes");
+            bail!("Herdr response exceeded {max_bytes} bytes");
         }
         line.extend_from_slice(&available[..consumed]);
         let complete = available[consumed - 1] == b'\n';
@@ -487,15 +531,26 @@ mod tests {
         assert_eq!(status(Some(&json!("waiting"))), "unknown");
     }
 
+    #[test]
+    fn structural_pane_events_refresh_status_subscriptions() {
+        assert!(!event_requires_resubscribe("pane_created", false));
+        assert!(event_requires_resubscribe("pane_created", true));
+        assert!(event_requires_resubscribe("pane_closed", true));
+        assert!(!event_requires_resubscribe(
+            "pane.agent_status_changed",
+            true
+        ));
+    }
+
     #[tokio::test]
-    #[ignore = "requires a live HerdR session"]
+    #[ignore = "requires a live Herdr session"]
     async fn live_event_subscription_is_accepted() {
         let session = discover_sessions()
             .await
             .unwrap()
             .into_iter()
             .find(|session| session.running)
-            .expect("running HerdR session");
+            .expect("running Herdr session");
         let (tx, _rx) = mpsc::channel(1);
         match timeout(Duration::from_secs(2), subscribe_once(&session, &tx)).await {
             // A healthy subscription normally remains open, so timeout is

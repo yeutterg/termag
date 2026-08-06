@@ -243,10 +243,8 @@ type TermagCommandPaletteProps = {
   onNewTab: () => void;
   onKill: () => void;
   onTheme: () => void;
-  onSearch: () => void;
   onDevices: () => void;
   onAddDevice?: () => void;
-  onAddSshHost?: () => void;
   onGitOperation?: (operation: GitOperation) => void;
   authMode: "oauth" | "password" | "trusted";
 };
@@ -268,10 +266,8 @@ export function TermagCommandPalette({
   onNewTab,
   onKill,
   onTheme,
-  onSearch,
   onDevices,
   onAddDevice,
-  onAddSshHost,
   onGitOperation,
   authMode,
 }: TermagCommandPaletteProps) {
@@ -297,16 +293,8 @@ export function TermagCommandPalette({
         shortcut: "⌘↵",
       },
       {
-        id: "search",
-        label: "Search scrollback",
-        icon: Search,
-        category: "Commands",
-        action: onSearch,
-        shortcut: "⌘⇧F",
-      },
-      {
         id: "kill",
-        label: "Delete current window",
+        label: "Close current terminal",
         icon: X,
         category: "Commands",
         action: onKill,
@@ -335,15 +323,6 @@ export function TermagCommandPalette({
         icon: Plus,
         category: "Commands",
         action: onAddDevice,
-      });
-    }
-    if (onAddSshHost) {
-      actions.push({
-        id: "add-ssh",
-        label: "Add SSH host",
-        icon: Plus,
-        category: "Commands",
-        action: onAddSshHost,
       });
     }
     if (onGitOperation) {
@@ -417,12 +396,10 @@ export function TermagCommandPalette({
   }, [
     authMode,
     onAddDevice,
-    onAddSshHost,
     onDevices,
     onGitOperation,
     onKill,
     onNewTab,
-    onSearch,
     onSession,
     onTheme,
     projects,

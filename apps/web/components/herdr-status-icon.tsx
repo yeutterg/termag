@@ -1,8 +1,8 @@
 import { cn } from "@/lib/utils";
 
 const STATUS = {
-  // Match HerdR's state_dot / agent_icon glyphs. The working symbol is the
-  // first frame of HerdR's Braille spinner; keeping it static avoids one
+  // Match Herdr's state_dot / agent_icon glyphs. The working symbol is the
+  // first frame of Herdr's Braille spinner; keeping it static avoids one
   // timer and rerender per status icon in large mirrored sidebars.
   blocked: { dot: "●", symbol: "◉", color: "text-bad", label: "Blocked" },
   working: { dot: "●", symbol: "⠋", color: "text-warn", label: "Working" },

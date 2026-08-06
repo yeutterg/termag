@@ -1,34 +1,32 @@
-# VPS Deployment
+# Terminalz web deployment
 
-The target deployment is one Hetzner CX22 running Docker Compose.
-
-1. Point `TERMAG_HOST` at the future public hostname. For local testing, leave it as `localhost`.
-2. Create an env file beside `infra/docker-compose.yml`:
+The recommended deployment runs only the web control plane in Docker. Install the native `terminalz`
+agent directly on every computer whose Herdr/tmux sessions should appear.
 
 ```bash
-TERMAG_HOST=termag.example.com
-NEXTAUTH_URL=https://termag.example.com
-NEXTAUTH_SECRET=...
-TERMAG_TRUSTED_NETWORK=false
-GOOGLE_CLIENT_ID=...
-GOOGLE_CLIENT_SECRET=...
-TERMAG_ALLOWED_EMAIL=...
-TERMAG_ROOTS={"laptop":"~/Projects"}
+cp infra/.env.example infra/.env
+$EDITOR infra/.env
+docker compose --env-file infra/.env -f infra/docker-compose.yml up -d
 ```
 
-3. Start the stack:
+The release Compose file pulls `ghcr.io/yeutterg/terminalz`. Pin `TERMINALZ_VERSION` for predictable
+production upgrades. To build from a checkout instead:
 
 ```bash
-docker compose --env-file .env -f infra/docker-compose.yml up -d --build
+docker compose --env-file infra/.env \
+  -f infra/docker-compose.yml -f infra/docker-compose.build.yml up -d --build
 ```
 
-4. In the web UI, create an agent token. On the laptop:
+Caddy terminates TLS on ports 80/443 and forwards HTTP and WebSocket traffic to the private web
+container. The SQLite database is stored in the `terminalz-data` volume. Back that volume up before
+upgrades.
+
+Bootstrap each machine from the web UI, then:
 
 ```bash
-TERMAG_URL=wss://termag.example.com/api/ws/agent \
-TERMAG_AGENT_TOKEN=tmag_... \
-TERMAG_AGENT_ROOTS='{"laptop":"~/Projects"}' \
-termag
+terminalz bootstrap https://terminalz.example.com/api/bootstrap/claim/...
+brew services start terminalz
 ```
 
-The laptop agent dials out to the VPS. No inbound laptop port or tunnel is required.
+Every uniquely named machine token can be connected concurrently under one account. Reconnecting the
+same machine name replaces only its stale socket; it does not affect other computers.

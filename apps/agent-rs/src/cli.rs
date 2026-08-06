@@ -21,22 +21,22 @@ pub async fn run(version: &str) -> Result<bool> {
         return Ok(false);
     };
     match command {
-        "--version" | "-V" | "-v" => println!("termag-agent {version}"),
+        "--version" | "-V" | "-v" => println!("terminalz {version}"),
         "--help" | "-h" | "help" => print_help(version),
         "bootstrap" => bootstrap(&args[1..])?,
         "config" => config_command(&args[1..])?,
         "list" | "ls" => list()?,
         "attach" => attach(&args[1..]).await?,
-        unknown => bail!("unknown command {unknown:?}; run `termag --help`"),
+        unknown => bail!("unknown command {unknown:?}; run `terminalz --help`"),
     }
     Ok(true)
 }
 
 fn print_help(version: &str) {
     println!(
-        "termag {version}\n\n\
-Usage:\n  termag                 run the lightweight device agent\n  termag bootstrap URL   claim a device token from the web UI\n  termag config show     print resolved config with a masked token\n  termag config set roots JSON\n                         set named allowlisted roots\n  termag list            list devices and mirrored sessions\n  termag attach TARGET   attach to a project through the broker\n  termag --version       print version\n\n\
-The protocol-v2 agent discovers local tmux and HerdR sessions automatically;\n\
+        "terminalz {version}\n\n\
+Usage:\n  terminalz                 run the lightweight device agent\n  terminalz bootstrap URL   claim a device token from the web UI\n  terminalz config show     print resolved config with a masked token\n  terminalz config set roots JSON\n                            set named allowlisted roots\n  terminalz list            list devices and mirrored sessions\n  terminalz attach TARGET   attach to a project through the broker\n  terminalz --version       print version\n\n\
+The protocol-v2 agent discovers local tmux and Herdr sessions automatically;\n\
 there are no connect, new, or adopt commands. Detach from `attach` by pressing\n\
 Enter followed by ~."
     );
@@ -45,7 +45,7 @@ Enter followed by ~."
 fn bootstrap(args: &[String]) -> Result<()> {
     let claim = args
         .first()
-        .context("usage: termag bootstrap <claim-url>")?;
+        .context("usage: terminalz bootstrap <claim-url>")?;
     if !valid_bootstrap_url(claim) {
         bail!("bootstrap requires HTTPS except on localhost");
     }
@@ -64,14 +64,14 @@ fn bootstrap(args: &[String]) -> Result<()> {
         .and_then(Value::as_str)
         .context("bootstrap response omitted token")?;
     let path = config::save_credentials(url, token)?;
-    println!("[termag] credentials saved to {}", path.display());
+    println!("[terminalz] credentials saved to {}", path.display());
     if let Some(name) = response.body.get("deviceName").and_then(Value::as_str) {
-        println!("[termag] device: {name}");
+        println!("[terminalz] device: {name}");
     }
     if let Some(hint) = response.body.get("hint").and_then(Value::as_str) {
-        println!("[termag] {hint}");
+        println!("[terminalz] {hint}");
     }
-    println!("[termag] next: start termag-agent (or its login service)");
+    println!("[terminalz] next: start terminalz (or `brew services start terminalz`)");
     Ok(())
 }
 
@@ -81,11 +81,11 @@ fn config_command(args: &[String]) -> Result<()> {
         "set" if args.get(1).map(String::as_str) == Some("roots") => {
             let roots = args
                 .get(2)
-                .context("usage: termag config set roots '{\"laptop\":\"~/Projects\"}'")?;
+                .context("usage: terminalz config set roots '{\"laptop\":\"~/Projects\"}'")?;
             let path = config::set_roots(roots)?;
-            println!("[termag] roots saved to {}", path.display());
+            println!("[terminalz] roots saved to {}", path.display());
         }
-        _ => bail!("usage: termag config show | termag config set roots JSON"),
+        _ => bail!("usage: terminalz config show | terminalz config set roots JSON"),
     }
     Ok(())
 }
@@ -93,22 +93,18 @@ fn config_command(args: &[String]) -> Result<()> {
 fn list() -> Result<()> {
     let config = Config::load()?;
     let (state, _) = fetch_state(&config)?;
-    println!("termag devices\n");
+    println!("terminalz devices\n");
     if state.devices.is_empty() {
         println!("  (no devices)");
         return Ok(());
     }
     for device in state.devices {
         let state = if device.connected { "●" } else { "○" };
-        let kind = if device.kind.as_deref() == Some("ssh") {
-            "ssh".to_owned()
-        } else {
-            device
-                .version
-                .as_deref()
-                .map(|version| format!("v{}", clean(version)))
-                .unwrap_or_else(|| "agent".to_owned())
-        };
+        let kind = device
+            .version
+            .as_deref()
+            .map(|version| format!("v{}", clean(version)))
+            .unwrap_or_else(|| "agent".to_owned());
         println!(
             "  {state} {}  {} · {kind}",
             clean(&device.name),
@@ -118,11 +114,6 @@ fn list() -> Result<()> {
                 "offline"
             }
         );
-        if !device.connected {
-            if let Some(error) = device.last_error.as_deref() {
-                println!("      error: {}", clean(error));
-            }
-        }
         for project in device.projects {
             println!(
                 "    {} {}  ·  {} tab{}  ·  {}",
@@ -135,19 +126,6 @@ fn list() -> Result<()> {
             for tab in project.tabs {
                 println!("        {} {}", status_mark(&tab.status), clean(&tab.name));
             }
-        }
-        for session in device.raw_tmux_sessions {
-            println!(
-                "    ○ {}  ·  tmux · {} window{}{}",
-                clean(&session.name),
-                session.window_count,
-                if session.window_count == 1 { "" } else { "s" },
-                session
-                    .path
-                    .as_deref()
-                    .map(|path| format!(" · {}", clean(path)))
-                    .unwrap_or_default()
-            );
         }
     }
     Ok(())
@@ -175,7 +153,8 @@ async fn attach(args: &[String]) -> Result<()> {
         }
         index += 1;
     }
-    let target = target.context("usage: termag attach <project | device:project | session-id>")?;
+    let target =
+        target.context("usage: terminalz attach <project | device:project | session-id>")?;
     let config = Config::load()?;
     let (state, base) = fetch_state(&config)?;
     let resolved = resolve_target(&state, &target, device.as_deref())?;
@@ -195,13 +174,8 @@ struct CliDevice {
     name: String,
     connected: bool,
     version: Option<String>,
-    kind: Option<String>,
-    last_error: Option<String>,
-    device_id: Option<String>,
     #[serde(default)]
     projects: Vec<CliProject>,
-    #[serde(default)]
-    raw_tmux_sessions: Vec<CliTmuxSession>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -224,22 +198,8 @@ struct CliTab {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct CliTmuxSession {
-    name: String,
-    window_count: u64,
-    path: Option<String>,
-}
-
 enum AttachTarget {
-    Agent {
-        session_id: String,
-        label: String,
-    },
-    Ssh {
-        host_id: String,
-        tmux_name: String,
-        label: String,
-    },
+    Agent { session_id: String, label: String },
 }
 
 fn resolve_target(state: &CliState, target: &str, filter: Option<&str>) -> Result<AttachTarget> {
@@ -247,33 +207,6 @@ fn resolve_target(state: &CliState, target: &str, filter: Option<&str>) -> Resul
         .split_once(':')
         .map_or((None, target), |(device, project)| (Some(device), project));
     let wanted_device = explicit_device.or(filter).filter(|value| !value.is_empty());
-
-    if let Some(device_name) = explicit_device {
-        if let Some(device) = state
-            .devices
-            .iter()
-            .find(|item| item.kind.as_deref() == Some("ssh") && item.name == device_name)
-        {
-            let session = device
-                .raw_tmux_sessions
-                .iter()
-                .find(|session| session.name == project_name)
-                .with_context(|| {
-                    format!("SSH host {device_name:?} has no tmux session {project_name:?}")
-                })?;
-            if !device.connected {
-                bail!("SSH host {device_name:?} is offline");
-            }
-            return Ok(AttachTarget::Ssh {
-                host_id: device
-                    .device_id
-                    .clone()
-                    .context("SSH host is missing its broker id")?,
-                tmux_name: session.name.clone(),
-                label: format!("{device_name}:{}", session.name),
-            });
-        }
-    }
 
     let matches: Vec<(&CliDevice, &CliProject)> = state
         .devices
@@ -307,15 +240,18 @@ fn resolve_target(state: &CliState, target: &str, filter: Option<&str>) -> Resul
         });
     }
     if !target.contains(':')
-        && target.len() >= 16
-        && target.bytes().all(|byte| byte.is_ascii_alphanumeric())
+        && target.starts_with("rs_")
+        && target.len() <= 4096
+        && target
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
     {
         return Ok(AttachTarget::Agent {
             session_id: target.to_owned(),
             label: format!("session {}…", &target[..8]),
         });
     }
-    bail!("no project named {project_name:?}; run `termag list`")
+    bail!("no project named {project_name:?}; run `terminalz list`")
 }
 
 fn fetch_state(config: &Config) -> Result<(CliState, String)> {
@@ -404,30 +340,16 @@ fn curl_json(method: &str, url: &str, token: Option<&str>) -> Result<HttpRespons
 }
 
 async fn attach_socket(token: &str, base: String, target: AttachTarget) -> Result<()> {
-    let (label, path, query): (String, &str, Vec<(&str, String)>) = match target {
-        AttachTarget::Agent { session_id, label } => {
-            (label, "/api/ws/terminal", vec![("sessionId", session_id)])
-        }
-        AttachTarget::Ssh {
-            host_id,
-            tmux_name,
-            label,
-        } => (
-            label,
-            "/api/ws/ssh-terminal",
-            vec![("hostId", host_id), ("tmuxName", tmux_name)],
-        ),
+    let (label, session_id) = match target {
+        AttachTarget::Agent { session_id, label } => (label, session_id),
     };
     let (cols, rows) = terminal_size();
     let (secure, authority) = broker_authority(&base)?;
-    let mut query = query
-        .into_iter()
-        .map(|(key, value)| format!("{key}={}", percent_encode(&value)))
-        .collect::<Vec<_>>();
+    let mut query = vec![format!("sessionId={}", percent_encode(&session_id))];
     query.push(format!("cols={cols}"));
     query.push(format!("rows={rows}"));
     let socket_url = format!(
-        "{}://{authority}{path}?{}",
+        "{}://{authority}/api/ws/terminal?{}",
         if secure { "wss" } else { "ws" },
         query.join("&")
     );
@@ -441,7 +363,7 @@ async fn attach_socket(token: &str, base: String, target: AttachTarget) -> Resul
         .with_context(|| format!("could not attach to {label}"))?;
     let (mut sink, mut stream) = socket.split();
     let _raw = RawTerminal::enable()?;
-    eprintln!("\x1b[2m[termag attach {label} · detach with Enter then ~.]\x1b[0m");
+    eprintln!("\x1b[2m[terminalz attach {label} · detach with Enter then ~.]\x1b[0m");
 
     let mut stdin = tokio::io::stdin();
     let mut input = [0_u8; 8192];

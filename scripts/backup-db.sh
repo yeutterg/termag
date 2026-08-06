@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Database Backup Script for termag-next
+# Database backup script for Terminalz
 # This script creates timestamped backups of the SQLite database
 
 set -e
@@ -8,7 +8,7 @@ set -e
 # Configuration
 DB_DIR="${DB_DIR:-./data}"
 BACKUP_DIR="${BACKUP_DIR:-./backups}"
-DB_FILE="${DB_FILE:-termag.db}"
+DB_FILE="${DB_FILE:-terminalz.db}"
 RETENTION_DAYS=${RETENTION_DAYS:-7}
 
 # Create directories if they don't exist

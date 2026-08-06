@@ -1,55 +1,97 @@
-# Termag Agent Protocol v2
+# Agent protocol v2
 
 Protocol v2 makes the local daemon an inventory and terminal transport, not a desktop UI.
 
-## Runtime model
+## Inventory
 
-A connected device publishes versioned inventory snapshots:
+The agent pushes a normalized tree whenever local state changes:
 
-```
-Device
-├── HerdR runtime
-│   └── HerdR session
-│       └── space
-│           └── tab
-│               └── pane / terminal
+```text
+Machine
+├── Herdr runtime
+│   └── Herdr session → space → tab → pane/terminal
 └── tmux runtime
-    └── tmux session (represented as one space)
-        └── window
-            └── pane / terminal
+    └── tmux session → window → pane/terminal
 ```
 
-Stable runtime IDs (HerdR `w*/t*/p*`, tmux `$*/@*/%*`) are persisted separately from display names. Missing items are archived, not deleted, so scrollback and identity survive a runtime restart.
+Each snapshot includes a monotonic revision, named directory roots, runtime availability, stable native
+ids, exact display names, order, focus, status, and optional Herdr split layout/icon style. The broker
+bounds and normalizes the untrusted tree, keeps the current copy in memory, and stores one latest JSON
+snapshot on `AgentToken`. UI ids encode the token id plus exact runtime path; there are no relational
+Project/Tab/Session mirrors and no archive reconciliation.
 
-## HerdR coexistence
+After the initial tree, status/focus-only revisions are sent to browsers as compact patches keyed by
+those stable UI ids. Names, order, layout, cwd, runtime availability, roots, or other structural
+changes still cause one full project refresh. Agent health heartbeats are separate small messages and
+do not resend the runtime/session list.
 
-Termag does not patch, fork, launch, or own HerdR. It discovers running HerdR sessions with `herdr session list --json`, reads snapshots and subscribes to organization/status events over each documented Unix socket, and refreshes only the changed runtime. Session discovery is cached for 30 seconds. Terminal bytes stay behind HerdR's public `herdr terminal session observe/control` process boundary; one helper is shared per open target and no helper remains while the cloud viewer is closed.
+## Herdr coexistence
 
-The cloud mirrors HerdR spaces, tabs, panes, split rectangles, and agent statuses, and renders HerdR's native dot/icon glyph vocabulary. Typed create, rename, close, and pane operations call HerdR's public API and are reflected back by the next inventory snapshot.
+Terminalz does not patch, fork, launch, own, or configure Herdr. It discovers running sessions with the
+Herdr CLI, reads the public session socket, subscribes to events, and invokes typed public mutations.
+Terminal bytes use Herdr's observe/control process interface. Helpers exist only while viewers are
+attached. When Herdr is unavailable, tmux discovery and streaming continue independently.
 
-## Terminal ownership
+## Terminal transport
 
-One local stream is shared by every cloud viewer of the same runtime target. Terminal output is binary and is emitted once per target, then fanned out by the broker. Bounded full checkpoints make reconnects deterministic without an unbounded cloud ANSI log. If a bounded output queue ever fills, the agent sends an explicit continuity-gap event and the browser reconnects for a new checkpoint; bytes are never silently omitted from a supposedly valid replay. New viewers are observers. A writable driver is assigned only after an explicit `terminal-claim-drive`, and the lease expires after five minutes without input. When the HerdR driver disconnects, the controller is released and the shared stream returns to observer mode.
+The browser opens `/api/ws/terminal?sessionId=rs_…`. The broker decodes the virtual id and verifies
+every component against the connected agent's current inventory before sending `terminal-attach`.
 
-tmux viewers use a control-mode client with `ignore-size`, filter output to the stable pane ID, and inject input directly into that pane. They never select a tmux window or pane and never resize the shared window, so opening or resizing a browser terminal cannot move or reflow the terminal shown on the physical machine. Non-target panes are disabled on the control client to keep background traffic low.
+Agent output uses binary `TMG2` frames:
+
+```text
+magic[4] flags[1] sequence[u32be] stream-id-length[u16be] stream-id payload
+```
+
+Flags mark checkpoint start, continuation, and end. Sequence gaps discard cached replay state and force
+a resync. The broker fans one target's bytes to its browser viewers, coalesces short writes, pauses
+hidden/backpressured clients, and caps replay/checkpoint memory. Terminal output never enters SQLite.
+Browser clients advertise `dataMode=low` on phone/touch-portable, Save-Data, and slow connections.
+That mode coalesces live output for 64 ms and batches replay messages so WebSocket compression works
+across small writes. Fresh tmux checkpoints use 300 history lines and a 256 KiB cap instead of the
+desktop 2,000-line / 1 MiB policy; all output produced while the terminal is visible remains lossless.
+
+tmux uses control mode with a stable pane id and `ignore-size`, so a browser does not select or reflow
+the window visible on the physical machine. Herdr viewers begin as observers; keyboard control is a
+renewable driver lease. A focus/click sends `terminal-claim-drive`; `terminal-input` atomically claims
+and writes, so the most recent focus or keystroke across all browser viewers owns input and resize.
+
+## Typed requests
+
+The broker and agent both allowlist request names.
+
+- Runtime: `runtime.create-session`, `runtime.create-space`, `runtime.create-tab`, rename/close
+  variants for sessions, spaces, tabs, and panes.
+- Filesystem: `list-directory` with `rootKey` + `relativePath`.
+- Git: `git.status`, `git.stage`, `git.branch`, `git.commit`, `git.pull`, `git.push`.
+- Power: `power.acquire`, `power.renew`, `power.release`, `power.get`.
+- Terminal events: attach, input, resize, claim-drive, close.
+
+There are no protocol-v1 aliases and no arbitrary command or shell-string request.
 
 ## Directory policy
 
-Existing sessions are always discoverable. New sessions and tabs are restricted to configured roots and canonicalized allowlisted paths. The default root and allowlist are the current user's home directory. `allowAllDirectories: true` is an explicit opt-out. Absolute-root escapes, `..`, control bytes, and symlink escapes are rejected.
+Existing sessions are discoverable regardless of cwd. New sessions/tabs, directory browsing, and git
+operations are restricted to configured roots and canonicalized allowlisted paths. Defaults are the
+current user's home directory. `allowAllDirectories: true` is an explicit opt-out. Absolute escapes,
+`..`, control bytes, and symlink escapes are rejected agent-side.
 
 ## Power policy (macOS)
 
 - `terminals-awake`: `caffeinate -i` (display sleep and lock remain available)
 - `display-awake`: `caffeinate -d -i`
 - `ac-awake`: `caffeinate -s`
-- `off`: stop only the child process owned by this daemon
 
-Protocol-v2 power requests are renewable, client-scoped leases. The strongest live lease determines the single owned `caffeinate` child; expired leases are reaped automatically. The child also watches the daemon PID, so a crash or forced service stop releases the assertion. Duration is optional on the legacy compatibility request. This cannot keep a Mac awake with the lid physically closed.
+Power is machine-scoped but client-leased. The strongest live lease determines one daemon-owned child;
+expired leases are reaped automatically, and daemon shutdown stops its child. This cannot keep a Mac
+awake with its lid physically closed.
 
-## Compatibility and limits
+## Bounds
 
-The Rust daemon is the only supported device agent; the protocol-v1 Node package and menu-bar helper
-have been retired. Protocol v2 deliberately has no arbitrary command-execution message. Runtime,
-power, and git mutations use an allowlisted operation vocabulary with agent-side argument and path
-validation. HerdR is optional—when absent, all local tmux sessions still appear and can be managed
-independently.
+- WebSocket messages: 1 MiB
+- Terminal payload frame: 256 KiB broker-side / 240 KiB agent-side
+- Browser input message: 256 KiB; frontend pastes are chunked
+- Fresh tmux checkpoint: 1 MiB / 2,000 history lines; low-data clients: 256 KiB / 300 lines
+- Inventory persistence: 16 MiB hard check (wire size is already lower)
+- Broker terminal checkpoint cache: 16 MiB total, 4 MiB per full checkpoint, 512 KiB tail
+- Agent WebSocket buffers: 8 KiB read, 32 KiB write, 1 MiB maximum write queue

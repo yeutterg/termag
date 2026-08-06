@@ -15,11 +15,6 @@ const GROUPS: Group[] = [
     items: [
       { keys: ["mod", "K"], label: "Open command palette" },
       { keys: ["ctrl", "1"], label: "Jump to project 1 — also ⌃2 … ⌃9" },
-      {
-        keys: ["mod", "shift", "F"],
-        label: "Search scrollback",
-        note: "Safari: collides with fullscreen",
-      },
     ],
   },
   {

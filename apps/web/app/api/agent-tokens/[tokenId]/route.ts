@@ -2,7 +2,6 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 import { readJsonBody, withAuth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
-import { logAudit } from "@/lib/audit";
 import { disconnectAgentToken } from "@/lib/broker";
 
 const tokenView = {
@@ -48,18 +47,9 @@ export const DELETE = withAuth(
     }
     await prisma.agentToken.update({
       where: { id: tokenId },
-      data: { revokedAt: new Date() },
+      data: { revokedAt: new Date(), activeName: null },
     });
     disconnectAgentToken(user.id, tokenId);
-    logAudit({
-      userId: user.id,
-      action: "revoke-token",
-      subjectType: "token",
-      subjectId: tokenId,
-      deviceName: existing.name,
-      request,
-      payload: { name: existing.name, prefix: existing.tokenPrefix },
-    });
     return NextResponse.json({ ok: true });
   }
 );
@@ -98,15 +88,6 @@ export const PATCH = withAuth(
       where: { id: tokenId },
       data,
       select: tokenView,
-    });
-    logAudit({
-      userId: user.id,
-      action: "update-token",
-      subjectType: "token",
-      subjectId: tokenId,
-      deviceName: updated.name,
-      request,
-      payload: { changed: Object.keys(data) },
     });
     return NextResponse.json(updated);
   }

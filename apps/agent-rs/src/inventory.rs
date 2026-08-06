@@ -73,10 +73,6 @@ impl Collector {
             ],
         }
     }
-
-    pub fn tmux(&self) -> Option<&RuntimeInventory> {
-        self.tmux.as_ref()
-    }
 }
 
 fn roots(config: &Config) -> Vec<DirectoryRoot> {
@@ -89,15 +85,6 @@ fn roots(config: &Config) -> Vec<DirectoryRoot> {
             writable: true,
         })
         .collect()
-}
-
-pub async fn collect(config: &Config) -> InventorySnapshot {
-    let (herdr, tmux) = tokio::join!(herdr::inventory(), tmux::inventory());
-    InventorySnapshot {
-        revision: REVISION.fetch_add(1, Ordering::Relaxed) + 1,
-        roots: roots(config),
-        runtimes: vec![herdr, tmux],
-    }
 }
 
 pub fn runtime_available(snapshot: &InventorySnapshot, kind: &str) -> bool {

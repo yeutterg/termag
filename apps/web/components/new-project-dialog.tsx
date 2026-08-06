@@ -1,25 +1,16 @@
 "use client";
 
 import { type FormEvent, useEffect, useMemo, useState } from "react";
+import { X } from "lucide-react";
 import { DirectoryBrowser } from "./directory-browser";
 import type { AgentDeviceStatus } from "./types";
-
-const AGENT_OPTIONS = [
-  { id: "shell", label: "Shell" },
-  { id: "codex", label: "Codex" },
-  { id: "claude", label: "Claude Code" },
-  { id: "codex-yolo", label: "Codex YOLO" },
-  { id: "claude-yolo", label: "Claude Code YOLO" },
-] as const;
 
 export type NewProjectInput = {
   deviceName: string;
   rootKey: string;
   relativePath: string;
   name?: string;
-  agentTypes: string[];
-  customAgents: string[];
-  runtime?: "herdr" | "tmux";
+  runtime: "herdr" | "tmux";
   runtimeSessionId?: string;
 };
 
@@ -32,8 +23,7 @@ interface NewProjectDialogProps {
   selectedDevice?: string | null;
 }
 
-type TokenWithDefaults = {
-  id: string;
+type TokenDefaults = {
   name: string;
   defaultRootKey?: string | null;
   defaultRelativePath?: string | null;
@@ -44,319 +34,216 @@ export function NewProjectDialog({
   onOpenChange,
   onCreate,
   agentDevices,
-  knownDeviceNames,
   selectedDevice,
 }: NewProjectDialogProps) {
-  const devices = useMemo(() => {
-    const names = new Set<string>(knownDeviceNames);
-    for (const device of agentDevices) {
-      names.add(device.name);
-    }
-    return [...names];
-  }, [agentDevices, knownDeviceNames]);
-
-  const initialDevice =
-    selectedDevice && devices.includes(selectedDevice) ? selectedDevice : (devices[0] ?? "");
-
-  const [deviceName, setDeviceName] = useState(initialDevice);
-  const [tokens, setTokens] = useState<TokenWithDefaults[]>([]);
-  const [tokensLoaded, setTokensLoaded] = useState(false);
+  const devices = useMemo(
+    () => agentDevices.filter(device => device.connected && (device.protocolVersion ?? 2) >= 2),
+    [agentDevices]
+  );
+  const initialDeviceName =
+    selectedDevice && devices.some(device => device.name === selectedDevice)
+      ? selectedDevice
+      : (devices[0]?.name ?? "");
+  const [deviceName, setDeviceName] = useState(initialDeviceName);
+  const [tokens, setTokens] = useState<TokenDefaults[]>([]);
   const [rootKey, setRootKey] = useState("");
   const [relativePath, setRelativePath] = useState("");
-  const [error, setError] = useState("");
-  const [submitting, setSubmitting] = useState(false);
   const [runtime, setRuntime] = useState<"herdr" | "tmux" | null>(null);
   const [runtimeSessionId, setRuntimeSessionId] = useState("");
+  const [error, setError] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const activeDeviceName = devices.some(device => device.name === deviceName)
+    ? deviceName
+    : initialDeviceName;
 
   useEffect(() => {
     if (!open) {
       return;
     }
-    let cancelled = false;
     fetch("/api/agent-tokens")
-      .then(res => (res.ok ? res.json() : []))
-      .then(next => {
-        if (cancelled) {
-          return;
-        }
-        setTokens(Array.isArray(next) ? next : []);
-        setTokensLoaded(true);
-      })
-      .catch(() => {
-        if (cancelled) {
-          return;
-        }
-        setTokens([]);
-        setTokensLoaded(true);
-      });
-    return () => {
-      cancelled = true;
-    };
+      .then(response => (response.ok ? response.json() : []))
+      .then(value => setTokens(Array.isArray(value) ? value : []))
+      .catch(() => setTokens([]));
   }, [open]);
 
-  useEffect(() => {
-    if (!open) {
-      return;
-    }
-    queueMicrotask(() => {
-      setDeviceName(current => {
-        if (selectedDevice && devices.includes(selectedDevice)) {
-          return selectedDevice;
-        }
-        if (current && devices.includes(current)) {
-          return current;
-        }
-        return devices[0] ?? "";
-      });
-    });
-  }, [open, selectedDevice, devices]);
-
-  const currentDevice = useMemo(
-    () => agentDevices.find(device => device.name === deviceName) || null,
-    [agentDevices, deviceName]
-  );
-  const currentToken = useMemo(
-    () => tokens.find(token => token.name === deviceName) || null,
-    [tokens, deviceName]
-  );
-  const protocolV2 = (currentDevice?.protocolVersion ?? 1) >= 2;
-  const herdrSessions = useMemo(
-    () => currentDevice?.runtimeSessions?.find(item => item.kind === "herdr")?.sessions ?? [],
-    [currentDevice]
-  );
-  const effectiveRuntime = runtime ?? (herdrSessions.length > 0 ? "herdr" : "tmux");
-  const effectiveRuntimeSessionId = herdrSessions.some(session => session.id === runtimeSessionId)
+  const device = devices.find(item => item.name === activeDeviceName);
+  const roots = useMemo(() => device?.roots ?? {}, [device?.roots]);
+  const defaults = tokens.find(token => token.name === activeDeviceName);
+  const herdrSessions =
+    device?.runtimeSessions?.find(item => item.kind === "herdr" && item.available)?.sessions ?? [];
+  const effectiveRuntime = runtime ?? (herdrSessions.length ? "herdr" : "tmux");
+  const effectiveRuntimeSessionId = herdrSessions.some(item => item.id === runtimeSessionId)
     ? runtimeSessionId
     : (herdrSessions[0]?.id ?? "");
-  const deviceRoots: Record<string, string> = useMemo(() => {
-    const reported =
-      currentDevice?.roots && Object.keys(currentDevice.roots).length > 0
-        ? currentDevice.roots
-        : null;
-    if (reported) {
-      return reported;
-    }
-    // Fallback: the device hasn't reported health yet but we know its name —
-    // assume the convention (rootKey == deviceName, path unknown). The user
-    // can still type a path via the browser's "type a path" mode.
-    return deviceName ? { [deviceName]: "" } : {};
-  }, [currentDevice, deviceName]);
 
-  const defaultRootKey = currentToken?.defaultRootKey ?? "";
-  const defaultRelativePath = currentToken?.defaultRelativePath ?? "";
-
-  // When the device or its defaults change, reset the picker.
   useEffect(() => {
     if (!open) {
       return;
     }
+    const preferredRoot =
+      defaults?.defaultRootKey && roots[defaults.defaultRootKey] !== undefined
+        ? defaults.defaultRootKey
+        : (Object.keys(roots)[0] ?? "");
     queueMicrotask(() => {
-      setRootKey(
-        defaultRootKey && deviceRoots[defaultRootKey] !== undefined
-          ? defaultRootKey
-          : (Object.keys(deviceRoots)[0] ?? "")
-      );
+      setRootKey(preferredRoot);
       setRelativePath(
-        defaultRootKey && deviceRoots[defaultRootKey] !== undefined ? defaultRelativePath : ""
+        preferredRoot && preferredRoot === defaults?.defaultRootKey
+          ? (defaults.defaultRelativePath ?? "")
+          : ""
       );
-      setError("");
     });
-  }, [open, tokensLoaded, defaultRootKey, defaultRelativePath, deviceRoots]);
+  }, [activeDeviceName, defaults, open, roots]);
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (submitting) {
       return;
     }
-    if (!deviceName) {
-      setError("Create a device first.");
+    if (!device || !rootKey) {
+      setError("Connect a machine and choose one of its allowlisted folders.");
       return;
     }
-    if (!rootKey) {
-      setError("Pick a root folder for this project.");
+    if (effectiveRuntime === "herdr" && !effectiveRuntimeSessionId) {
+      setError("Choose a running Herdr session.");
       return;
     }
-    const formData = new FormData(event.currentTarget);
-    const customAgents = String(formData.get("customAgents") || "")
-      .split(/\r?\n/)
-      .map(line => line.trim())
-      .filter(Boolean);
-    const agentTypes = formData.getAll("agentTypes").map(String).filter(Boolean);
-    if (!protocolV2 && agentTypes.length + customAgents.length === 0) {
-      setError("Select at least one agent.");
-      return;
-    }
-    setError("");
+    const form = new FormData(event.currentTarget);
     setSubmitting(true);
     const result = await onCreate({
-      deviceName,
+      deviceName: activeDeviceName,
       rootKey,
       relativePath,
-      name: String(formData.get("name") || "").trim() || undefined,
-      agentTypes,
-      customAgents,
-      runtime: protocolV2 ? effectiveRuntime : undefined,
-      runtimeSessionId:
-        protocolV2 && effectiveRuntime === "herdr" ? effectiveRuntimeSessionId : undefined,
+      name: String(form.get("name") || "").trim() || undefined,
+      runtime: effectiveRuntime,
+      runtimeSessionId: effectiveRuntime === "herdr" ? effectiveRuntimeSessionId : undefined,
     });
     setSubmitting(false);
     if (!result.ok) {
-      setError(result.error || "Could not create that project. Check the directory and try again.");
+      setError(result.error || "The local runtime could not create that terminal.");
       return;
     }
-    event.currentTarget.reset();
     onOpenChange(false);
   }
 
   if (!open) {
     return null;
   }
+
   return (
-    <div className="fixed inset-0 z-50 bg-black/35 p-4" onClick={() => onOpenChange(false)}>
+    <div className="fixed inset-0 z-50 bg-black/35 p-3 sm:p-4" onClick={() => onOpenChange(false)}>
       <section
-        className="mx-auto mt-[6vh] flex max-h-[88vh] max-w-lg flex-col rounded-lg border border-line bg-panel p-4 shadow-2xl"
+        className="mx-auto mt-[3dvh] flex max-h-[94dvh] max-w-lg flex-col rounded-lg border border-line bg-panel p-4 shadow-2xl sm:mt-[6dvh] sm:max-h-[88dvh]"
         onClick={event => event.stopPropagation()}
       >
-        <div className="mb-4">
-          <h2 className="text-base font-semibold">New session</h2>
-          <p className="mt-1 text-sm text-muted">Device / Folder / Command</p>
-        </div>
-        <form onSubmit={submit} className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto pr-1">
-          <label className="block">
-            <span className="mb-1 block text-xs font-medium text-muted">Device</span>
+        <header className="mb-4 flex items-start justify-between gap-3">
+          <div>
+            <h2 className="text-base font-semibold">New terminal</h2>
+            <p className="mt-1 text-sm text-muted">Create it in tmux or the local Herdr app.</p>
+          </div>
+          <button
+            type="button"
+            className="grid h-11 w-11 place-items-center rounded-md text-muted hover:bg-panel2"
+            onClick={() => onOpenChange(false)}
+            aria-label="Close"
+          >
+            <X className="h-4 w-4" />
+          </button>
+        </header>
+
+        <form onSubmit={submit} className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto">
+          <label>
+            <span className="mb-1 block text-xs font-medium text-muted">Machine</span>
             <select
-              value={deviceName}
+              value={activeDeviceName}
               onChange={event => {
                 setDeviceName(event.target.value);
                 setRuntime(null);
                 setRuntimeSessionId("");
               }}
-              required
-              disabled={devices.length === 0}
-              className="h-9 w-full rounded-md border border-line bg-bg px-3 text-sm outline-none focus:border-accent"
+              disabled={!devices.length}
+              className="min-h-11 w-full rounded-md border border-line bg-bg px-3 text-sm outline-none focus:border-accent"
             >
-              {devices.length === 0 && <option value="">Create a device first</option>}
-              {devices.map(device => (
-                <option key={device} value={device}>
-                  {device}
+              {!devices.length && <option value="">No connected machines</option>}
+              {devices.map(item => (
+                <option key={item.name} value={item.name}>
+                  {item.name}
                 </option>
               ))}
             </select>
           </label>
-          {protocolV2 && (
-            <div className="grid grid-cols-2 gap-2">
-              <label className="block">
-                <span className="mb-1 block text-xs font-medium text-muted">Runtime</span>
+
+          <div className="grid grid-cols-2 gap-2">
+            <label>
+              <span className="mb-1 block text-xs font-medium text-muted">Runtime</span>
+              <select
+                value={effectiveRuntime}
+                onChange={event => setRuntime(event.target.value as "herdr" | "tmux")}
+                className="min-h-11 w-full rounded-md border border-line bg-bg px-3 text-sm outline-none focus:border-accent"
+              >
+                {herdrSessions.length > 0 && <option value="herdr">Herdr</option>}
+                <option value="tmux">tmux</option>
+              </select>
+            </label>
+            {effectiveRuntime === "herdr" && (
+              <label>
+                <span className="mb-1 block text-xs font-medium text-muted">Herdr session</span>
                 <select
-                  value={effectiveRuntime}
-                  onChange={event => setRuntime(event.target.value as "herdr" | "tmux")}
-                  className="h-9 w-full rounded-md border border-line bg-bg px-3 text-sm outline-none focus:border-accent"
+                  value={effectiveRuntimeSessionId}
+                  onChange={event => setRuntimeSessionId(event.target.value)}
+                  className="min-h-11 w-full rounded-md border border-line bg-bg px-3 text-sm outline-none focus:border-accent"
                 >
-                  {herdrSessions.length > 0 && <option value="herdr">HerdR</option>}
-                  <option value="tmux">tmux</option>
+                  {herdrSessions.map(session => (
+                    <option key={session.id} value={session.id}>
+                      {session.name}
+                    </option>
+                  ))}
                 </select>
               </label>
-              {effectiveRuntime === "herdr" && (
-                <label className="block">
-                  <span className="mb-1 block text-xs font-medium text-muted">HerdR session</span>
-                  <select
-                    value={effectiveRuntimeSessionId}
-                    onChange={event => setRuntimeSessionId(event.target.value)}
-                    className="h-9 w-full rounded-md border border-line bg-bg px-3 text-sm outline-none focus:border-accent"
-                  >
-                    {herdrSessions.map(session => (
-                      <option key={session.id} value={session.id}>
-                        {session.name}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-              )}
-            </div>
-          )}
-          <div className="space-y-1">
-            <div className="flex items-center justify-between gap-2">
-              <span className="text-xs font-medium text-muted">Folder</span>
-              {currentToken &&
-                (currentToken.defaultRootKey || currentToken.defaultRelativePath) && (
-                  <span className="truncate text-[10px] text-muted">
-                    Default: {currentToken.defaultRootKey}
-                    {currentToken.defaultRelativePath ? `/${currentToken.defaultRelativePath}` : ""}
-                  </span>
-                )}
-            </div>
-            {deviceName ? (
+            )}
+          </div>
+
+          <div>
+            <span className="mb-1 block text-xs font-medium text-muted">Allowlisted folder</span>
+            {activeDeviceName ? (
               <DirectoryBrowser
-                key={`${deviceName}:${defaultRootKey}:${defaultRelativePath}`}
-                deviceName={deviceName}
-                roots={deviceRoots}
-                initialRootKey={rootKey || defaultRootKey || undefined}
-                initialRelativePath={relativePath || defaultRelativePath || undefined}
-                onChange={(nextRoot, nextRel) => {
+                key={`${activeDeviceName}:${defaults?.defaultRootKey || ""}`}
+                deviceName={activeDeviceName}
+                roots={roots}
+                initialRootKey={rootKey || undefined}
+                initialRelativePath={relativePath || undefined}
+                onChange={(nextRoot, nextRelative) => {
                   setRootKey(nextRoot);
-                  setRelativePath(nextRel);
+                  setRelativePath(nextRelative);
                 }}
               />
             ) : (
               <div className="rounded-md border border-line bg-bg px-3 py-3 text-xs text-muted">
-                No device selected.
+                Bootstrap and connect a machine first.
               </div>
             )}
           </div>
-          <label className="block">
-            <span className="mb-1 block text-xs font-medium text-muted">Project name</span>
+
+          <label>
+            <span className="mb-1 block text-xs font-medium text-muted">Name</span>
             <input
               name="name"
-              type="text"
               autoComplete="off"
               placeholder="Defaults to the folder name"
-              className="h-9 w-full rounded-md border border-line bg-bg px-3 text-sm outline-none focus:border-accent"
+              className="min-h-11 w-full rounded-md border border-line bg-bg px-3 text-sm outline-none focus:border-accent"
             />
           </label>
-          {!protocolV2 && (
-            <fieldset>
-              <legend className="mb-2 text-xs font-medium text-muted">Start with</legend>
-              <div className="grid grid-cols-2 gap-2">
-                {AGENT_OPTIONS.map(agent => (
-                  <label
-                    key={agent.id}
-                    className="flex h-9 items-center gap-2 rounded-md border border-line bg-bg px-3 text-sm"
-                  >
-                    <input
-                      name="agentTypes"
-                      value={agent.id}
-                      type="checkbox"
-                      defaultChecked={agent.id === "shell"}
-                      className="h-4 w-4 accent-current"
-                    />
-                    <span>{agent.label}</span>
-                  </label>
-                ))}
-              </div>
-              <label className="mt-2 block">
-                <span className="mb-1 block text-xs font-medium text-muted">Other command</span>
-                <textarea
-                  name="customAgents"
-                  rows={2}
-                  placeholder={"gemini\nopencode"}
-                  className="min-h-16 w-full resize-y rounded-md border border-line bg-bg px-3 py-2 font-mono text-xs outline-none focus:border-accent"
-                />
-              </label>
-            </fieldset>
-          )}
-          {protocolV2 && (
-            <div className="rounded-md border border-line bg-bg px-3 py-2 text-xs text-muted">
-              The local runtime creates the shell. HerdR spaces and tabs appear locally without
-              taking focus.
-            </div>
-          )}
+
+          <p className="rounded-md border border-line bg-bg px-3 py-2 text-xs text-muted">
+            Herdr remains authoritative when selected: the new space appears locally and its tabs,
+            panes, names, order, and status mirror back here.
+          </p>
           {error && <div className="text-xs text-bad">{error}</div>}
           <button
             type="submit"
-            disabled={submitting}
-            className="h-9 shrink-0 rounded-md bg-text px-3 text-sm font-medium text-bg disabled:opacity-60"
+            disabled={submitting || !device || !rootKey}
+            className="min-h-11 shrink-0 rounded-md bg-text px-3 text-sm font-medium text-bg disabled:opacity-60"
           >
-            {submitting ? "Creating..." : "Create session"}
+            {submitting ? "Creating…" : "Create terminal"}
           </button>
         </form>
       </section>

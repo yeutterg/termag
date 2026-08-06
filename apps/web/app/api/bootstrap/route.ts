@@ -3,7 +3,6 @@ import { z } from "zod";
 import crypto from "node:crypto";
 import { withAuth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
-import { logAudit } from "@/lib/audit";
 
 // Bootstrap codes are short (~12 chars), use a URL-safe alphabet, and
 // have meaningful entropy (~70 bits). They live for 15 minutes; after
@@ -46,19 +45,10 @@ export const POST = withAuth(async (user, request: Request) => {
   const host = request.headers.get("host") || "localhost:3000";
   const claimUrl = `${proto}://${host}/api/bootstrap/claim/${row.code}`;
 
-  logAudit({
-    userId: user.id,
-    action: "create-token", // closest existing variant; will become "issue-bootstrap" once the enum expands
-    subjectType: "token",
-    deviceName: parsed.data.deviceName ?? null,
-    request,
-    payload: { kind: "bootstrap-code", expiresAt: row.expiresAt.toISOString() },
-  });
-
   return NextResponse.json({
     code: row.code,
     claimUrl,
     expiresAt: row.expiresAt.toISOString(),
-    cliCommand: `termag bootstrap ${claimUrl}`,
+    cliCommand: `terminalz bootstrap ${claimUrl}`,
   });
 });

@@ -1,162 +1,125 @@
 ---
-project: termag-next
+project: terminalz
 status: production
-status_description: "Self-hosted cloud access to local HerdR and tmux workspaces through a low-footprint Rust agent and a mobile-capable Next.js client."
-last_updated: 2026-08-04
+status_description: "Self-hosted cloud access to local Herdr and tmux terminals through a low-footprint Rust agent and a mobile-capable Next.js client."
+last_updated: 2026-08-05
 last_updated_by:
   - agent: codex
 wiki_schema_version: 1
 ---
 
-# AGENTS.md — termag-next
+# AGENTS.md — Terminalz
 
-## What This Is
+## Purpose
 
-Termag is a self-hosted remote terminal workspace. A small outbound Rust daemon runs on each machine;
-one Next.js broker exposes its live HerdR and tmux organization to authenticated browsers. HerdR stays
-independent and authoritative. Termag neither forks, patches, launches, nor embeds HerdR.
+Terminalz is a remote view of terminal organization that already exists on a machine. A small outbound
+Rust daemon connects every machine to one authenticated Next.js broker. Herdr remains an independent,
+authoritative local application; Terminalz does not fork, patch, launch, configure, or embed it.
 
-When HerdR is present, the cloud hierarchy mirrors machine → HerdR session → space → tab → pane,
-including order, focus, layouts, status vocabulary, and HerdR's dot/symbol icon style. Cloud-created
-spaces and tabs go back through HerdR's local API. tmux is discovered independently and remains the
-fallback when HerdR is absent. HerdR does not require tmux, and Termag attaches to HerdR terminals
-through HerdR's own observe/control process interface.
+When Herdr is running, the hierarchy is machine → Herdr session → space → tab → pane. Native ids,
+names, order, focus, split layout, statuses, and dot/symbol iconography are mirrored exactly. Typed
+cloud mutations go through Herdr and return in its next snapshot. tmux is discovered independently;
+it works with or without Herdr and is the fallback runtime when Herdr is absent.
 
-## Repository Layout
+There is no menu-bar app, Node device agent, broker-side SSH transport, arbitrary command channel,
+cloud-only project organizer, persisted terminal scrollback, Redis, Sentry, OpenTelemetry, Prometheus,
+or Winston layer.
+
+## Repository
 
 ```text
-apps/web/       Next.js UI, API routes, Prisma/SQLite, PWA, and custom WebSocket broker
-apps/agent-rs/  Protocol-v2 Rust daemon and the termag CLI
+apps/web/       Next.js UI, route handlers, Prisma/SQLite, PWA, and custom WebSocket broker
+apps/agent-rs/  protocol-v2 Rust daemon plus bootstrap/list/attach CLI
 infra/          Docker Compose, Caddy, staging, and Homebrew packaging
-scripts/        database, preview, and deployment helpers
-docs/           operational docs and architecture decisions
+scripts/        database and deployment helpers
+docs/           protocol, environment, troubleshooting, and ADRs
 ```
 
-There is no supported Node device agent and no menu-bar application. `apps/web` still uses
-`@lydell/node-pty` for optional broker-side SSH-host streams; that is separate from the local device
-agent.
+The production web process must run `apps/web/server.js`; `next start` alone does not own WebSocket
+upgrades. `server/broker.js` routes agent/browser sockets, `server/broker-rpc.js` allowlists typed
+operations, and `server/terminal-checkpoint-store.js` owns bounded in-memory replay state.
 
-## Architecture
+## Runtime and persistence
+
+`AgentToken` is the durable machine identity. SQLite stores the token hash, capabilities, and one
+bounded normalized `inventorySnapshot` JSON value. Herdr/tmux spaces, tabs, panes, and terminal
+sessions are not copied into relational rows. `lib/runtime-projects.ts` projects the current snapshot
+into the existing UI shape and creates signed-in-user-scoped virtual ids (`rp_`, `rt_`, `rs_`).
+
+The broker validates every terminal id against the connected agent's current inventory before attach.
+Terminal checkpoints and short ANSI tails are memory-only, sequence-checked, capped at 16 MiB across
+the broker, and discarded when no viewer remains. The browser uses bounded xterm scrollback.
+
+## Local agent
+
+The Rust agent uses a current-thread Tokio runtime. It subscribes to Herdr events, polls tmux with an
+idle backoff up to 60 seconds, and starts terminal helpers only while viewers exist. Release builds use
+LTO, one codegen unit, stripping, `opt-level = "s"`, and `panic = "abort"`.
+
+Configuration lives at `~/.terminalz/config.json` unless `TERMINALZ_CONFIG` overrides it. Legacy
+`~/.termag/config.json` and `TERMAG_*` values are read only for migration. Environment values
+win. With no explicit roots or allowlist, the user's home directory is exposed and writable by
+default. Every browse, create, and git path is canonicalized and checked locally. Set
+`allowAllDirectories`/`TERMINALZ_ALLOW_ALL_DIRECTORIES=true` only as an explicit opt-out.
+
+Supported commands:
 
 ```text
-Browser ── HTTPS/WSS ──> Next.js custom server + broker ──> SQLite
-                                  ▲
-                                  │ one outbound authenticated WSS
-                                  │
-                            Rust device agent
-                            ├─ HerdR CLI + Unix socket API
-                            ├─ tmux CLI/control mode
-                            ├─ typed git operations
-                            └─ macOS caffeinate leases
+terminalz
+terminalz bootstrap URL
+terminalz config show
+terminalz config set roots JSON
+terminalz list
+terminalz attach TARGET
 ```
 
-The custom server in `apps/web/server.js` owns the HTTP server and WebSocket upgrades. The broker is
-split by concern:
+## Protocol invariants
 
-- `server/broker.js` — agent/browser routing and terminal-stream coordination.
-- `server/terminal-checkpoint-store.js` — contiguous checkpoint + ANSI-tail replay with byte caps.
-- `server/tmux-status.js` — pure tmux status classification.
-- `server/ssh-host-lifecycle.js` and `ssh-session-stream.js` — optional broker-side SSH hosts.
-- `server/broker-rpc.js` — typed request facade and operation allowlists.
+1. Protocol v2 is the only supported protocol. Do not add v1 names or aliases.
+2. Never add arbitrary command or shell-string execution. Runtime, power, and git requests are named,
+   broker-allowlisted operations with agent-side validation. See ADR 0001.
+3. Never trust a browser absolute path. Send `rootKey` plus `relativePath`; the local policy is final.
+4. Preserve native runtime ids and display values. Unknown status values become `unknown`.
+5. A cloud-created Herdr object must be created through Herdr, then arrive in the next snapshot. Do
+   not synthesize a parallel tmux or database object.
+6. Terminal output must remain binary-safe, bounded, and absent from logs, databases, service-worker
+   caches, analytics, and error telemetry.
+7. A continuity gap must force a checkpoint/resync. Never present a truncated stream as contiguous.
 
-Protocol v2 sends binary terminal frames and JSON control messages over one agent socket. Terminal
-helpers exist only while viewers are attached. Multiple viewers share one local helper per terminal;
-one driver can send input while observers remain read-only. Browser backpressure becomes an explicit
-resync instead of unbounded buffering.
+## Security
 
-## Runtime and Data Model
+- Agent sockets use bearer tokens. Raw tokens are displayed once and stored hashed server-side.
+- Non-loopback agents require `wss://`; plaintext is allowed only for exact loopback hosts.
+- Browser WebSocket origins must match `NEXTAUTH_URL` or `TERMINALZ_ALLOWED_ORIGINS`.
+- Cookie-authenticated mutations use Origin/Sec-Fetch-Site checks. Auth callbacks and one-use bootstrap
+  claims are the explicit exemptions.
+- `TERMINALZ_TRUSTED_NETWORK=true` is private-network mode. Production refuses a non-loopback bind
+  unless `TERMINALZ_PASSWORD` is also set.
+- Forwarded client IPs are honored only with `TERMINALZ_TRUSTED_PROXY=true` behind a normalizing proxy.
 
-- **AgentToken** identifies a physical device. The raw `tmag_…` token is shown once; SQLite stores its
-  hash. `Project.rootKey` remains the human-facing device name for compatibility and `deviceId` is the
-  stable identity.
-- **Project** represents a mirrored space/workspace or a managed tmux session. `runtime` is `herdr` or
-  `tmux`; runtime ids and ordinals map cloud rows back to native state.
-- **Tab** represents a runtime tab/pane projection. HerdR tabs with multiple panes can produce multiple
-  rows sharing `runtimeTabId` and distinct `runtimePaneId` values.
-- **Session** is the browser-addressable terminal stream. Its target is a stable HerdR terminal/pane id
-  or tmux pane/window target.
-- **ScrollbackChunk** stores bounded terminal history. Default retention is seven days because terminal
-  output can contain credentials.
+## Mobile and memory
 
-`apps/web/server/inventory-v2.js` reconciles agent snapshots into SQLite. Native runtime inventory is
-the source of truth for mirrored rows; do not invent a second local organization model.
+- The viewport is device-width and `ClientRuntime` sizes the app from `visualViewport`, including the
+  soft keyboard and safe-area insets.
+- Refit terminals on visual viewport, orientation, and element resize; reconnect eagerly on `online`
+  and `visibilitychange` with jittered exponential backoff.
+- Primary touch targets are at least 44×44 CSS pixels.
+- Only active terminal panes are mounted. Hidden pages dispose xterm/WebSocket instances after 90
+  seconds. Phone/constrained scrollback is 500 lines; desktop is 2,000.
+- Phone, touch-portable, Save-Data, and slow-network clients request low-data terminal mode: live
+  writes coalesce for 64 ms, replay frames batch for compression, and fresh tmux checkpoints are
+  limited to 300 lines / 256 KiB (desktop: 2,000 lines / 1 MiB). Visible output remains lossless.
+- Inventory status/focus changes use compact id-based WebSocket patches; structural changes alone
+  trigger a full project reload. Health ticks contain only health fields. Constrained clients close
+  the status socket while hidden and reconcile once when foregrounded.
+- The service worker bypasses `/api`, auth, WebSockets, and navigation documents.
+- Keep optional dialogs lazy-loaded and delete unreachable feature scaffolding.
 
-## Local Agent
-
-`apps/agent-rs` uses a single-thread Tokio runtime and dynamically starts local helpers only when
-needed. Idle tmux polling backs off to 60 seconds; HerdR events trigger targeted refreshes. The release
-profile uses LTO, one codegen unit, stripping, and `panic = "abort"`. Current targets are under 15 MiB
-for the binary, under 20 MiB idle RSS, and under 0.5% idle CPU.
-
-The agent reads `~/.termag/config.json` (override with `TERMAG_CONFIG`) and environment variables.
-Environment values win over the file. With no explicit roots or allowlist, the home directory is the
-default root and allowed directory. Creation, browsing, and git paths are canonicalized and checked
-locally even if the web layer already validated them.
-
-The installed binary supports:
-
-```text
-termag-agent                run the daemon
-termag bootstrap URL        claim and store a one-time device token
-termag config show
-termag config set roots JSON
-termag list
-termag attach TARGET
-```
-
-## Security Invariants
-
-1. Never add an arbitrary command or shell-string protocol message. Runtime, power, and git requests
-   are named operations allowlisted by the broker and matched/validated agent-side. See ADR 0001.
-2. Never trust an absolute path from a browser. Store/send `rootKey` plus `relativePath`; the agent
-   canonicalizes it and enforces `allowDirectories`/`allowAllDirectories`.
-3. Non-loopback agents require `wss://`. Plain `ws://` is accepted only for exact loopback hosts.
-4. Browser WebSocket origins must match `NEXTAUTH_URL` or `TERMAG_ALLOWED_ORIGINS`. Agent sockets use
-   bearer tokens and do not use browser-origin auth.
-5. `TERMAG_TRUSTED_NETWORK=true` is for private networks. A production non-loopback bind also requires
-   `TERMAG_PASSWORD`; otherwise the custom server refuses to start.
-6. Honor forwarded IP headers only when `TERMAG_TRUSTED_PROXY=true` and the deployment really has a
-   trusted normalizing proxy.
-7. Keep terminal data out of logs, audit payloads, service-worker caches, and error telemetry. Sentry
-   is intentionally not installed.
-
-## HerdR Integration Rules
-
-- Discover with `herdr session list --json`; read snapshots and mutations through each running
-  session's local socket/API.
-- Do not modify HerdR source or configuration. Reading its status-indicator preference is allowed so
-  cloud iconography matches local UI.
-- Preserve native ids, ordering, focus, layouts, and statuses. Unknown statuses should degrade to
-  `unknown`, not be guessed into a different semantic state.
-- A cloud-created HerdR tab/space must be created through HerdR, then appear through the next
-  authoritative inventory snapshot. Do not create a parallel tmux object for it.
-- If HerdR is missing or stopped, continue publishing tmux inventory normally.
-
-## Web and Mobile Rules
-
-- The viewport is device-width and the app sizes itself from `visualViewport` so iOS/Android keyboards
-  do not cover the terminal or soft keys.
-- Terminal resize and reconnect logic must react to viewport resize, `online`, and
-  `visibilitychange`; background mobile timers are not reliable.
-- Keep primary touch targets at least 44×44 CSS pixels and account for safe-area insets.
-- The service worker may cache only versioned/static public assets. Never cache `/api`, auth,
-  WebSocket, terminal, share, or HTML navigation responses.
-- Heavy dialogs remain lazy-loaded. Verify a new client feature is reachable before adding a helper
-  module; orphaned “future feature” trees are deleted, not retained as scaffolding.
-
-## Git Operations
-
-The palette supports `git.status`, `git.stage`, `git.branch`, `git.commit`, `git.pull`, and `git.push`.
-`POST /api/git` resolves an authenticated owned project; the broker allowlists the operation; the Rust
-agent re-resolves the path and invokes `git` directly without a shell. Output is bounded, commands time
-out after 30 seconds, pull is fast-forward-only, and credential prompts are disabled. Interactive auth
-and conflict resolution belong in the visible terminal.
-
-## Build and Verification
+## Verification
 
 ```bash
 npm ci
-npm run typecheck          # prisma generate + next typegen + tsc --noEmit
+npm run typecheck
 npm run lint
 npx jest --runInBand
 npm run build
@@ -168,22 +131,9 @@ cargo test --locked
 cargo build --release --locked
 ```
 
-The Rust toolchain is pinned by `rust-toolchain.toml` to 1.82.0. Do not remove `prisma generate` from
-the typecheck command; stale generated clients previously hid dozens of real errors.
+Rust 1.82.0 is pinned in `rust-toolchain.toml` and `Cargo.toml`. `npm run typecheck` must regenerate
+Prisma and Next route types; stale generated clients once hid real failures.
 
-Mobile keyboard/rotation, cellular↔Wi-Fi reconnect, background/foreground recovery, and installed-PWA
-behavior require real iOS and Android hardware verification. Desktop narrow-width emulation is not a
-substitute for visual-keyboard behavior.
-
-## Operations
-
-- Web logs: Docker logs or the process manager around `apps/web/server.js`.
-- Health: `GET /api/health`.
-- Prometheus metrics: `GET /api/metrics`.
-- Agent: foreground stderr or Homebrew service logs.
-- Database: SQLite at the path in `DATABASE_URL`; use `npm run db:backup` before destructive schema or
-  data work.
-
-The agent needs no restart for changes to the independent HerdR app, but it must be rebuilt/restarted
-after Rust changes. The web app must run through its custom server in production; `next start` alone
-does not provide the broker upgrades.
+Test keyboard appearance, rotation, reconnect after network handoff, background/foreground recovery,
+and installed-PWA behavior on real iOS Safari and Android Chrome. Desktop responsive emulation does
+not reproduce mobile visual-keyboard behavior.

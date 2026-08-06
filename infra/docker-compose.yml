@@ -1,29 +1,33 @@
-name: termag-next
+name: terminalz
 
 services:
   web:
-    build:
-      context: ..
-      dockerfile: apps/web/Dockerfile
+    image: ${TERMINALZ_IMAGE:-ghcr.io/yeutterg/terminalz}:${TERMINALZ_VERSION:-latest}
     restart: unless-stopped
+    init: true
     environment:
       NODE_ENV: production
       PORT: 3000
-      DATABASE_URL: file:/data/termag.db
+      DATABASE_URL: file:/data/terminalz.db
       NEXTAUTH_URL: ${NEXTAUTH_URL}
       NEXTAUTH_SECRET: ${NEXTAUTH_SECRET}
-      TERMAG_TRUSTED_NETWORK: ${TERMAG_TRUSTED_NETWORK:-true}
-      TERMAG_PASSWORD: ${TERMAG_PASSWORD:-}
-      # OAuth vars are only used when TERMAG_TRUSTED_NETWORK=false (Path B).
+      TERMINALZ_TRUSTED_NETWORK: ${TERMINALZ_TRUSTED_NETWORK:-false}
+      TERMINALZ_PASSWORD: ${TERMINALZ_PASSWORD:-}
+      TERMINALZ_ALLOWED_ORIGINS: ${TERMINALZ_ALLOWED_ORIGINS:-}
+      TERMINALZ_TRUSTED_PROXY: ${TERMINALZ_TRUSTED_PROXY:-false}
+      # OAuth vars are only used when TERMINALZ_TRUSTED_NETWORK=false (Path B).
       # `:-` default to empty so trusted-network deployments don't trip warnings.
       GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
       GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
-      TERMAG_ALLOWED_EMAIL: ${TERMAG_ALLOWED_EMAIL:-}
-      TERMAG_ROOTS: '${TERMAG_ROOTS:-{}}'
+      TERMINALZ_ALLOWED_EMAIL: ${TERMINALZ_ALLOWED_EMAIL:-}
     volumes:
-      - termag-data:/data
+      - terminalz-data:/data
     expose:
       - "3000"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
 
   caddy:
     image: caddy:2.8
@@ -34,13 +38,13 @@ services:
       - "80:80"
       - "443:443"
     environment:
-      TERMAG_HOST: ${TERMAG_HOST:-localhost}
+      TERMINALZ_HOST: ${TERMINALZ_HOST:-localhost}
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy-data:/data
       - caddy-config:/config
 
 volumes:
-  termag-data:
+  terminalz-data:
   caddy-data:
   caddy-config:

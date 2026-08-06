@@ -1,6 +1,6 @@
 # Command palette
 
-The dashboard palette is lazy-loaded and provides session navigation, common Termag actions, and six
+The dashboard palette is lazy-loaded and provides session navigation, common Terminalz actions, and six
 typed git operations for the active project.
 
 ## Git operations
@@ -14,7 +14,7 @@ The execution path is:
 ```text
 Command palette
   → POST /api/git
-    → authenticated Project lookup (device + working directory)
+    → authenticated virtual runtime lookup (machine + reported working directory)
       → broker git-operation allowlist
         → Rust agent directory policy + argument validation
           → git process (no shell, bounded output, 30-second timeout)

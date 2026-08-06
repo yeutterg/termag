@@ -1,32 +1,27 @@
-name: termag-next-staging
+name: terminalz-staging
 
 services:
   web:
-    build:
-      context: ..
-      dockerfile: apps/web/Dockerfile
+    image: ${TERMINALZ_IMAGE:-ghcr.io/yeutterg/terminalz}:${TERMINALZ_VERSION:-edge}
     restart: unless-stopped
     environment:
       NODE_ENV: staging
       PORT: 3000
-      DATABASE_URL: file:/data/termag-staging.db
+      DATABASE_URL: file:/data/terminalz-staging.db
       NEXTAUTH_URL: ${NEXTAUTH_URL}
       NEXTAUTH_SECRET: ${NEXTAUTH_SECRET}
-      TERMAG_TRUSTED_NETWORK: ${TERMAG_TRUSTED_NETWORK:-true}
-      TERMAG_PASSWORD: ${TERMAG_PASSWORD:-}
-      TERMAG_ROOTS: '${TERMAG_ROOTS:-{}}'
-      # Staging-specific variables
-      LOG_LEVEL: debug
+      TERMINALZ_TRUSTED_NETWORK: ${TERMINALZ_TRUSTED_NETWORK:-false}
+      TERMINALZ_PASSWORD: ${TERMINALZ_PASSWORD:-}
       # OAuth vars (optional for staging)
       GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
       GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
-      TERMAG_ALLOWED_EMAIL: ${TERMAG_ALLOWED_EMAIL:-}
+      TERMINALZ_ALLOWED_EMAIL: ${TERMINALZ_ALLOWED_EMAIL:-}
     volumes:
-      - termag-staging-data:/data
+      - terminalz-staging-data:/data
     expose:
       - "3000"
     networks:
-      - termag-staging-network
+      - terminalz-staging-network
 
   caddy:
     image: caddy:2.8
@@ -37,33 +32,20 @@ services:
       - "8080:80"
       - "8443:443"
     environment:
-      TERMAG_HOST: ${TERMAG_HOST:-staging.termag.example.com}
+      TERMINALZ_HOST: ${TERMINALZ_HOST:-staging.terminalz.example.com}
       ACME_AGREE: "true"
     volumes:
       - ./Caddyfile.staging:/etc/caddy/Caddyfile:ro
       - caddy-staging-data:/data
       - caddy-staging-config:/config
     networks:
-      - termag-staging-network
-
-  # Redis for staging (optional, for future caching features)
-  redis:
-    image: redis:7-alpine
-    restart: unless-stopped
-    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
-    volumes:
-      - redis-staging-data:/data
-    networks:
-      - termag-staging-network
-    expose:
-      - "6379"
+      - terminalz-staging-network
 
 volumes:
-  termag-staging-data:
+  terminalz-staging-data:
   caddy-staging-data:
   caddy-staging-config:
-  redis-staging-data:
 
 networks:
-  termag-staging-network:
+  terminalz-staging-network:
     driver: bridge

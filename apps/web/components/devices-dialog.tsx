@@ -1,19 +1,15 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
-import { Check, Copy, ExternalLink, FolderCog, Plus, Trash2, X } from "lucide-react";
+import { useEffect, useState } from "react";
+import { ExternalLink, FolderCog, Plus, Trash2, X, Zap } from "lucide-react";
 import { cn } from "@/lib/utils";
-import type { AgentDeviceStatus, Project, Session, TmuxDeviceSession } from "./types";
+import type { AgentDeviceStatus } from "./types";
 import { DirectoryBrowser } from "./directory-browser";
-import { SshHostsSection } from "./ssh-hosts-section";
-import type { SshHost } from "./new-ssh-host-dialog";
-import { Zap } from "lucide-react";
 
 type Token = {
   id: string;
   name: string;
   tokenPrefix: string;
-  createdAt: string;
   lastUsedAt?: string | null;
   defaultRootKey?: string | null;
   defaultRelativePath?: string | null;
@@ -25,41 +21,10 @@ interface DevicesDialogProps {
   user: { email: string; name?: string | null };
   devices: AgentDeviceStatus[];
   knownDeviceNames?: string[];
-  projects?: Project[];
   focusedDevice?: string | null;
   onTokenDeleted?: (tokenName: string) => void;
   onAddDevice?: () => void;
-  // Add-host flow lifted to the parent so the same dialog is reachable
-  // from the + menu without juggling two copies of state.
-  onAddSshHost?: () => void;
   onBootstrap?: () => void;
-  onCleanup?: () => void | Promise<void>;
-  // Bump from the parent to force a re-fetch of agent tokens + ssh
-  // hosts (e.g., after a host is added via the dashboard + menu while
-  // Devices is open in the background).
-  refreshTrigger?: number;
-}
-
-type MissingTarget = {
-  projectId: string;
-  tabId?: string;
-  sessionId: string;
-  projectName: string;
-  label: string;
-  tmuxName: string;
-};
-
-function rootHintForDevice(device?: AgentDeviceStatus) {
-  const roots = device?.roots
-    ? Object.values(device.roots).filter(
-        value => typeof value === "string" && value.trim().length > 0
-      )
-    : [];
-  return roots[0] || "<project-root>";
-}
-
-function shellSingleQuoteContent(value: string) {
-  return value.replace(/'/g, "'\\''");
 }
 
 export function DevicesDialog({
@@ -68,266 +33,167 @@ export function DevicesDialog({
   user,
   devices,
   knownDeviceNames = [],
-  projects = [],
   focusedDevice,
   onTokenDeleted,
   onAddDevice,
-  onAddSshHost,
   onBootstrap,
-  onCleanup,
-  refreshTrigger = 0,
 }: DevicesDialogProps) {
   const [tokens, setTokens] = useState<Token[]>([]);
-  const [sshHosts, setSshHosts] = useState<SshHost[]>([]);
-  const [copied, setCopied] = useState("");
-  const [deleting, setDeleting] = useState("");
-  const [cleanupError, setCleanupError] = useState("");
+  const [loaded, setLoaded] = useState(false);
   const [editingDefault, setEditingDefault] = useState("");
   const [savingDefault, setSavingDefault] = useState("");
-  // Single flag: render skeleton until BOTH tokens + ssh-hosts have
-  // resolved. Without this, the dialog opens with empty sections that
-  // pop in milliseconds later — feels janky. We fetch both in parallel
-  // and only flip the flag once both promises settle.
-  const [loaded, setLoaded] = useState(false);
-  const deviceRefs = useRef(new Map<string, HTMLDivElement>());
-
-  async function patchToken(
-    tokenId: string,
-    payload: Partial<Pick<Token, "defaultRootKey" | "defaultRelativePath">>
-  ) {
-    setSavingDefault(tokenId);
-    try {
-      const res = await fetch(`/api/agent-tokens/${tokenId}`, {
-        method: "PATCH",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(payload),
-      });
-      if (!res.ok) {
-        throw new Error(await res.text().catch(() => "Update failed"));
-      }
-      const next = await res.json();
-      setTokens(items => items.map(item => (item.id === tokenId ? { ...item, ...next } : item)));
-    } finally {
-      setSavingDefault(current => (current === tokenId ? "" : current));
-    }
-  }
 
   useEffect(() => {
     if (!open) {
       return;
     }
     let cancelled = false;
-    queueMicrotask(() => {
-      if (cancelled) {
-        return;
-      }
-      setLoaded(false);
-      // Parallel fetch of tokens + ssh hosts so both sections appear at
-      // the same instant. Errors in either one don't block the other —
-      // they just leave that section empty (with the section's own error
-      // UI surfacing later when reload-on-action runs).
-      Promise.allSettled([
-        fetch("/api/agent-tokens").then(res => (res.ok ? res.json() : [])),
-        fetch("/api/ssh-hosts").then(res => (res.ok ? res.json() : [])),
-      ]).then(([tokenResult, sshResult]) => {
-        if (cancelled) {
-          return;
+    fetch("/api/agent-tokens")
+      .then(response => (response.ok ? response.json() : []))
+      .then(value => {
+        if (!cancelled) {
+          setTokens(Array.isArray(value) ? value : []);
+          setLoaded(true);
         }
-        setTokens(
-          tokenResult.status === "fulfilled" && Array.isArray(tokenResult.value)
-            ? tokenResult.value
-            : []
-        );
-        setSshHosts(
-          sshResult.status === "fulfilled" && Array.isArray(sshResult.value) ? sshResult.value : []
-        );
-        setLoaded(true);
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setTokens([]);
+          setLoaded(true);
+        }
       });
-    });
     return () => {
       cancelled = true;
     };
-  }, [open, refreshTrigger]);
-
-  async function copyText(id: string, value: string) {
-    try {
-      await navigator.clipboard.writeText(value);
-    } catch {
-      const textarea = document.createElement("textarea");
-      textarea.value = value;
-      textarea.style.position = "fixed";
-      textarea.style.opacity = "0";
-      document.body.appendChild(textarea);
-      textarea.select();
-      document.execCommand("copy");
-      document.body.removeChild(textarea);
-    }
-    setCopied(id);
-    window.setTimeout(() => setCopied(current => (current === id ? "" : current)), 1500);
-  }
-
-  const deviceMap = new Map(devices.map(device => [device.name, device]));
-  const allNames = [
-    ...new Set([
-      ...knownDeviceNames,
-      ...tokens.map(token => token.name),
-      ...devices.map(device => device.name),
-    ]),
-  ];
-  const allNamesKey = allNames.join("\0");
-  const anyConnected = devices.some(device => device.connected);
-
-  async function cleanup(payload: Record<string, string>, confirmMessage: string, key: string) {
-    if (!window.confirm(confirmMessage)) {
-      return;
-    }
-    setCleanupError("");
-    setDeleting(key);
-    try {
-      const res = await fetch("/api/tmux/cleanup", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(payload),
-      });
-      if (!res.ok) {
-        throw new Error(await res.text().catch(() => "Cleanup failed"));
-      }
-      await onCleanup?.();
-    } catch (err) {
-      setCleanupError(err instanceof Error ? err.message : "Cleanup failed");
-    } finally {
-      setDeleting(current => (current === key ? "" : current));
-    }
-  }
+  }, [open]);
 
   useEffect(() => {
     if (!open || !focusedDevice) {
       return;
     }
     const frame = window.requestAnimationFrame(() => {
-      deviceRefs.current.get(focusedDevice)?.scrollIntoView({ block: "center" });
+      document
+        .getElementById(`termag-device-${encodeURIComponent(focusedDevice)}`)
+        ?.scrollIntoView({ block: "center" });
     });
     return () => window.cancelAnimationFrame(frame);
-  }, [allNamesKey, focusedDevice, open]);
+  }, [focusedDevice, open, tokens]);
+
+  async function patchToken(
+    tokenId: string,
+    payload: Pick<Token, "defaultRootKey" | "defaultRelativePath">
+  ) {
+    setSavingDefault(tokenId);
+    try {
+      const response = await fetch(`/api/agent-tokens/${encodeURIComponent(tokenId)}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      if (!response.ok) {
+        return;
+      }
+      const next = await response.json();
+      setTokens(current => current.map(token => (token.id === tokenId ? next : token)));
+    } finally {
+      setSavingDefault("");
+    }
+  }
 
   if (!open) {
     return null;
   }
+
+  const deviceByName = new Map(devices.map(device => [device.name, device]));
+  const names = [
+    ...new Set([
+      ...knownDeviceNames,
+      ...tokens.map(token => token.name),
+      ...devices.map(d => d.name),
+    ]),
+  ];
+  const connectedCount = devices.filter(device => device.connected).length;
+
   return (
-    <div className="fixed inset-0 z-50 bg-black/35 p-4" onClick={() => onOpenChange(false)}>
+    <div className="fixed inset-0 z-50 bg-black/35 p-3 sm:p-4" onClick={() => onOpenChange(false)}>
       <section
-        className="mx-auto mt-[7vh] flex max-h-[86vh] max-w-2xl flex-col rounded-lg border border-line bg-panel p-4 shadow-2xl"
+        className="mx-auto mt-[3dvh] flex max-h-[94dvh] max-w-2xl flex-col rounded-lg border border-line bg-panel p-4 shadow-2xl sm:mt-[7dvh] sm:max-h-[86dvh]"
         onClick={event => event.stopPropagation()}
       >
-        <div className="mb-4 flex items-center justify-between">
+        <header className="mb-4 flex items-start justify-between gap-3">
           <div>
-            <h2 className="text-base font-semibold">Devices</h2>
+            <h2 className="text-base font-semibold">Machines</h2>
             <p className="text-sm text-muted">{user.email}</p>
           </div>
-          <span
-            className={cn(
-              "rounded-full px-2 py-1 text-xs",
-              anyConnected ? "bg-good/15 text-good" : "bg-panel2 text-muted"
-            )}
-          >
-            {anyConnected
-              ? `${devices.filter(device => device.connected).length} connected`
-              : "No agents connected"}
-          </span>
-        </div>
-        <div className="min-h-0 flex-1 overflow-y-auto">
-          <div className="mb-3 flex items-end justify-between gap-2">
-            <div>
-              <h3 className="text-sm font-medium">Device tokens (agent)</h3>
-              <p className="text-xs text-muted">One token per device. Revoke to disconnect.</p>
-            </div>
-            <div className="flex items-center gap-1.5">
-              {onBootstrap && (
-                <button
-                  type="button"
-                  onClick={() => {
-                    onOpenChange(false);
-                    onBootstrap();
-                  }}
-                  className="inline-flex h-7 items-center gap-1.5 rounded-md border border-line bg-bg px-2 text-xs text-text hover:bg-panel2"
-                  title="One-time code: paste a command on the new device, done"
-                >
-                  <Zap className="h-3.5 w-3.5" />
-                  Bootstrap
-                </button>
+          <div className="flex items-center gap-2">
+            <span
+              className={cn(
+                "rounded-full px-2 py-1 text-xs",
+                connectedCount ? "bg-good/15 text-good" : "bg-panel2 text-muted"
               )}
-              {onAddDevice && (
-                <button
-                  type="button"
-                  onClick={() => {
-                    onOpenChange(false);
-                    onAddDevice();
-                  }}
-                  className="inline-flex h-7 items-center gap-1.5 rounded-md border border-line bg-bg px-2 text-xs text-text hover:bg-panel2"
-                  title="Create a device token manually"
-                >
-                  <Plus className="h-3.5 w-3.5" />
-                  Add device
-                </button>
-              )}
-            </div>
+            >
+              {connectedCount ? `${connectedCount} connected` : "None connected"}
+            </span>
+            <button
+              type="button"
+              className="grid h-11 w-11 place-items-center rounded-md text-muted hover:bg-panel2 hover:text-text"
+              onClick={() => onOpenChange(false)}
+              aria-label="Close machines"
+            >
+              <X className="h-4 w-4" />
+            </button>
           </div>
-          {!loaded && (
-            // Skeleton: identical row count + height to the rendered list
-            // so the dialog doesn't visibly resize when data lands.
-            <div className="space-y-2">
-              {[0, 1].map(i => (
-                <div
-                  key={i}
-                  className="h-20 animate-pulse rounded-md border border-line bg-bg/60"
-                />
-              ))}
+        </header>
+
+        <div className="mb-3 flex flex-wrap items-center justify-end gap-2">
+          {onBootstrap && (
+            <button
+              type="button"
+              onClick={() => {
+                onOpenChange(false);
+                onBootstrap();
+              }}
+              className="inline-flex min-h-11 items-center gap-2 rounded-md border border-line bg-bg px-3 text-xs hover:bg-panel2"
+            >
+              <Zap className="h-4 w-4" /> Bootstrap machine
+            </button>
+          )}
+          {onAddDevice && (
+            <button
+              type="button"
+              onClick={() => {
+                onOpenChange(false);
+                onAddDevice();
+              }}
+              className="inline-flex min-h-11 items-center gap-2 rounded-md border border-line bg-bg px-3 text-xs hover:bg-panel2"
+            >
+              <Plus className="h-4 w-4" /> Create token
+            </button>
+          )}
+        </div>
+
+        <div className="min-h-0 flex-1 space-y-2 overflow-y-auto overscroll-contain">
+          {!loaded && <div className="h-24 animate-pulse rounded-md border border-line bg-bg/60" />}
+          {loaded && names.length === 0 && (
+            <div className="rounded-md border border-line bg-bg px-4 py-8 text-center text-sm text-muted">
+              No machines yet. Bootstrap one to mirror its Herdr and tmux terminals.
             </div>
           )}
-          <div className={cn("space-y-2", !loaded && "hidden")}>
-            {allNames.length === 0 && (
-              <div className="rounded-md border border-line bg-bg px-3 py-6 text-center text-sm text-muted">
-                No devices yet.
-                {onAddDevice && (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      onOpenChange(false);
-                      onAddDevice();
-                    }}
-                    className="ml-1 text-accent hover:underline"
-                  >
-                    Add your first one.
-                  </button>
-                )}
-              </div>
-            )}
-            {allNames.map(name => {
+          {loaded &&
+            names.map(name => {
               const token = tokens.find(item => item.name === name);
-              const device = deviceMap.get(name);
-              const tmuxSessions = device?.tmuxSessions ?? [];
-              const missingTargets =
-                device?.connected && device.tmuxSessions
-                  ? missingTargetsForDevice(name, tmuxSessions, projects)
-                  : [];
-              const rootsJson = JSON.stringify({ [name]: rootHintForDevice(device) });
-              const envTemplate = [
-                "export TERMAG_URL=wss://<your-termag-host>/api/ws/agent",
-                "export TERMAG_AGENT_TOKEN=tmag_REPLACE_WITH_DEVICE_TOKEN",
-                `export TERMAG_AGENT_ROOTS='${shellSingleQuoteContent(rootsJson)}'`,
-              ].join("\n");
+              const device = deviceByName.get(name);
+              const roots = device?.roots ?? {};
+              const runtimeCounts = (device?.runtimeSessions ?? [])
+                .filter(runtime => runtime.available)
+                .map(runtime => `${runtime.kind}: ${runtime.sessions.length}`)
+                .join(" · ");
               return (
-                <div
+                <article
                   key={name}
-                  ref={node => {
-                    if (node) {
-                      deviceRefs.current.set(name, node);
-                    } else {
-                      deviceRefs.current.delete(name);
-                    }
-                  }}
+                  id={`termag-device-${encodeURIComponent(name)}`}
                   className={cn(
-                    "rounded-md border border-line bg-bg p-3 text-sm",
+                    "rounded-md border border-line bg-bg p-3",
                     focusedDevice === name && "border-accent/60 ring-1 ring-accent/60"
                   )}
                 >
@@ -336,328 +202,137 @@ export function DevicesDialog({
                       <div className="flex items-center gap-2">
                         <span
                           className={cn(
-                            "h-2 w-2 rounded-full",
+                            "h-2 w-2 shrink-0 rounded-full",
                             device?.connected ? "bg-good" : "bg-muted/40"
                           )}
                         />
-                        <span className="truncate font-medium">{name}</span>
-                        {device?.fake && (
-                          <span className="rounded bg-panel2 px-1.5 py-0.5 text-[10px] text-muted">
-                            fake
-                          </span>
-                        )}
+                        <span className="truncate text-sm font-medium">{name}</span>
                       </div>
-                      <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-xs text-muted">
-                        <span>{device?.connected ? "Connected" : "Sleeping"}</span>
-                        <span>agent {device?.version || "unknown"}</span>
-                        {typeof device?.streamCount === "number" && (
-                          <span>{device.streamCount} streams</span>
-                        )}
+                      <div className="mt-1 flex flex-wrap gap-x-3 text-xs text-muted">
+                        <span>{device?.connected ? "Connected" : "Offline"}</span>
+                        {device?.version && <span>agent {device.version}</span>}
                         {typeof device?.memMb === "number" && <span>{device.memMb} MB</span>}
+                        {runtimeCounts && <span>{runtimeCounts}</span>}
                       </div>
-                      <div className="mt-1 text-xs text-muted">
-                        {token
-                          ? `token ${token.tokenPrefix}`
-                          : "connected without a visible active token"}
+                      <div className="mt-1 text-[11px] text-muted">
+                        {token ? `token ${token.tokenPrefix}` : "No active token row"}
                         {token?.lastUsedAt ? ` · last seen ${formatDate(token.lastUsedAt)}` : ""}
                       </div>
                     </div>
                     {token && (
                       <button
-                        className="grid h-8 w-8 shrink-0 place-items-center rounded-md text-muted hover:bg-panel2 hover:text-bad"
-                        title="Revoke device token"
-                        aria-label={`Revoke ${token.name} token`}
+                        type="button"
+                        className="grid h-11 w-11 shrink-0 place-items-center rounded-md text-muted hover:bg-panel2 hover:text-bad"
+                        aria-label={`Revoke ${name}`}
                         onClick={async () => {
-                          const res = await fetch(`/api/agent-tokens/${token.id}`, {
-                            method: "DELETE",
-                          });
-                          if (!res.ok) {
+                          if (!window.confirm(`Revoke ${name} and disconnect its agent?`)) {
                             return;
                           }
-                          setTokens(items => items.filter(item => item.id !== token.id));
-                          onTokenDeleted?.(token.name);
+                          const response = await fetch(
+                            `/api/agent-tokens/${encodeURIComponent(token.id)}`,
+                            { method: "DELETE" }
+                          );
+                          if (response.ok) {
+                            setTokens(current => current.filter(item => item.id !== token.id));
+                            onTokenDeleted?.(name);
+                          }
                         }}
                       >
                         <Trash2 className="h-4 w-4" />
                       </button>
                     )}
                   </div>
-                  {device?.roots && Object.keys(device.roots).length > 0 && (
+
+                  {Object.keys(roots).length > 0 && (
                     <div className="mt-3 rounded-md border border-line bg-panel px-2 py-1.5 font-mono text-[11px] text-muted">
-                      {Object.entries(device.roots).map(([rootName, rootPath]) => (
-                        <div key={rootName} className="truncate">
-                          {rootName}: {rootPath}
+                      {Object.entries(roots).map(([key, path]) => (
+                        <div key={key} className="truncate">
+                          {key}: {path}
                         </div>
                       ))}
                     </div>
                   )}
+
                   {token && (
                     <div className="mt-3 border-t border-line pt-3">
-                      <div className="flex items-center justify-between gap-2 text-xs">
-                        <div className="min-w-0">
-                          <div className="font-medium text-text">Default folder</div>
+                      <div className="flex items-center justify-between gap-3">
+                        <div className="min-w-0 text-xs">
+                          <div className="font-medium">Default creation folder</div>
                           <div className="truncate text-[11px] text-muted">
                             {token.defaultRootKey
                               ? `${token.defaultRootKey}${token.defaultRelativePath ? `/${token.defaultRelativePath}` : ""}`
-                              : "Not set — picker opens at the first reported root."}
+                              : "First reported root"}
                           </div>
                         </div>
-                        <div className="flex shrink-0 items-center gap-1">
+                        <div className="flex shrink-0 gap-1">
                           {token.defaultRootKey && (
                             <button
                               type="button"
+                              className="grid h-11 w-11 place-items-center rounded-md text-muted hover:bg-panel2 hover:text-bad"
+                              disabled={savingDefault === token.id}
                               onClick={() =>
                                 patchToken(token.id, {
                                   defaultRootKey: null,
                                   defaultRelativePath: null,
                                 })
                               }
-                              disabled={savingDefault === token.id}
-                              className="grid h-7 w-7 place-items-center rounded text-muted hover:bg-panel2 hover:text-bad disabled:opacity-50"
-                              title="Clear default folder"
                               aria-label="Clear default folder"
                             >
-                              <X className="h-3.5 w-3.5" />
+                              <X className="h-4 w-4" />
                             </button>
                           )}
                           <button
                             type="button"
+                            className="inline-flex min-h-11 items-center gap-2 rounded-md border border-line px-3 text-xs hover:bg-panel2 disabled:opacity-50"
+                            disabled={!device?.connected || Object.keys(roots).length === 0}
                             onClick={() =>
-                              setEditingDefault(editingDefault === token.id ? "" : token.id)
-                            }
-                            disabled={!device?.connected && !token.defaultRootKey}
-                            className="inline-flex h-7 items-center gap-1 rounded-md border border-line bg-bg px-2 text-[11px] text-text hover:bg-panel2 disabled:opacity-50"
-                            title={
-                              device?.connected
-                                ? "Browse to set the default folder"
-                                : "Device must be connected to browse"
+                              setEditingDefault(current => (current === token.id ? "" : token.id))
                             }
                           >
-                            <FolderCog className="h-3.5 w-3.5" />
-                            {editingDefault === token.id ? "Close" : "Set default"}
+                            <FolderCog className="h-4 w-4" /> Set
                           </button>
                         </div>
                       </div>
-                      {editingDefault === token.id &&
-                        device?.connected &&
-                        device.roots &&
-                        Object.keys(device.roots).length > 0 && (
-                          <div className="mt-2">
-                            <DirectoryBrowser
-                              key={`${name}:${token.defaultRootKey || ""}:${token.defaultRelativePath || ""}`}
-                              deviceName={name}
-                              roots={device.roots}
-                              initialRootKey={token.defaultRootKey || Object.keys(device.roots)[0]}
-                              initialRelativePath={token.defaultRelativePath || ""}
-                              onSelect={async (nextRootKey, nextRelative) => {
-                                await patchToken(token.id, {
-                                  defaultRootKey: nextRootKey || null,
-                                  defaultRelativePath: nextRelative || null,
-                                });
-                                setEditingDefault("");
-                              }}
-                              selectLabel="Save as default"
-                              disabled={savingDefault === token.id}
-                            />
-                          </div>
-                        )}
-                      {editingDefault === token.id &&
-                        (!device?.connected ||
-                          !device.roots ||
-                          Object.keys(device.roots).length === 0) && (
-                          <div className="mt-2 rounded-md border border-line bg-bg px-3 py-2 text-[11px] text-muted">
-                            Device must be connected and reporting roots to pick a default.
-                            Reconnect the agent and try again.
-                          </div>
-                        )}
-                    </div>
-                  )}
-                  {device?.connected && (
-                    <div className="mt-3 border-t border-line pt-3">
-                      <div className="mb-1 flex items-center justify-between gap-3 text-xs">
-                        <span className="font-medium text-text">tmux sessions</span>
-                        <span className="font-mono text-[10px] text-muted">
-                          {tmuxSessions.length}
-                        </span>
-                      </div>
-                      {tmuxSessions.length === 0 ? (
-                        <div className="py-1 text-xs text-muted">No tmux sessions running.</div>
-                      ) : (
-                        <div className="space-y-2">
-                          {tmuxSessions.map(session => (
-                            <div key={session.name} className="text-xs">
-                              <div className="flex min-w-0 items-center gap-2">
-                                <span className="min-w-0 flex-1 truncate font-mono text-text">
-                                  {session.name}
-                                </span>
-                                <span className="shrink-0 text-[10px] text-muted">
-                                  {session.windowCount ?? session.windows.length} windows
-                                </span>
-                                <button
-                                  type="button"
-                                  className="grid h-5 w-5 shrink-0 place-items-center rounded text-muted hover:bg-bad/10 hover:text-bad disabled:opacity-50"
-                                  disabled={deleting === `active:${name}:${session.name}`}
-                                  title={`Delete tmux session ${session.name}`}
-                                  aria-label={`Delete tmux session ${session.name}`}
-                                  onClick={() =>
-                                    cleanup(
-                                      {
-                                        mode: "active",
-                                        rootKey: name,
-                                        tmuxSessionName: session.name,
-                                      },
-                                      `Delete tmux session "${session.name}" on ${name}? This kills it on the device and removes any Termag project bound to it.`,
-                                      `active:${name}:${session.name}`
-                                    )
-                                  }
-                                >
-                                  <Trash2 className="h-3.5 w-3.5" />
-                                </button>
-                              </div>
-                              {session.path && (
-                                <div className="mt-0.5 truncate font-mono text-[10px] text-muted">
-                                  {session.path}
-                                </div>
-                              )}
-                              {session.windows.length > 0 && (
-                                <div className="mt-1 space-y-0.5">
-                                  {session.windows.map(window => (
-                                    <div
-                                      key={`${session.name}:${window.target || window.id || window.index}`}
-                                      className="flex h-6 min-w-0 items-center gap-2 rounded bg-panel px-2 text-[11px] text-muted"
-                                    >
-                                      <span className="w-6 shrink-0 font-mono">{window.index}</span>
-                                      <span className="min-w-0 flex-1 truncate text-text">
-                                        {window.name || window.id || window.target}
-                                      </span>
-                                      <span className="shrink-0 font-mono">
-                                        {window.id || window.target}
-                                      </span>
-                                    </div>
-                                  ))}
-                                </div>
-                              )}
-                            </div>
-                          ))}
+                      {editingDefault === token.id && device?.connected && (
+                        <div className="mt-2">
+                          <DirectoryBrowser
+                            deviceName={name}
+                            roots={roots}
+                            initialRootKey={token.defaultRootKey || Object.keys(roots)[0]}
+                            initialRelativePath={token.defaultRelativePath || ""}
+                            onSelect={async (rootKey, relativePath) => {
+                              await patchToken(token.id, {
+                                defaultRootKey: rootKey || null,
+                                defaultRelativePath: relativePath || null,
+                              });
+                              setEditingDefault("");
+                            }}
+                            selectLabel="Save default"
+                            disabled={savingDefault === token.id}
+                          />
                         </div>
                       )}
                     </div>
                   )}
-                  {missingTargets.length > 0 && (
-                    <div className="mt-3 border-t border-line pt-3">
-                      <div className="mb-1 flex items-center justify-between gap-3 text-xs">
-                        <span className="font-medium text-bad">Missing Termag targets</span>
-                        <span className="font-mono text-[10px] text-bad">
-                          {missingTargets.length}
-                        </span>
-                      </div>
-                      <div className="space-y-0.5">
-                        {missingTargets.map(target => (
-                          <div
-                            key={`${target.projectName}:${target.label}:${target.tmuxName}`}
-                            className="flex min-w-0 items-center gap-2 rounded bg-bad/10 px-2 py-1 text-[11px]"
-                          >
-                            <span className="min-w-0 flex-1 truncate text-text">
-                              {target.projectName} / {target.label}
-                            </span>
-                            <span className="shrink-0 truncate font-mono text-bad">
-                              {target.tmuxName}
-                            </span>
-                            <button
-                              type="button"
-                              className="grid h-5 w-5 shrink-0 place-items-center rounded text-bad hover:bg-bad/15 disabled:opacity-50"
-                              disabled={deleting === `missing:${target.sessionId}`}
-                              title="Remove stale Termag record"
-                              aria-label={`Remove stale Termag record for ${target.projectName} ${target.label}`}
-                              onClick={() =>
-                                cleanup(
-                                  {
-                                    mode: "missing",
-                                    rootKey: name,
-                                    projectId: target.projectId,
-                                    sessionId: target.sessionId,
-                                    ...(target.tabId ? { tabId: target.tabId } : {}),
-                                  },
-                                  `Remove stale Termag record "${target.projectName} / ${target.label}" from the server? The tmux target is already missing on ${name}.`,
-                                  `missing:${target.sessionId}`
-                                )
-                              }
-                            >
-                              <Trash2 className="h-3.5 w-3.5" />
-                            </button>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-                  <div className="mt-3 flex flex-wrap gap-2">
-                    <CopyButton
-                      label="Env template"
-                      copied={copied === `env:${name}`}
-                      onClick={() => copyText(`env:${name}`, envTemplate)}
-                      title="Copy TERMAG_URL / TOKEN / ROOTS exports"
-                    />
-                  </div>
-                </div>
+                </article>
               );
             })}
-          </div>
-          {cleanupError && <div className="mt-3 text-xs text-bad">{cleanupError}</div>}
-          <SshHostsSection
-            open={open}
-            devices={devices}
-            hosts={sshHosts}
-            onHostsChange={setSshHosts}
-            // Open the lifted dialog on TOP of Devices instead of
-            // closing Devices first. After the host is added, the
-            // parent's onCreated callback refreshes our hosts list so
-            // the new row appears without re-opening Devices.
-            onAddSshHost={onAddSshHost}
-            loaded={loaded}
-          />
-          <div className="mt-4 rounded-md border border-line bg-bg p-3 text-xs text-muted">
-            <div className="mb-2 font-medium text-text">Setup</div>
-            <p>
-              Install and bootstrap the Rust agent on each device. It continuously discovers HerdR
-              and tmux; no per-session publish command is needed.
-            </p>
+
+          <div className="rounded-md border border-line bg-bg p-3 text-xs text-muted">
+            The Rust agent discovers Herdr and tmux automatically; no per-session publish command is
+            needed. Herdr remains an independent local app.
             <a
-              href="https://github.com/yeutterg/termag-next#quick-setup"
+              href="https://github.com/yeutterg/terminalz#quick-setup"
               target="_blank"
               rel="noreferrer"
-              className="mt-2 inline-flex items-center gap-1 text-accent hover:underline"
+              className="mt-2 flex min-h-11 items-center gap-1 text-accent hover:underline"
             >
-              GitHub setup guide
-              <ExternalLink className="h-3 w-3" />
+              Setup guide <ExternalLink className="h-3.5 w-3.5" />
             </a>
           </div>
         </div>
       </section>
     </div>
-  );
-}
-
-function CopyButton({
-  label,
-  copied,
-  onClick,
-  title,
-}: {
-  label: string;
-  copied: boolean;
-  onClick: () => void;
-  title?: string;
-}) {
-  return (
-    <button
-      type="button"
-      title={title}
-      className="inline-flex h-7 items-center gap-1.5 rounded-md border border-line bg-panel px-2 text-xs text-muted hover:bg-panel2 hover:text-text"
-      onClick={onClick}
-    >
-      {copied ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
-      {copied ? "Copied" : label}
-    </button>
   );
 }
 
@@ -672,131 +347,4 @@ function formatDate(value: string) {
   } catch {
     return value;
   }
-}
-
-function missingTargetsForDevice(
-  deviceName: string,
-  tmuxSessions: TmuxDeviceSession[],
-  projects: Project[]
-): MissingTarget[] {
-  const tmuxState = buildTmuxState(tmuxSessions);
-  const missing: MissingTarget[] = [];
-  for (const project of projects) {
-    if (project.rootKey !== deviceName) {
-      continue;
-    }
-    const projectSessionName = project.tmuxSessionName?.trim() || "";
-
-    for (const tab of project.tabs) {
-      if (!tab.session) {
-        continue;
-      }
-      if (!tmuxSessionIsLive(tab.session, projectSessionName, tab.name, tmuxState)) {
-        missing.push({
-          projectId: project.id,
-          tabId: tab.id,
-          sessionId: tab.session.id,
-          projectName: project.name,
-          label: tab.name,
-          tmuxName: tab.session.tmuxName,
-        });
-      }
-    }
-
-    const ctrlSession = project.sessions.find(session => session.kind === "ctrl");
-    if (ctrlSession && !tmuxSessionIsLive(ctrlSession, projectSessionName, "ctrl", tmuxState)) {
-      missing.push({
-        projectId: project.id,
-        sessionId: ctrlSession.id,
-        projectName: project.name,
-        label: "ctrl",
-        tmuxName: ctrlSession.tmuxName,
-      });
-    }
-  }
-  return missing;
-}
-
-function buildTmuxState(tmuxSessions: TmuxDeviceSession[]) {
-  const sessions = new Set<string>();
-  const windows = new Set<string>();
-  const globalWindows = new Set<string>();
-
-  for (const session of tmuxSessions) {
-    if (!session.name) {
-      continue;
-    }
-    sessions.add(session.name);
-    for (const window of session.windows) {
-      for (const candidate of [window.target, window.id, window.name]) {
-        if (!candidate) {
-          continue;
-        }
-        windows.add(scopedTmuxTarget(session.name, candidate));
-        globalWindows.add(candidate);
-      }
-    }
-  }
-
-  return { sessions, windows, globalWindows };
-}
-
-function tmuxSessionIsLive(
-  session: Session,
-  projectSessionName: string,
-  label: string,
-  tmuxState: ReturnType<typeof buildTmuxState>
-) {
-  const tmuxName = session.tmuxName?.trim() || "";
-  if (projectSessionName) {
-    if (tmuxName === projectSessionName && tmuxState.sessions.has(projectSessionName)) {
-      return true;
-    }
-    for (const candidate of sessionTargetCandidates(session, projectSessionName, label)) {
-      if (tmuxState.windows.has(scopedTmuxTarget(projectSessionName, candidate))) {
-        return true;
-      }
-    }
-    return false;
-  }
-
-  if (tmuxState.sessions.has(tmuxName)) {
-    return true;
-  }
-  for (const candidate of sessionTargetCandidates(session, "", label)) {
-    if (tmuxState.globalWindows.has(candidate)) {
-      return true;
-    }
-  }
-  return false;
-}
-
-function sessionTargetCandidates(session: Session, projectSessionName: string, label: string) {
-  const candidates = new Set<string>();
-  addTarget(candidates, session.tmuxName);
-  addTarget(candidates, session.tmuxWindowName);
-  addTarget(candidates, label);
-
-  const tmuxName = session.tmuxName?.trim() || "";
-  if (projectSessionName) {
-    const prefix = `${projectSessionName}:`;
-    if (tmuxName.startsWith(prefix)) {
-      addTarget(candidates, tmuxName.slice(prefix.length));
-    }
-  } else if (tmuxName.includes(":")) {
-    addTarget(candidates, tmuxName.slice(tmuxName.lastIndexOf(":") + 1));
-  }
-
-  return candidates;
-}
-
-function addTarget(candidates: Set<string>, value: string | null | undefined) {
-  const trimmed = value?.trim();
-  if (trimmed) {
-    candidates.add(trimmed);
-  }
-}
-
-function scopedTmuxTarget(sessionName: string, target: string) {
-  return `${sessionName}\u0000${target}`;
 }

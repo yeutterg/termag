@@ -113,18 +113,18 @@ describe("Rate Limiting", () => {
     });
 
     it("uses forwarded addresses only behind an explicitly trusted proxy", () => {
-      const previous = process.env.TERMAG_TRUSTED_PROXY;
+      const previous = process.env.TERMINALZ_TRUSTED_PROXY;
       const request = new Request("http://localhost", {
         headers: { "x-forwarded-for": "203.0.113.5, 127.0.0.1" },
       });
-      delete process.env.TERMAG_TRUSTED_PROXY;
+      delete process.env.TERMINALZ_TRUSTED_PROXY;
       expect(clientIpFromRequest(request)).toBe("direct");
-      process.env.TERMAG_TRUSTED_PROXY = "true";
+      process.env.TERMINALZ_TRUSTED_PROXY = "true";
       expect(clientIpFromRequest(request)).toBe("203.0.113.5");
       if (previous === undefined) {
-        delete process.env.TERMAG_TRUSTED_PROXY;
+        delete process.env.TERMINALZ_TRUSTED_PROXY;
       } else {
-        process.env.TERMAG_TRUSTED_PROXY = previous;
+        process.env.TERMINALZ_TRUSTED_PROXY = previous;
       }
     });
   });

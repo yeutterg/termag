@@ -1,10 +1,10 @@
 generator client {
   provider      = "prisma-client-js"
-  // node:22-bookworm-slim ships OpenSSL 3 only; Prisma's auto-detect picks
-  // the openssl-1.1.x binary by default and then fails at runtime with
-  // libssl.so.1.1 not found. Listing both arm64 + amd64 OpenSSL 3 targets
-  // forces Prisma to ship the right engine for either Docker host arch.
-  binaryTargets = ["native", "linux-arm64-openssl-3.0.x", "debian-openssl-3.0.x"]
+  // Each release image is built on its own target platform under buildx.
+  // The builder installs OpenSSL 3 before generation, so `native` selects
+  // exactly one matching engine instead of shipping ARM64 and AMD64 engines
+  // in every image.
+  binaryTargets = ["native"]
 }
 
 datasource db {
@@ -21,17 +21,14 @@ model User {
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
-  projects       Project[]
   agentTokens    AgentToken[]
-  auditEvents    AuditEvent[]
-  sshHosts       SshHost[]
   bootstrapCodes BootstrapCode[]
-  shareLinks     ShareLink[]
 }
 
 model AgentToken {
   id          String    @id @default(cuid())
   name        String
+  activeName  String?
   tokenHash   String    @unique
   tokenPrefix String
   createdAt   DateTime  @default(now())
@@ -46,199 +43,21 @@ model AgentToken {
   // Identifies a (rootKey, relativePath) under the agent's reported roots.
   defaultRootKey      String?
   defaultRelativePath String?
-  protocolVersion     Int       @default(1)
+  protocolVersion     Int       @default(2)
   capabilities        String?
+  inventorySnapshot   String?
   lastInventoryAt     DateTime?
 
   userId String
   user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
 
+  @@unique([userId, activeName])
   @@index([userId])
 }
 
-model Project {
-  id                 String    @id @default(cuid())
-  name               String
-  rootKey            String
-  relativePath       String
-  tmuxSessionName    String?
-  tmuxManaged        Boolean   @default(true)
-  agentType          String
-  agentSpawnCommand  String
-  ctrlSpawnCommand   String    @default("$SHELL")
-  status             String    @default("sleeping")
-  // User-defined drag-and-drop ordering. Null means "no manual position
-  // set" — project falls back to alphabetical sorting in listProjects.
-  position           Float?
-  openedAt           DateTime  @default(now())
-  createdAt          DateTime  @default(now())
-  updatedAt          DateTime  @updatedAt
-  // Protocol v2 runtime identity. rootKey remains the human-facing device
-  // label for one compatibility release; deviceId is the stable token id.
-  deviceId           String?
-  runtime            String    @default("tmux")
-  runtimeSessionId   String?
-  runtimeSessionName String?
-  runtimeSpaceName   String?
-  runtimeIconStyle   String?
-  runtimeOrdinal     Int?
-  runtimeFocused     Boolean   @default(false)
-  externalId         String?
-  runtimeRevision    Int?
-  layout             String?
-  creationPath       String?
-  mirrored           Boolean   @default(false)
-  archivedAt         DateTime?
-
-  userId String
-  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
-
-  tabs     Tab[]
-  sessions Session[]
-
-  @@unique([userId, name])
-  @@unique([userId, rootKey, tmuxSessionName])
-  @@unique([userId, deviceId, runtime, runtimeSessionId, externalId])
-  @@index([userId, position])
-  @@index([userId, openedAt])
-  @@index([userId, deviceId, runtime, runtimeSessionId])
-}
-
-model Tab {
-  id               String    @id @default(cuid())
-  name             String
-  ordinal          Int
-  status           String    @default("sleeping")
-  createdAt        DateTime  @default(now())
-  updatedAt        DateTime  @updatedAt
-  externalId       String?
-  runtimeTabId     String?
-  runtimeTabName   String?
-  runtimeTabStatus String?
-  runtimePaneId    String?
-  runtimePaneName  String?
-  runtimePaneIndex Int?
-  layout           String?
-  focused          Boolean   @default(false)
-  archivedAt       DateTime?
-
-  projectId String
-  project   Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
-
-  session Session?
-
-  @@unique([projectId, runtimePaneId])
-  // Mirrored runtimes can reuse an ordinal after a pane closes; archived
-  // rows intentionally retain identity/history, so ordinal cannot be unique.
-  @@index([projectId, ordinal])
-  @@index([projectId])
-  @@index([projectId, runtimeTabId, runtimePaneIndex])
-}
-
-// A Session is "a tmux thing termag tracks": its lifecycle in the broker,
-// its tab binding, and its scrollback. Anchored to *either* a Project
-// (agent-managed flow) *or* an SshHost (ssh-attach flow). Exactly one of
-// projectId / sshHostId is set; the application enforces this since SQLite
-// can't express XOR constraints. Both onDelete cascades, so removing the
-// parent cleans up the session + chunks.
-model Session {
-  id               String    @id @default(cuid())
-  kind             String
-  tmuxName         String
-  tmuxWindowName   String?
-  tmuxManaged      Boolean   @default(true)
-  agentType        String?
-  spawnCommand     String?
-  status           String    @default("sleeping")
-  lastSeenAt       DateTime?
-  createdAt        DateTime  @default(now())
-  updatedAt        DateTime  @updatedAt
-  runtime          String    @default("tmux")
-  runtimeSessionId String?
-  externalId       String?
-  terminalId       String?
-  controllerMode   String    @default("observe")
-  archivedAt       DateTime?
-
-  projectId String?
-  project   Project? @relation(fields: [projectId], references: [id], onDelete: Cascade)
-
-  sshHostId String?
-  sshHost   SshHost? @relation(fields: [sshHostId], references: [id], onDelete: Cascade)
-
-  tabId String? @unique
-  tab   Tab?    @relation(fields: [tabId], references: [id], onDelete: Cascade)
-
-  scrollback ScrollbackChunk[]
-
-  @@unique([sshHostId, tmuxName])
-  @@index([projectId, kind])
-  @@index([sshHostId])
-  @@index([tmuxName])
-  @@index([runtime, runtimeSessionId, externalId])
-}
-
-model ScrollbackChunk {
-  id String @id @default(cuid())
-  // Replay order. createdAt has millisecond precision and cuid is not
-  // time-sortable, so two byte-triggered flushes inside the same millisecond
-  // had no defined order — enough to scramble a burst of terminal output on
-  // replay. SQLite only permits AUTOINCREMENT on the primary key, so the
-  // scrollback store assigns this per session from the max it loads.
-  seq       Int      @default(0)
-  data      String
-  lineCount Int
-  createdAt DateTime @default(now())
-
-  sessionId String
-  session   Session @relation(fields: [sessionId], references: [id], onDelete: Cascade)
-
-  @@index([sessionId, seq])
-  @@index([sessionId, createdAt])
-  // Standalone createdAt index supports the daily TTL prune. Without it,
-  // pruning would full-scan the table once it grows past a few thousand
-  // chunks. Cheap on insert (one extra B-tree write) for a big speedup on
-  // delete-by-age.
-  @@index([createdAt])
-}
-
-// Remote tmux host accessed via SSH. Adds a "device" slot alongside agent
-// tokens — the broker treats the SshHost as a virtual agent: polls it for
-// tmux sessions and spawns one `ssh -t ... tmux attach` subprocess per
-// browser attach. No key material lives in the DB; auth defers to the
-// broker process's ssh-agent + ~/.ssh/config.
-model SshHost {
-  id         String    @id @default(cuid())
-  name       String // doubles as device label / rootKey in CLI/UI listings
-  host       String
-  port       Int       @default(22)
-  user       String
-  lastSeenAt DateTime?
-  lastError  String? // most recent probe failure, surfaced in UI
-  // Accent color for the host's pane + chip. Same intent as AgentToken.color.
-  color      String?
-  createdAt  DateTime  @default(now())
-  updatedAt  DateTime  @updatedAt
-
-  userId  String
-  ownedBy User   @relation(fields: [userId], references: [id], onDelete: Cascade)
-
-  // Sessions opened against this host. Cascades on delete so removing a
-  // host wipes its tracking rows and scrollback automatically.
-  sessions Session[]
-
-  @@unique([userId, name])
-  @@index([userId])
-}
-
-// Append-only security/activity log. Used for the audit dashboard and for
-// post-incident forensics. Never updated — every action is a new entry.
-// `payload` is a free-form JSON blob for action-specific data (e.g., a
-// killed session's tmuxName, a project's spawnCommand). Retention is
-// unbounded for now — rows are tiny and incidents may surface weeks later.
 // One-time, short-TTL code that a fresh agent CLI redeems to receive
 // pre-minted credentials. Used by `termag bootstrap <url>` to skip the
-// copy/paste relay of TERMAG_URL + TERMAG_AGENT_TOKEN + roots. The code
+// copy/paste relay of TERMINALZ_URL + TERMINALZ_AGENT_TOKEN + roots. The code
 // is consumed atomically (consumedAt set on first claim); a second claim
 // fails. The mints-on-claim flow means the new AgentToken row only
 // exists if someone actually claimed it — abandoned codes don't pollute
@@ -257,48 +76,4 @@ model BootstrapCode {
 
   @@index([userId])
   @@index([expiresAt])
-}
-
-// TTL'd read-only share link for a single session. Anyone with the link
-// can attach in read-only mode until the expiry. We persist enough info
-// to route the eventual WS upgrade (sessionId for agent flow, sshHostId
-// + tmuxName for ssh flow) without re-resolving names.
-model ShareLink {
-  id         String    @id @default(cuid())
-  code       String    @unique
-  // Exactly one of (sessionId) or (sshHostId+tmuxName) is set, depending
-  // on whether this link targets an agent session or an ssh attach.
-  sessionId  String?
-  sshHostId  String?
-  tmuxName   String?
-  expiresAt  DateTime
-  revokedAt  DateTime?
-  lastUsedAt DateTime?
-  useCount   Int       @default(0)
-  createdAt  DateTime  @default(now())
-
-  userId String
-  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
-
-  @@index([userId])
-  @@index([expiresAt])
-}
-
-model AuditEvent {
-  id          String   @id @default(cuid())
-  action      String // "attach", "kill-session", "create-project", "rotate-token", etc.
-  subjectType String? // "session", "project", "token", "device" — null when global
-  subjectId   String? // entity touched
-  deviceName  String? // device involved (rootKey), if applicable
-  ip          String?
-  userAgent   String?
-  payload     String? // JSON; keep small — full bodies belong elsewhere
-  createdAt   DateTime @default(now())
-
-  userId String?
-  user   User?   @relation(fields: [userId], references: [id], onDelete: SetNull)
-
-  @@index([userId, createdAt])
-  @@index([action, createdAt])
-  @@index([createdAt])
 }

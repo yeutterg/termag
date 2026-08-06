@@ -1,4 +1,4 @@
-/* Termag PWA worker: cache only public static assets, never user/API data. */
+/* Terminalz PWA worker: cache only public static assets, never user/API data. */
 const CACHE_NAME = "termag-static-v2";
 
 self.addEventListener("install", event => {

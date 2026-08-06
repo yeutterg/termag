@@ -1,329 +1,185 @@
-# termag-next
+# Terminalz
 
-termag-next is a browser-based remote terminal workspace for coding agents across your machines.
+Terminalz is a lightweight terminal multiplexer that streams terminals from multiple machines to one
+web browser. A low-footprint Rust agent on each computer makes its local sessions available through an
+outbound encrypted connection—no inbound machine port is required.
 
-It is a Next.js fork and rebuild of the original [termag](https://github.com/yeutterg/termag) project. Run one web app somewhere reachable and a very small outbound agent on each machine. If HerdR is running, Termag mirrors its sessions, spaces, tabs, panes, ordering, and status iconography. Without HerdR, Termag exposes local tmux sessions directly.
+Terminalz is heavily inspired by [Termag](https://github.com/psecor/termag) and
+[Herdr](https://github.com/herdrdev/herdr).
 
-The browser can be on your laptop, a tablet, or a phone on a cellular connection. Your real work remains in HerdR or tmux on the remote device, while the same terminal organization follows you to the cloud.
+If Herdr is running, Terminalz mirrors its sessions, spaces, tabs, panes, split layout, ordering,
+statuses, and dot/symbol iconography. Herdr stays independent and authoritative. Without Herdr, local
+tmux sessions still appear and new sessions can be created inside allowlisted directories.
 
-![termag-next dark-mode browser UI with projects, tabs, and code visible in split tmux panes](docs/images/termag-ui.png)
+![Terminalz browser UI](docs/images/termag-ui.png)
 
-## How It Works
+## What it does
 
-```mermaid
-flowchart LR
-  subgraph Client["Where you are"]
-    Browser["Browser UI<br/>laptop, tablet, or phone"]
-  end
+- Connect any number of uniquely named machines to one web account and switch between all of them in
+  one compact sidebar.
+- Mirror machine → Herdr session → space → tab organization, revealing pane rows only for actual
+  multi-pane tabs.
+- Stream exact terminal bytes bidirectionally. The latest terminal focus, click, or keystroke owns the
+  writer/resize lease; a later interaction from another browser takes it back.
+- Keep local terminals awake on macOS while still allowing display sleep and lock.
+- Create, rename, and close runtime objects through typed Herdr/tmux operations—never an arbitrary
+  remote shell-command channel.
 
-  subgraph Web["termag-next web app"]
-    Next["Next.js UI + API"]
-    Broker["WebSocket broker"]
-    DB[("SQLite")]
-    Next <--> Broker
-    Next <--> DB
-  end
+On mobile and constrained networks, Terminalz keeps visible output exact while batching small frames,
+compressing WebSockets, requesting smaller reconnect checkpoints, applying compact inventory patches,
+and pausing hidden viewers. Phone xterm scrollback is capped at 500 lines; desktop is 2,000.
 
-  subgraph Machines["Remote machines"]
-    direction TB
-    AgentA["termag agent<br/>MacBook"] --> HerdRA["HerdR, when present<br/>sessions → spaces → tabs → panes"]
-    AgentA --> TmuxA["tmux fallback<br/>sessions → panes"]
-    AgentB["termag agent<br/>homelab"] --> HerdRB["HerdR, when present"]
-    AgentB --> TmuxB["tmux fallback"]
-    AgentC["termag agent<br/>VPS"] --> TmuxC["tmux sessions"]
-  end
+## Architecture
 
-  Browser <-->|HTTPS + WebSocket| Next
-  Broker <-->|outbound WSS| AgentA
-  Broker <-->|outbound WSS| AgentB
-  Broker <-->|outbound WSS| AgentC
+```text
+Browsers ── HTTPS/WSS ──> Terminalz web (Next.js custom server + SQLite)
+                              ▲
+                              │ outbound authenticated WSS
+                 ┌────────────┼────────────┐
+             terminalz     terminalz    terminalz
+             laptop        workstation  server
+             ├─ Herdr      ├─ Herdr     ├─ tmux
+             └─ tmux       └─ tmux      └─ allowlisted roots
 ```
 
-The agent always dials out to the web app. You do not need to expose HerdR, tmux, SSH, or a laptop port to the internet.
+SQLite stores users, hashed machine tokens, bootstrap codes, and one latest normalized inventory
+snapshot per machine. Terminal output and replay checkpoints remain memory-only and bounded.
 
-## Components
+## Recommended installation
 
-- `apps/web`: the Next.js app. It includes the browser UI, route handlers, WebSocket broker, Prisma, and SQLite database.
-- `apps/agent-rs`: the protocol-v2, low-footprint Rust daemon and CLI. It discovers HerdR and tmux and streams terminals on demand over one outbound WebSocket.
-- `infra`: Docker Compose and Caddy files for running the web app on a small VPS.
+The web control plane and native machine agent are distributed separately but share one version tag:
 
-The user-facing shape is:
+- Web: multi-architecture `ghcr.io/yeutterg/terminalz` image with Docker Compose.
+- Agent/CLI: `terminalz` native binary through Homebrew or GitHub Releases.
 
-- Device: a machine running `termag`. Create one device token per machine.
-- Machine: a computer running the lightweight Termag agent.
-- HerdR session: a live HerdR runtime discovered without modifying or owning HerdR.
-- Space: a mirrored HerdR space. Its tabs, panes, order, layout, and statuses remain authoritative in HerdR.
-- tmux session: the fallback workspace when HerdR is absent, or an independently managed session alongside HerdR.
-- Terminal tab/pane: a stable HerdR or tmux terminal target streamed only while a cloud viewer is attached.
+The agent is intentionally not containerized: it needs the current user's Herdr socket, tmux socket,
+filesystem policy, git credentials, and macOS power controls.
 
-## Security Model
+### 1. Run the web control plane
 
-There is no shared termag-next service. Each user runs their own broker, and agents only ever talk to it.
-
-```mermaid
-graph LR
-    Agent[termag<br/>your laptop] -- wss + token --> Broker[your broker<br/>apps/web]
-    Browser[browser<br/>your login] -- wss --> Broker
-    Broker -. token check .-> DB[(SQLite<br/>AgentToken)]
-```
-
-Three things tie your agents to your broker:
-
-1. **`TERMAG_URL` is on your laptop.** The agent only ever talks to the URL you set. Random brokers don't know your laptop exists.
-2. **The agent token is minted by your broker.** It's stored hashed in your broker's SQLite. The agent presents the raw value on connect; if the hash isn't in the table, the connection is rejected.
-3. **The agent rejects bare `ws://` for non-localhost.** Even if DNS got poisoned to point your `TERMAG_URL` somewhere hostile, the token can't leak in plaintext. The agent fails closed unless the URL is `wss://` or localhost.
-
-Trust boundary: the device holding `TERMAG_AGENT_TOKEN` can connect; the broker that minted the token is what it connects to; the browser logged in to that broker sees the sessions. Three things, all yours.
-
-## Quick Setup
-
-### 1. Run The Web App
-
-Pick the path that matches how the broker will be reached. Both use Docker Compose; only the env vars differ. Agent connections are unaffected by either choice — they always require a bearer token minted in the web UI.
-
-#### Path A — Private network (Tailscale, WireGuard, ssh tunnel, LAN)
-
-Opt-in mode. Set `TERMAG_TRUSTED_NETWORK=true` to skip the login screen entirely — anyone who can reach the URL gets a session, which is exactly what you want when the URL is already gated by your VPN. The broker refuses to boot in trusted-network mode with a non-loopback bind unless you also set `TERMAG_PASSWORD` (or front it behind a tunnel that binds to `127.0.0.1`).
-
-Clone, then prep your env file:
+Download `compose.yml` and `terminalz.env.example` from a release, then:
 
 ```bash
-git clone https://github.com/yeutterg/termag-next.git
-cd termag-next
+cp terminalz.env.example .env
+openssl rand -hex 32 # put this value in NEXTAUTH_SECRET
+docker compose --env-file .env up -d
+```
+
+Or from a checkout:
+
+```bash
+git clone https://github.com/yeutterg/terminalz.git
+cd terminalz
 cp infra/.env.example infra/.env
+docker compose --env-file infra/.env -f infra/docker-compose.yml up -d
 ```
 
-Generate the NextAuth secret (NextAuth needs one even when there's no login screen):
+For private Tailscale/WireGuard/LAN use, set:
 
-```bash
-openssl rand -hex 32
+```env
+TERMINALZ_HOST=terminalz.tailnet
+NEXTAUTH_URL=https://terminalz.tailnet
+NEXTAUTH_SECRET=<random value>
+TERMINALZ_TRUSTED_NETWORK=true
+TERMINALZ_PASSWORD=<long random value>
 ```
 
-Edit `infra/.env`. Pick the shape that matches where the broker will actually live:
+For a public hostname, leave `TERMINALZ_TRUSTED_NETWORK=false`, configure Google OAuth, and set
+`TERMINALZ_ALLOWED_EMAIL`. The callback is
+`https://terminalz.example.com/api/auth/callback/google`.
+
+To build the image locally instead of pulling GHCR:
 
 ```bash
-# Local testing on your own machine:
-TERMAG_HOST=localhost
-NEXTAUTH_URL=http://localhost
-
-# Or — Tailscale / WireGuard / LAN:
-# TERMAG_HOST=termag.tailnet
-# NEXTAUTH_URL=https://termag.tailnet
-
-NEXTAUTH_SECRET=<paste output of openssl above>
-TERMAG_ROOTS={"<device-name>":"<project-root>"}
-TERMAG_TRUSTED_NETWORK=true
-# If the broker is bound to anything other than 127.0.0.1, also set:
-# TERMAG_PASSWORD=pick-a-long-random-string
+docker compose --env-file infra/.env \
+  -f infra/docker-compose.yml -f infra/docker-compose.build.yml up -d --build
 ```
 
-`NEXTAUTH_URL` must be exactly what the browser types — same scheme, host, and port. A mismatch breaks OAuth callbacks and session cookies.
+### 2. Install the agent on every machine
 
-Start the stack:
+Homebrew (recommended on macOS and Linux):
 
 ```bash
-cd infra
-docker compose up -d --build
+brew install yeutterg/tap/terminalz
 ```
 
-Open the URL you set in `NEXTAUTH_URL` — you're in. With the local Docker stack, Caddy publishes the app on host ports `80` and `443`; the Next.js container's port `3000` stays internal to Docker. `http://localhost` redirects to `https://localhost`, and Safari may show a "not private" warning for that local Caddy certificate.
-
-**Optional shared-password gate** as a thin "oops I leaked the URL" safety net (useful for a homelab but NOT a substitute for OAuth on the open internet):
+GitHub Release fallback:
 
 ```bash
-# add to infra/.env
-TERMAG_PASSWORD=pick-a-long-random-string
+curl -fsSL https://github.com/yeutterg/terminalz/releases/latest/download/install-agent.sh | sh
 ```
 
-#### Path B — Public hostname (Google OAuth)
-
-Use this when the broker is reachable over the open internet. Adds a Google login with a single-email allowlist.
-
-First create OAuth credentials at https://console.cloud.google.com/apis/credentials → **Create OAuth Client ID** → **Web application**, with authorized redirect URI `https://termag.example.com/api/auth/callback/google`.
-
-Clone and prep:
+In the web UI, choose **Machines → Bootstrap machine**, then run its one-use command on the target:
 
 ```bash
-git clone https://github.com/yeutterg/termag-next.git
-cd termag-next
-cp infra/.env.example infra/.env
-openssl rand -hex 32
+terminalz bootstrap https://terminalz.example.com/api/bootstrap/claim/...
+brew services start terminalz # macOS/Homebrew Linux
 ```
 
-Edit `infra/.env`:
+Manual configuration uses `~/.terminalz/config.json` or canonical environment variables:
 
 ```bash
-TERMAG_HOST=termag.example.com
-NEXTAUTH_URL=https://termag.example.com
-NEXTAUTH_SECRET=<paste output of openssl above>
-TERMAG_ROOTS={"<device-name>":"<project-root>"}
-
-TERMAG_TRUSTED_NETWORK=false
-GOOGLE_CLIENT_ID=...
-GOOGLE_CLIENT_SECRET=...
-TERMAG_ALLOWED_EMAIL=you@example.com    # only this address gets past signIn
+export TERMINALZ_URL=wss://terminalz.example.com/api/ws/agent
+export TERMINALZ_AGENT_TOKEN=tmag_...
+export TERMINALZ_AGENT_ROOTS='{"projects":"~/Projects"}'
+terminalz
 ```
 
-Start the stack:
+Existing `~/.termag/config.json` and `TERMAG_*` variables remain readable during migration. New writes
+go to `~/.terminalz/config.json`. Plain `ws://` is accepted only for exact loopback hosts.
+
+Useful commands:
 
 ```bash
-cd infra
-docker compose up -d --build
+terminalz list
+terminalz attach laptop:my-space
+terminalz config show
+terminalz config set roots '{"projects":"~/Projects","services":"~/Services"}'
 ```
 
-Caddy auto-issues a Let's Encrypt cert for `TERMAG_HOST`. Open `https://termag.example.com` and sign in with Google.
-
-Put these variables in `infra/.env` for Docker Compose, or in `apps/web/.env.local` for local development.
-
-### 2. Create One Token Per Device
-
-In the web UI, click `+` → **New Device**. Name the physical device, for example `laptop`, `workstation`, `vps`, or `homelab`, then create the token. The raw token is shown once and includes a copy button.
-
-### 3. Install An Agent On Each Device
-
-Protocol v2 is the preferred agent. It has no runtime dependencies beyond the
-runtimes it mirrors:
+## Local development
 
 ```bash
-cargo build --release --manifest-path apps/agent-rs/Cargo.toml
-./apps/agent-rs/target/release/termag-agent
-```
-
-It discovers running HerdR sessions and all local tmux sessions automatically.
-Creation and browsing are restricted to the home directory by default; see
-[`apps/agent-rs/README.md`](apps/agent-rs/README.md) for allowlist and power
-configuration.
-
-The Homebrew formula builds the native agent from source until tagged native
-artifacts are published:
-
-```bash
-brew install --HEAD yeutterg/tap/termag-agent
-```
-
-The fastest setup is the web UI's **Bootstrap device** flow. It gives you a
-one-time command that writes a mode-0600 config file:
-
-```bash
-termag bootstrap https://termag.example.com/api/bootstrap/claim/...
-```
-
-You can also configure the broker URL, token, and named roots with environment
-variables:
-
-```bash
-export TERMAG_URL=wss://termag.example.com/api/ws/agent
-export TERMAG_AGENT_TOKEN=tmag_...
-export TERMAG_AGENT_ROOTS='{"<device-name>":"<project-root>"}'
-```
-
-Use your broker URL for `TERMAG_URL`; examples are below. The key in `TERMAG_AGENT_ROOTS` must match the device name you created in the web UI. If the UI device is `workstation`, use:
-
-```bash
-export TERMAG_AGENT_ROOTS='{"workstation":"~/Projects"}'
-```
-
-Run the daemon (or install its Homebrew service):
-
-```bash
-termag-agent
-```
-
-When testing an unreleased checkout, run the release binary from this repo:
-
-```bash
-cargo run --release --manifest-path apps/agent-rs/Cargo.toml
-```
-
-`TERMAG_URL` always includes the port unless you're using a default-port reverse proxy. Common shapes:
-
-```bash
-# Public hostname behind Caddy/nginx on TLS (no explicit port — 443 implied):
-TERMAG_URL=wss://termag.example.com/api/ws/agent
-
-# Tailscale or LAN with TLS terminator on port 443:
-TERMAG_URL=wss://termag.tailnet/api/ws/agent
-
-# Local development against `npm run dev` (default port 3000):
-TERMAG_URL=ws://localhost:3000/api/ws/agent
-
-# Local Docker stack with Caddy on port 443:
-TERMAG_URL=wss://localhost/api/ws/agent
-```
-
-`ws://` (no TLS) is only accepted when the hostname is `localhost`, `127.0.0.1`, or `::1`. Anything else must be `wss://` or the agent refuses to connect.
-
-A complete local Docker agent config looks like:
-
-```bash
-export TERMAG_URL=wss://localhost/api/ws/agent
-export TERMAG_AGENT_TOKEN=tmag_...
-export TERMAG_AGENT_ROOTS='{"workstation":"~/Projects"}'
-```
-
-Add more devices by creating one token per device, installing the agent on that device, and giving it a named root. The root key is the device label in the sidebar.
-
-### 4. Create Or Attach Sessions
-
-Click `+` -> **New session**. Select the device, enter the project directory, then choose the command to start. **Shell** is the lowest-friction default; add Codex, Claude Code, or any other command when you want an agent tab.
-
-Sessions map to tmux sessions. Each terminal tab maps to a tmux window in the same session, so the same workspace can still be inspected or recovered with native tmux.
-
-To bind Termag to work you already have running, click `+` -> **Connect tmux session**. The dialog lists unattached tmux sessions from every connected device. Pick a session and Termag adds one terminal tab for each tmux window. Existing attached windows are treated as external: deleting the Termag project detaches from them instead of killing the tmux session. New tabs you add later inside that attached project are Termag-created tmux windows in the same session.
-
-The protocol-v2 agent discovers sessions continuously. No per-session publish
-command is required. Its one-shot CLI commands are:
-
-```bash
-termag list
-termag attach workstation:Restful-ESP32
-termag config show
-```
-
-Create cloud sessions from the web UI inside an allowlisted root. Existing
-HerdR and tmux sessions are mirrored automatically.
-
-## Local Development
-
-For working on termag-next itself:
-
-```bash
-npm install
+npm ci
 cp .env.example apps/web/.env.local
-npm run db:generate
 npm run db:migrate
 npm run dev
 ```
 
-Configure a local agent in another shell:
+Run the native agent in another terminal:
 
 ```bash
-export TERMAG_URL=ws://localhost:3000/api/ws/agent
-export TERMAG_AGENT_TOKEN=tmag_...
-export TERMAG_AGENT_ROOTS='{"local":"~/Projects"}'
-```
-
-Run it:
-
-```bash
+TERMINALZ_URL=ws://localhost:3000/api/ws/agent \
+TERMINALZ_AGENT_TOKEN=tmag_... \
+TERMINALZ_AGENT_ROOTS='{"local":"~/Projects"}' \
 cargo run --manifest-path apps/agent-rs/Cargo.toml
 ```
 
-Preview the UI without tmux:
+The production web server is much lighter than the development compiler. `npm start` uses a 192 MiB
+V8 old-space ceiling; the Rust release agent targets less than 20 MiB RSS and a binary below 15 MiB.
 
-```bash
-export TERMAG_PREVIEW_AGENT_TOKEN="tmag_$(openssl rand -hex 32)"
-DATABASE_URL='file:./dev.db' npm run preview:seed -w apps/web
-npm run dev
-```
-
-Then bootstrap or configure the Rust agent in another shell with the preview token.
-
-## Useful Commands
+## Verification
 
 ```bash
 npm run typecheck
+npm run lint
+npm test -- --runInBand
 npm run build
-npm run dev
-cargo run --manifest-path apps/agent-rs/Cargo.toml
+
+cd apps/agent-rs
+cargo fmt --check
+cargo clippy --locked --all-targets -- -D warnings
+cargo test --locked
+cargo build --release --locked
 ```
+
+## Security notes
+
+- Raw machine tokens are shown once and stored hashed in SQLite.
+- Machine names are unique per account, so multiple connected agents cannot silently replace one
+  another; reconnecting the same named machine intentionally replaces only its old socket.
+- Directory, git, runtime, and power operations are allowlisted and validated on the local agent.
+- The service worker never caches API, auth, WebSocket, navigation, or terminal responses.
+- Terminal output is not persisted or sent to observability services.
+- Trusted-network mode is only as private as the network in front of it. Use OAuth on the open
+  internet.

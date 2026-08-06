@@ -12,13 +12,12 @@ type ConfigWarning = {
   action?: { label: string; href: string } | null;
 };
 
-// Polls /api/health every 60s and renders any unresolved misconfig warnings
-// at the top of the dashboard. The user can dismiss individual warnings
+// Loads static configuration warnings once and renders them at the top of the
+// dashboard. The user can dismiss individual warnings
 // for the session via localStorage — dismissals are not server-persisted
 // since the underlying condition will re-surface on the next reload (and
 // usually merits attention again anyway).
 
-const POLL_INTERVAL_MS = 60_000;
 const DISMISS_STORAGE_KEY = "termag.health.dismissed.v1";
 
 function readDismissed(): string[] {
@@ -65,10 +64,8 @@ export function HealthBanner() {
       }
     }
     load();
-    const handle = window.setInterval(load, POLL_INTERVAL_MS);
     return () => {
       cancelled = true;
-      window.clearInterval(handle);
     };
   }, []);
 

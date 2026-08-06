@@ -18,13 +18,13 @@ const dmMono = DM_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "termag-next",
-  description: "Personal coding-agent dashboard",
-  applicationName: "Termag",
+  title: "Terminalz",
+  description: "Lightweight multi-machine terminal streaming",
+  applicationName: "Terminalz",
   appleWebApp: {
     capable: true,
     statusBarStyle: "black-translucent",
-    title: "Termag",
+    title: "Terminalz",
   },
 };
 

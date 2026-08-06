@@ -31,9 +31,7 @@ pub struct Config {
 impl Config {
     pub fn load() -> Result<Self> {
         let home = home_dir()?;
-        let path = env::var_os("TERMAG_CONFIG")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| home.join(".termag/config.json"));
+        let path = read_config_path(&home);
         let file = match fs::read_to_string(&path) {
             Ok(raw) => serde_json::from_str::<FileConfig>(&raw)
                 .with_context(|| format!("could not parse {}", path.display()))?,
@@ -43,26 +41,23 @@ impl Config {
             }
         };
 
-        let url = env::var("TERMAG_URL")
-            .ok()
+        let url = env_value("TERMINALZ_URL", "TERMAG_URL")
             .filter(|v| !v.trim().is_empty())
             .or(file.url)
             .map(|v| v.trim().to_owned());
-        let token = env::var("TERMAG_AGENT_TOKEN")
-            .ok()
+        let token = env_value("TERMINALZ_AGENT_TOKEN", "TERMAG_AGENT_TOKEN")
             .filter(|v| !v.trim().is_empty())
             .or(file.agent_token)
             .map(|v| v.trim().to_owned());
         let Some(url) = url else {
-            bail!("TERMAG_URL is not configured")
+            bail!("TERMINALZ_URL is not configured")
         };
         let Some(token) = token else {
-            bail!("TERMAG_AGENT_TOKEN is not configured")
+            bail!("TERMINALZ_AGENT_TOKEN is not configured")
         };
         validate_url(&url)?;
 
-        let env_roots = env::var("TERMAG_AGENT_ROOTS")
-            .ok()
+        let env_roots = env_value("TERMINALZ_AGENT_ROOTS", "TERMAG_AGENT_ROOTS")
             .and_then(|raw| serde_json::from_str::<BTreeMap<String, String>>(&raw).ok());
         let raw_roots = env_roots.or(file.agent_roots).unwrap_or_default();
         let mut roots = BTreeMap::new();
@@ -76,10 +71,12 @@ impl Config {
             roots.insert("home".to_owned(), home.clone());
         }
 
-        let allow_all_directories = env_bool("TERMAG_ALLOW_ALL_DIRECTORIES")
-            .unwrap_or(file.allow_all_directories.unwrap_or(false));
-        let raw_allow = env::var("TERMAG_ALLOW_DIRECTORIES")
-            .ok()
+        let allow_all_directories = env_bool_alias(
+            "TERMINALZ_ALLOW_ALL_DIRECTORIES",
+            "TERMAG_ALLOW_ALL_DIRECTORIES",
+        )
+        .unwrap_or(file.allow_all_directories.unwrap_or(false));
+        let raw_allow = env_value("TERMINALZ_ALLOW_DIRECTORIES", "TERMAG_ALLOW_DIRECTORIES")
             .and_then(|raw| serde_json::from_str::<Vec<String>>(&raw).ok())
             .or(file.allow_directories);
         let mut allow_directories: Vec<PathBuf> = raw_allow
@@ -93,12 +90,14 @@ impl Config {
             }
         }
 
-        let inventory_interval_ms = env::var("TERMAG_INVENTORY_INTERVAL_MS")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .or(file.inventory_interval_ms)
-            .unwrap_or(5_000)
-            .clamp(1_000, 60_000);
+        let inventory_interval_ms = env_value(
+            "TERMINALZ_INVENTORY_INTERVAL_MS",
+            "TERMAG_INVENTORY_INTERVAL_MS",
+        )
+        .and_then(|v| v.parse().ok())
+        .or(file.inventory_interval_ms)
+        .unwrap_or(5_000)
+        .clamp(1_000, 60_000);
 
         Ok(Self {
             url,
@@ -113,14 +112,31 @@ impl Config {
 
 pub fn config_path() -> Result<PathBuf> {
     let home = home_dir()?;
-    Ok(env::var_os("TERMAG_CONFIG")
+    Ok(env::var_os("TERMINALZ_CONFIG")
+        .or_else(|| env::var_os("TERMAG_CONFIG"))
         .map(PathBuf::from)
-        .unwrap_or_else(|| home.join(".termag/config.json")))
+        .unwrap_or_else(|| home.join(".terminalz/config.json")))
+}
+
+fn read_config_path(home: &Path) -> PathBuf {
+    if let Some(explicit) = env::var_os("TERMINALZ_CONFIG").or_else(|| env::var_os("TERMAG_CONFIG"))
+    {
+        return PathBuf::from(explicit);
+    }
+    let canonical = home.join(".terminalz/config.json");
+    if canonical.exists() {
+        return canonical;
+    }
+    let legacy = home.join(".termag/config.json");
+    if legacy.exists() {
+        return legacy;
+    }
+    canonical
 }
 
 pub fn save_credentials(url: &str, token: &str) -> Result<PathBuf> {
     let path = config_path()?;
-    let mut file = load_file(&path)?;
+    let mut file = load_file_for_write(&path)?;
     file.url = Some(url.trim().to_owned());
     file.agent_token = Some(token.trim().to_owned());
     save_file(&path, &file)?;
@@ -138,7 +154,7 @@ pub fn set_roots(raw: &str) -> Result<PathBuf> {
         bail!("roots must contain at least one non-empty name and path");
     }
     let path = config_path()?;
-    let mut file = load_file(&path)?;
+    let mut file = load_file_for_write(&path)?;
     file.agent_roots = Some(roots);
     save_file(&path, &file)?;
     Ok(path)
@@ -192,6 +208,18 @@ fn load_file(path: &Path) -> Result<FileConfig> {
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(FileConfig::default()),
         Err(err) => Err(err).with_context(|| format!("could not read {}", path.display())),
     }
+}
+
+fn load_file_for_write(path: &Path) -> Result<FileConfig> {
+    if path.exists() {
+        return load_file(path);
+    }
+    let home = home_dir()?;
+    let source = read_config_path(&home);
+    if source != path && source.exists() {
+        return load_file(&source);
+    }
+    Ok(FileConfig::default())
 }
 
 fn save_file(path: &Path, config: &FileConfig) -> Result<()> {
@@ -252,7 +280,7 @@ fn validate_url(url: &str) -> Result<()> {
     // would put the bearer token on the wire in plaintext. Compare the host
     // component exactly.
     let Some(authority) = url.strip_prefix("ws://") else {
-        bail!("TERMAG_URL must use wss:// unless it points to localhost");
+        bail!("TERMINALZ_URL must use wss:// unless it points to localhost");
     };
     let authority = authority
         .split(['/', '?', '#'])
@@ -267,20 +295,22 @@ fn validate_url(url: &str) -> Result<()> {
         Some(rest) => match rest.split_once(']') {
             Some((host, "")) => host,
             Some((host, port)) if port.starts_with(':') => host,
-            _ => bail!("TERMAG_URL has a malformed IPv6 host"),
+            _ => bail!("TERMINALZ_URL has a malformed IPv6 host"),
         },
         None => authority.split(':').next().unwrap_or_default(),
     };
     if matches!(host, "localhost" | "127.0.0.1" | "::1") {
         return Ok(());
     }
-    bail!("TERMAG_URL must use wss:// unless it points to localhost");
+    bail!("TERMINALZ_URL must use wss:// unless it points to localhost");
 }
 
-fn env_bool(name: &str) -> Option<bool> {
-    env::var(name)
-        .ok()
-        .map(|value| matches!(value.as_str(), "1" | "true" | "yes" | "on"))
+fn env_value(primary: &str, legacy: &str) -> Option<String> {
+    env::var(primary).ok().or_else(|| env::var(legacy).ok())
+}
+
+fn env_bool_alias(primary: &str, legacy: &str) -> Option<bool> {
+    env_value(primary, legacy).map(|value| matches!(value.as_str(), "1" | "true" | "yes" | "on"))
 }
 
 #[cfg(test)]

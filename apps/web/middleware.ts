@@ -1,6 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
 import { rateLimit } from "@/lib/rate-limit";
-import { csrfProtection } from "@/lib/csrf";
 
 // Runs ahead of every route handler. Two jobs:
 //
@@ -17,24 +16,40 @@ import { csrfProtection } from "@/lib/csrf";
 //
 //   3. Apply rate limiting to API endpoints to prevent abuse.
 //
-//   4. Apply CSRF protection to state-changing API endpoints.
+//   4. Reject cross-origin browser mutations.
 //
 // Tightened in dev: HSTS is off (no HTTPS), and connect-src includes ws:
 // for the local broker. Production also adds upgrade-insecure-requests.
 
 const BODY_CAP_BYTES = 256 * 1024;
 const MUTATING_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
-// Prefixes, not exact paths. Auth.js mounts everything under /api/auth/*
-// (/api/auth/callback/github, /api/auth/signout, …), so an exact-match set
-// exempted only the bare path and left the real endpoints subject to a check
-// they cannot satisfy: a cross-origin form_post callback carries the IdP's
-// Origin and no double-submit token.
-const CSRF_EXEMPT_PREFIXES = ["/api/csrf", "/api/auth", "/api/health"];
+// Auth.js validates its own callback state. Bootstrap claims use the
+// short-lived, one-use URL code as their credential and are called by the CLI.
+const CSRF_EXEMPT_PREFIXES = ["/api/auth", "/api/bootstrap/claim"];
 
 function isCsrfExempt(pathname: string): boolean {
   return CSRF_EXEMPT_PREFIXES.some(
     prefix => pathname === prefix || pathname.startsWith(`${prefix}/`)
   );
+}
+
+function isSameOriginMutation(request: NextRequest): boolean {
+  if (request.headers.get("sec-fetch-site") === "cross-site") {
+    return false;
+  }
+  const origin = request.headers.get("origin");
+  if (!origin) {
+    // Non-browser clients do not send Origin. Browser cross-site mutations are
+    // caught by Origin and/or Sec-Fetch-Site without a readable token cookie.
+    return true;
+  }
+  const forwardedHost = request.headers.get("x-forwarded-host")?.split(",")[0]?.trim();
+  const host = forwardedHost || request.headers.get("host");
+  try {
+    return Boolean(host && new URL(origin).host === host);
+  } catch {
+    return false;
+  }
 }
 
 function buildCsp(): string {
@@ -57,8 +72,8 @@ function buildCsp(): string {
     // 'self' covers the broker's ws:/wss: upgrade on the same origin. The
     // previous bare "ws: wss:" allowed a socket to *any* host, which is a
     // ready-made exfil channel for a renderer whose whole job is to display
-    // untrusted bytes. TERMAG_BROKER_ORIGIN opts a split deployment back in.
-    `connect-src ${["'self'", process.env.TERMAG_BROKER_ORIGIN].filter(Boolean).join(" ")}`,
+    // untrusted bytes. TERMINALZ_BROKER_ORIGIN opts a split deployment back in.
+    `connect-src ${["'self'", process.env.TERMINALZ_BROKER_ORIGIN].filter(Boolean).join(" ")}`,
     "frame-ancestors 'none'",
     "base-uri 'none'",
     "object-src 'none'",
@@ -95,15 +110,17 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
     }
   }
 
-  // Apply CSRF protection to state-changing API endpoints
+  // Same-origin checks are sufficient for cookie-authenticated browser APIs;
+  // a second readable cookie/header token added state without adding trust.
   if (
     request.nextUrl.pathname.startsWith("/api/") &&
     MUTATING_METHODS.has(request.method) &&
     !isCsrfExempt(request.nextUrl.pathname)
   ) {
-    const csrfResult = await csrfProtection(request);
-    if (csrfResult) {
-      return applySecurityHeaders(csrfResult);
+    if (!isSameOriginMutation(request)) {
+      return applySecurityHeaders(
+        NextResponse.json({ error: "Cross-origin mutation rejected" }, { status: 403 })
+      );
     }
   }
 

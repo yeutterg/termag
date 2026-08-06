@@ -114,33 +114,6 @@ impl PowerManager {
         self.reconcile().await
     }
 
-    /// Compatibility path for older clients. A legacy lease remains until an
-    /// explicit stop (or the requested duration), while protocol-v2 browser
-    /// clients use short renewable leases so abandoned tabs cannot strand a
-    /// machine in a no-sleep state.
-    pub async fn start(
-        &mut self,
-        mode: PowerMode,
-        duration: Option<Duration>,
-    ) -> Result<PowerState> {
-        if mode == PowerMode::Off {
-            return self.stop().await;
-        }
-        if !cfg!(target_os = "macos") {
-            bail!("power policy is currently supported on macOS only");
-        }
-        let duration = duration.map(|value| value.clamp(MIN_LEASE, MAX_LEASE));
-        self.leases.insert(
-            "legacy".to_owned(),
-            PowerLease {
-                mode,
-                expires_at: duration.map(|duration| Instant::now() + duration),
-                ends_at: duration.map(|duration| SystemTime::now() + duration),
-            },
-        );
-        self.reconcile().await
-    }
-
     pub async fn stop(&mut self) -> Result<PowerState> {
         self.leases.clear();
         self.reconcile().await

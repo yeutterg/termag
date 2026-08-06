@@ -1,9 +1,13 @@
 node_modules
-.next
+**/.next
+apps/agent-rs/target
+coverage
 dist
 .git
 *.db
 *.log
-.env
-.env.*
-!*.example
+.terminalz-server.json
+.termag-server.json
+**/.env
+**/.env.*
+!**/.env.example

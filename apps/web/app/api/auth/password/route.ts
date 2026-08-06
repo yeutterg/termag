@@ -8,7 +8,6 @@ import {
   passwordGateEnabled,
   readJsonBody,
 } from "@/lib/auth";
-import { logAudit } from "@/lib/audit";
 import { clientIpFromRequest, createRateLimiter } from "@/lib/rate-limit";
 
 const schema = z.object({ password: z.string().min(1).max(256) });
@@ -43,23 +42,19 @@ export async function POST(request: Request) {
   const bodyResult = await readJsonBody(request);
   if (!bodyResult.ok) {
     limiter.record(ip, false);
-    logAudit({ action: "password-failure", request, payload: { reason: "invalid-payload" } });
     return bodyResult.response;
   }
   const parsed = schema.safeParse(bodyResult.data);
   if (!parsed.success) {
     limiter.record(ip, false);
-    logAudit({ action: "password-failure", request, payload: { reason: "invalid-payload" } });
     return NextResponse.json({ error: "Invalid payload" }, { status: 400 });
   }
 
   if (!checkPassword(parsed.data.password)) {
     limiter.record(ip, false);
-    logAudit({ action: "password-failure", request, payload: { reason: "wrong-password" } });
     return NextResponse.json({ error: "Wrong password" }, { status: 401 });
   }
   limiter.record(ip, true);
-  logAudit({ action: "password-success", request });
 
   const response = NextResponse.json({ ok: true });
   response.cookies.set(PASSWORD_COOKIE, passwordCookieValue(), {

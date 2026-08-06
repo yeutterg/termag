@@ -1,30 +1,37 @@
-# Termag Rust agent
+# Terminalz native agent
 
-This is the Protocol v2 replacement for the Node laptop agent. It is an outbound-only daemon and does not modify or embed HerdR.
+This is the only supported Terminalz machine agent. It is an outbound-only protocol-v2 daemon and CLI
+written in Rust. It has no menu-bar process or desktop UI and does not modify, launch, or embed Herdr.
 
-There is no menu-bar process or desktop UI. Terminal helpers are spawned only while a cloud viewer is attached; idle inventory uses a single current-thread async runtime.
+The agent mirrors every local tmux session and every running Herdr session. Herdr metadata comes from
+its documented local API; terminal viewing/control stays behind Herdr's public process boundary. One
+helper is shared by all cloud viewers of a pane and exists only while that pane is open. When Herdr is
+absent, tmux remains fully available.
 
-It mirrors every local tmux session and every running HerdR session. HerdR metadata comes from its documented local socket API; terminal viewing/control stays behind HerdR's public `herdr terminal session observe/control` process boundary. One helper is shared by all cloud viewers of a pane and exists only while that pane is open. Termag does not copy, patch, launch, or own HerdR. When HerdR is absent, tmux remains fully available.
-
-## Build and run
+## Install and run
 
 ```bash
-cargo build --release --manifest-path apps/agent-rs/Cargo.toml
-./apps/agent-rs/target/release/termag-agent
+brew install yeutterg/tap/terminalz
+terminalz bootstrap https://terminalz.example.com/api/bootstrap/claim/...
+brew services start terminalz
 ```
 
-The same binary provides the `termag bootstrap`, `termag config`, `termag
-list`, and `termag attach` workflows when installed with the `termag` symlink.
-It intentionally has no `connect`, `new`, `adopt`, or arbitrary command mode:
-protocol v2 discovers sessions continuously and mutations are typed.
+From source:
 
-The agent reads the existing `~/.termag/config.json` keys (`url`, `agentToken`, and `agentRoots`) and the existing `TERMAG_URL`, `TERMAG_AGENT_TOKEN`, and `TERMAG_AGENT_ROOTS` overrides.
+```bash
+cargo build --release --locked --manifest-path apps/agent-rs/Cargo.toml
+./apps/agent-rs/target/release/terminalz
+```
 
-Creation and browsing are restricted to the user's home directory by default. Configure `allowDirectories` with absolute paths, or set `allowAllDirectories: true` explicitly:
+The same binary runs the daemon and the `bootstrap`, `config`, `list`, and `attach` commands. It has no
+connect/adopt mode or arbitrary command executor: protocol v2 discovers sessions continuously and all
+mutations are typed.
+
+Canonical configuration is `~/.terminalz/config.json`:
 
 ```json
 {
-  "url": "wss://termag.example.com/api/ws/agent",
+  "url": "wss://terminalz.example.com/api/ws/agent",
   "agentToken": "tmag_…",
   "agentRoots": { "projects": "~/Projects" },
   "allowDirectories": ["~/Projects", "~/Services"],
@@ -32,19 +39,23 @@ Creation and browsing are restricted to the user's home directory by default. Co
 }
 ```
 
-Power modes are `off`, `terminals-awake` (`caffeinate -i`), `display-awake` (`caffeinate -d -i`), and `ac-awake` (`caffeinate -s`). Protocol-v2 clients use renewable machine-scoped leases, so one browser cannot cancel another browser's lease and abandoned leases expire. The daemon only signals the child process it created.
+`TERMINALZ_URL`, `TERMINALZ_AGENT_TOKEN`, `TERMINALZ_AGENT_ROOTS`, and the other variables documented
+in [the environment reference](../../docs/ENVIRONMENT_VARIABLES.md) override the file. Legacy
+`~/.termag/config.json` and `TERMAG_*` values remain readable during migration.
+
+Creation and browsing are restricted to the user's home directory by default. Every requested path is
+canonicalized and checked locally. Set `allowAllDirectories: true` only as an explicit opt-out.
+
+Power modes are `terminals-awake` (`caffeinate -i`), `display-awake` (`caffeinate -d -i`), and
+`ac-awake` (`caffeinate -s`). Renewable machine-scoped leases prevent one browser from cancelling
+another browser's lease and ensure abandoned leases expire.
 
 ## Footprint targets
 
-- stripped release binary: at most 15 MiB (1.2 MiB measured on Apple Silicon)
-- idle RSS: at most 20 MiB (6.8 MiB measured while connected with a live HerdR session)
-- idle CPU: below 0.5% when runtimes are quiet; active HerdR event mirroring scales with real state changes
+- stripped release binary: at most 15 MiB (about 1.2 MiB measured on Apple Silicon)
+- idle RSS: at most 20 MiB (under 7 MiB measured with a live Herdr session)
+- idle CPU: below 0.5% while runtimes are quiet
 
-Inventory collection, runtime mutations, and power commands run on their own
-tasks, so a slow `tmux` or HerdR call cannot stall terminal output, health, or
-WebSocket keepalives. The tmux poll backs off geometrically (to a 60s ceiling)
-while nothing changes and snaps back to `inventoryIntervalMs` on the first
-change, so a quiet machine stops spawning `tmux list-panes` every few seconds.
-
-CI builds and tests on macOS and Linux with `--locked` and enforces the
-binary-size ceiling.
+Inventory, mutations, and power commands run outside the terminal-output loop. tmux polling backs off
+geometrically to 60 seconds while nothing changes and immediately returns to the active interval after
+a change.

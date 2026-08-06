@@ -10,7 +10,7 @@ export default function GlobalError({
     <html lang="en">
       <body className="grid min-h-dvh place-items-center bg-[#0a0a0a] p-6 text-[#fafafa]">
         <main className="max-w-md text-center">
-          <h1 className="text-lg font-semibold">Termag hit an unexpected error</h1>
+          <h1 className="text-lg font-semibold">Terminalz hit an unexpected error</h1>
           <p className="mt-2 text-sm text-[#a3a3a3]">
             Your terminal sessions are still running on their machines.
           </p>

@@ -13,7 +13,7 @@ use anyhow::{Context, Result};
 use config::Config;
 use futures_util::{SinkExt, StreamExt};
 use power::{PowerManager, PowerMode};
-use protocol::{CapabilitySet, Incoming, InventorySnapshot, RuntimeInventory, PROTOCOL_VERSION};
+use protocol::{CapabilitySet, Incoming, InventorySnapshot, PROTOCOL_VERSION};
 use serde_json::{json, Value};
 use std::{
     collections::BTreeMap,
@@ -22,7 +22,7 @@ use std::{
 };
 use terminal::{
     next_terminal_sequence, terminal_checkpoint_flags, terminal_chunk_count, terminal_frame,
-    Outbound, Registry, Target, MAX_TERMINAL_DATA_BYTES,
+    AttachOptions, Outbound, Registry, Target, MAX_TERMINAL_DATA_BYTES,
 };
 use tokio::{
     sync::{mpsc, Mutex},
@@ -47,7 +47,7 @@ async fn main() -> Result<()> {
         return Ok(());
     }
     let config = Arc::new(Config::load()?);
-    eprintln!("[termag-agent] starting v{VERSION} (protocol v{PROTOCOL_VERSION})");
+    eprintln!("[terminalz] starting v{VERSION} (protocol v{PROTOCOL_VERSION})");
     let mut reconnect = MIN_RECONNECT;
     loop {
         let started = Instant::now();
@@ -55,7 +55,7 @@ async fn main() -> Result<()> {
             Ok(ConnectionEnd::Replaced) => return Ok(()),
             Ok(ConnectionEnd::Shutdown) => return Ok(()),
             Ok(ConnectionEnd::Disconnected) => {}
-            Err(err) => eprintln!("[termag-agent] connection error: {err:#}"),
+            Err(err) => eprintln!("[terminalz] connection error: {err:#}"),
         }
         // Back off only against repeated failures. Without this reset a few
         // scattered network blips over a long uptime would permanently pin
@@ -91,6 +91,17 @@ enum ConnectionEnd {
     Disconnected,
 }
 
+/// Tokio detaches a task when its JoinHandle is dropped. Connection-owned
+/// producers must instead stop with the socket or they keep polling Herdr and
+/// can race the replacement connection's initial inventory snapshot.
+struct AbortTask(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortTask {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 async fn run_connection(config: &Arc<Config>) -> Result<ConnectionEnd> {
     let mut request = config.url.clone().into_client_request()?;
     request.headers_mut().insert(
@@ -110,12 +121,12 @@ async fn run_connection(config: &Arc<Config>) -> Result<ConnectionEnd> {
     let (mut socket, _) = connect_async_with_config(request, Some(socket_config), false)
         .await
         .context("could not connect to broker")?;
-    eprintln!("[termag-agent] connected to {}", config.url);
+    eprintln!("[terminalz] connected to {}", config.url);
     let started = Instant::now();
     let mut terminal = Registry::new();
     let power = Arc::new(Mutex::new(PowerManager::new()));
     // Requests that shell out (inventory, runtime mutations, directory
-    // listing) or block on a HerdR socket run on their own task and report
+    // listing) or block on a Herdr socket run on their own task and report
     // back through this queue. Awaiting them inline stalled terminal output,
     // health, and WebSocket pings for the whole duration on this
     // single-threaded runtime.
@@ -128,16 +139,12 @@ async fn run_connection(config: &Arc<Config>) -> Result<ConnectionEnd> {
     driver_lease_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
     let mut power_lease_tick = interval(Duration::from_secs(15));
     power_lease_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
-    // Inventory collection shells out to tmux and talks to the HerdR socket,
-    // so it runs on its own task; the health tick reads the last tmux mirror
-    // through this handle rather than blocking on a fresh collection.
-    let tmux_mirror: Arc<std::sync::Mutex<Option<RuntimeInventory>>> = Arc::default();
-    tokio::spawn(run_inventory(
+    // Inventory collection shells out to tmux and talks to the Herdr socket,
+    // so it runs on its own task and only emits when the normalized tree moves.
+    let _inventory_task = AbortTask(tokio::spawn(run_inventory(
         Arc::clone(config),
         outbound_tx.clone(),
-        herdr::spawn_event_watchers(),
-        Arc::clone(&tmux_mirror),
-    ));
+    )));
 
     loop {
         tokio::select! {
@@ -180,10 +187,8 @@ async fn run_connection(config: &Arc<Config>) -> Result<ConnectionEnd> {
             }
             Some(message) = outbound_rx.recv() => send_outbound(&mut socket, message).await?,
             _ = health_tick.tick() => {
-                let tmux = tmux_mirror.lock().expect("tmux mirror poisoned").clone();
                 let health = health_message(
                     config,
-                    tmux.as_ref(),
                     terminal.len(),
                     started.elapsed().as_secs(),
                 );
@@ -283,21 +288,23 @@ fn handle_terminal_request(terminal: &mut Registry, incoming: Incoming) -> Vec<V
             if stream_id.is_empty() {
                 anyhow::bail!("streamId is required");
             }
-            let target =
-                Target::from_value(incoming.value("runtimeTarget"), incoming.string("tmuxName"))?;
+            let target = Target::from_value(incoming.value("runtimeTarget"))?;
             let driver = terminal.attach(
                 stream_id,
                 target.clone(),
-                incoming.u16("cols", 80),
-                incoming.u16("rows", 24),
-                incoming.bool("readOnly"),
-                incoming.bool("requestCheckpoint"),
+                AttachOptions {
+                    cols: incoming.u16("cols", 80),
+                    rows: incoming.u16("rows", 24),
+                    read_only: incoming.bool("readOnly"),
+                    request_checkpoint: incoming.bool("requestCheckpoint"),
+                    checkpoint_history_lines: incoming.u16("checkpointHistoryLines", 2000),
+                    checkpoint_max_bytes: incoming.u32("checkpointMaxBytes", 1024 * 1024) as usize,
+                },
             )?;
             Ok((
                 json!({
                     "runtime": target.runtime,
                     "externalId": target.external_id,
-                    "tmuxName": target.external_id,
                 }),
                 driver,
             ))
@@ -307,8 +314,8 @@ fn handle_terminal_request(terminal: &mut Registry, incoming: Incoming) -> Vec<V
             if data.len() > 256 * 1024 {
                 anyhow::bail!("terminal input exceeded 256 KiB");
             }
-            terminal.input(&stream_id, data)?;
-            Ok((json!({ "ok": true }), Vec::new()))
+            let driver_updates = terminal.input(&stream_id, data)?;
+            Ok((json!({ "ok": true }), driver_updates))
         }
         "terminal-resize" => {
             terminal.resize(
@@ -336,14 +343,6 @@ async fn handle_request(
     let request_id = incoming.request_id.clone();
     let result = async {
         match incoming.kind.as_str() {
-            "inventory.get" | "health-request" => {
-                let snapshot = inventory::collect(config).await;
-                Ok((serde_json::to_value(snapshot)?, Vec::new()))
-            }
-            "tmux-list" => {
-                let snapshot = inventory::collect(config).await;
-                Ok((json!({ "sessions": legacy_tmux(&snapshot) }), Vec::new()))
-            }
             "list-directory" => {
                 let root = incoming.string("rootKey").context("rootKey is required")?;
                 let relative = incoming.string("relativePath").unwrap_or_default();
@@ -354,12 +353,8 @@ async fn handle_request(
                 let cwd = request_cwd(config, &incoming)?;
                 Ok((git::execute(kind, &cwd, &incoming).await?, Vec::new()))
             }
-            kind if kind.starts_with("power.") || kind.starts_with("caffeinate-") => {
-                handle_power_request(power, &incoming).await
-            }
-            kind if kind.starts_with("runtime.") || kind.starts_with("tmux-") => {
-                handle_runtime_request(config, &incoming).await
-            }
+            kind if kind.starts_with("power.") => handle_power_request(power, &incoming).await,
+            kind if kind.starts_with("runtime.") => handle_runtime_request(config, &incoming).await,
             _ => anyhow::bail!("unknown command: {}", incoming.kind),
         }
     }
@@ -382,7 +377,6 @@ async fn handle_power_request(
         .map(Duration::from_millis);
     let mut power = power.lock().await;
     let state = match incoming.kind.as_str() {
-        "power.set" | "caffeinate-start" => power.start(mode, duration).await?,
         "power.acquire" | "power.renew" => {
             let lease_id = incoming.string("leaseId").context("leaseId is required")?;
             power.acquire(&lease_id, mode, duration).await?
@@ -391,10 +385,7 @@ async fn handle_power_request(
             let lease_id = incoming.string("leaseId").context("leaseId is required")?;
             power.release(&lease_id).await?
         }
-        "power.stop" | "caffeinate-stop" => power.stop().await?,
-        "power.get" | "caffeinate-status" => {
-            return Ok((json!({ "state": power.reap().await? }), Vec::new()))
-        }
+        "power.get" => return Ok((json!({ "state": power.reap().await? }), Vec::new())),
         kind => anyhow::bail!("unknown power command: {kind}"),
     };
     Ok((json!({ "success": true, "state": state }), Vec::new()))
@@ -404,17 +395,18 @@ async fn handle_runtime_request(
     config: &Config,
     incoming: &Incoming,
 ) -> Result<(Value, Vec<Value>)> {
-    // HerdR addresses its own session; tmux is a single global server. Default
-    // to the conventional session name so older clients that omit the field
-    // keep working.
+    // Herdr addresses its own session; tmux is a single global server.
     let session = || {
         incoming
             .string("runtimeSessionId")
-            .unwrap_or_else(|| "default".to_owned())
+            .context("runtimeSessionId is required")
     };
-    let runtime = incoming.string("runtime");
-    let is_herdr = runtime.as_deref() == Some("herdr");
-    let is_tmux = runtime.as_deref() == Some("tmux");
+    let runtime = incoming.string("runtime").context("runtime is required")?;
+    if runtime != "herdr" && runtime != "tmux" {
+        anyhow::bail!("runtime must be herdr or tmux");
+    }
+    let is_herdr = runtime == "herdr";
+    let is_tmux = runtime == "tmux";
     let name = || incoming.string("name").context("name is required");
     let tab_id = || incoming.string("tabId").context("tabId is required");
     let pane_id = || incoming.string("paneId").context("paneId is required");
@@ -425,7 +417,7 @@ async fn handle_runtime_request(
             let cwd = request_cwd(config, incoming)?;
             if is_herdr {
                 herdr::mutate(
-                    &session(),
+                    &session()?,
                     "workspace.create",
                     json!({ "cwd": cwd, "label": name()?, "focus": false, "env": {} }),
                 )
@@ -435,9 +427,12 @@ async fn handle_runtime_request(
             }
         }
         "runtime.create-space" => {
+            if !is_herdr {
+                anyhow::bail!("spaces are only supported for Herdr");
+            }
             let cwd = request_cwd(config, incoming)?;
             herdr::mutate(
-                &session(),
+                &session()?,
                 "workspace.create",
                 json!({ "cwd": cwd, "label": incoming.string("name"), "focus": false, "env": {} }),
             )
@@ -447,7 +442,7 @@ async fn handle_runtime_request(
             let cwd = request_cwd(config, incoming)?;
             if is_herdr {
                 herdr::mutate(
-                    &session(),
+                    &session()?,
                     "tab.create",
                     json!({
                         "workspace_id": incoming.string("spaceId"),
@@ -482,95 +477,75 @@ async fn handle_runtime_request(
                 .await?;
             } else {
                 herdr::mutate(
-                    &session(),
+                    &session()?,
                     "workspace.rename",
                     json!({ "workspace_id": space_id()?, "label": name()? }),
                 )
                 .await?;
             }
         }
-        "runtime.rename-tab" | "tmux-rename-window" => {
+        "runtime.rename-tab" => {
             if is_herdr {
                 herdr::mutate(
-                    &session(),
+                    &session()?,
                     "tab.rename",
                     json!({ "tab_id": tab_id()?, "label": name()? }),
                 )
                 .await?;
             } else {
-                tmux::rename_tab(&tmux_tab_target(incoming)?, &name()?).await?;
+                tmux::rename_tab(&tab_id()?, &name()?).await?;
             }
         }
         "runtime.rename-pane" => {
             if !is_herdr {
-                anyhow::bail!("pane rename is only supported for HerdR");
+                anyhow::bail!("pane rename is only supported for Herdr");
             }
             herdr::mutate(
-                &session(),
+                &session()?,
                 "pane.rename",
                 json!({ "pane_id": pane_id()?, "label": name()? }),
             )
             .await?;
         }
-        "runtime.close-tab" | "tmux-kill-window" => {
+        "runtime.close-tab" => {
             if is_herdr {
-                herdr::mutate(&session(), "tab.close", json!({ "tab_id": tab_id()? })).await?;
+                herdr::mutate(&session()?, "tab.close", json!({ "tab_id": tab_id()? })).await?;
             } else {
-                tmux::close_tab(&tmux_tab_target(incoming)?).await?;
+                tmux::close_tab(&tab_id()?).await?;
             }
         }
         "runtime.close-pane" => {
             if is_tmux {
                 tmux::close_pane(&pane_id()?).await?;
             } else {
-                herdr::mutate(&session(), "pane.close", json!({ "pane_id": pane_id()? })).await?;
+                herdr::mutate(&session()?, "pane.close", json!({ "pane_id": pane_id()? })).await?;
             }
         }
         "runtime.close-space" => {
+            if !is_herdr {
+                anyhow::bail!("spaces are only supported for Herdr");
+            }
             herdr::mutate(
-                &session(),
+                &session()?,
                 "workspace.close",
                 json!({ "workspace_id": space_id()? }),
             )
             .await?;
         }
-        "runtime.close-session" | "tmux-kill-session" | "tmux-kill" => {
-            tmux::close_session(
-                &incoming
-                    .string("runtimeSessionId")
-                    .or_else(|| incoming.string("tmuxSessionName"))
-                    .or_else(|| incoming.string("tmuxName"))
-                    .context("session target is required")?,
-            )
-            .await?;
+        "runtime.close-session" => {
+            if !is_tmux {
+                anyhow::bail!("runtime sessions can only be closed for tmux");
+            }
+            tmux::close_session(&session()?).await?;
         }
         kind => anyhow::bail!("unknown command: {kind}"),
     }
     Ok((json!({ "ok": true }), Vec::new()))
 }
 
-fn tmux_tab_target(incoming: &Incoming) -> Result<String> {
-    incoming
-        .string("tabId")
-        .or_else(|| incoming.string("tmuxName"))
-        .context("tab target is required")
-}
-
 fn request_cwd(config: &Config, incoming: &Incoming) -> Result<String> {
-    let cwd = incoming.value("cwd").and_then(Value::as_object);
-    let root = incoming.string("rootKey").or_else(|| {
-        cwd.and_then(|v| v.get("rootKey"))
-            .and_then(Value::as_str)
-            .map(ToOwned::to_owned)
-    });
-    let relative = incoming
-        .string("relativePath")
-        .or_else(|| {
-            cwd.and_then(|v| v.get("relativePath"))
-                .and_then(Value::as_str)
-                .map(ToOwned::to_owned)
-        })
-        .unwrap_or_default();
+    let root = incoming.string("rootKey");
+    let relative = incoming.string("relativePath").unwrap_or_default();
     Ok(
         fs_policy::resolve_creation_path(config, root.as_deref(), &relative)?
             .to_string_lossy()
@@ -579,18 +554,12 @@ fn request_cwd(config: &Config, incoming: &Incoming) -> Result<String> {
 }
 
 /// Owns inventory collection for the life of one broker connection. Emits a
-/// snapshot immediately, then on HerdR events, a tmux poll, and a periodic
+/// snapshot immediately, then on Herdr events, a tmux poll, and a periodic
 /// full sweep.
-async fn run_inventory(
-    config: Arc<Config>,
-    outbound: mpsc::Sender<Outbound>,
-    mut herdr_events: tokio::sync::mpsc::Receiver<()>,
-    mirror: Arc<std::sync::Mutex<Option<RuntimeInventory>>>,
-) {
+async fn run_inventory(config: Arc<Config>, outbound: mpsc::Sender<Outbound>) {
     const IDLE_CEILING: Duration = Duration::from_secs(60);
     let mut collector = inventory::Collector::new();
     let snapshot = collector.initialize(&config).await;
-    *mirror.lock().expect("tmux mirror poisoned") = collector.tmux().cloned();
     if outbound
         .send(Outbound::Json(inventory_message(&snapshot)))
         .await
@@ -598,6 +567,11 @@ async fn run_inventory(
     {
         return;
     }
+
+    // Subscribe only after the authoritative first snapshot is on the wire.
+    // Starting subscriptions concurrently made a reconnect open several
+    // Herdr snapshot/event sockets before the broker had any usable target.
+    let mut herdr_events = herdr::spawn_event_watchers();
 
     let base = Duration::from_millis(config.inventory_interval_ms);
     let mut poll_delay = base;
@@ -616,7 +590,6 @@ async fn run_inventory(
             }
             _ = safety_tick.tick() => collector.refresh_all(&config).await,
         };
-        *mirror.lock().expect("tmux mirror poisoned") = collector.tmux().cloned();
         match changed {
             Some(snapshot) => {
                 poll_delay = base;
@@ -630,7 +603,7 @@ async fn run_inventory(
             }
             // Nothing moved locally. Ease off so an idle machine stops
             // spawning `tmux list-panes` every few seconds; the safety sweep
-            // still bounds staleness and HerdR pushes its own events, so the
+            // still bounds staleness and Herdr pushes its own events, so the
             // first real change snaps the interval back to the configured
             // rate.
             None => poll_delay = (poll_delay * 2).min(IDLE_CEILING),
@@ -655,12 +628,7 @@ fn inventory_message(snapshot: &InventorySnapshot) -> Value {
     })
 }
 
-fn health_message(
-    config: &Config,
-    tmux: Option<&RuntimeInventory>,
-    stream_count: usize,
-    uptime: u64,
-) -> Value {
+fn health_message(config: &Config, stream_count: usize, uptime: u64) -> Value {
     let roots: BTreeMap<String, String> = config
         .roots
         .iter()
@@ -670,34 +638,7 @@ fn health_message(
         "type": "health", "protocolVersion": PROTOCOL_VERSION, "version": VERSION,
         "streamCount": stream_count, "uptimeSec": uptime,
         "memMb": current_rss_mb(), "memPeakMb": peak_rss_mb(), "roots": roots,
-        "tmux": { "sessions": legacy_tmux_runtime(tmux) },
     })
-}
-
-fn legacy_tmux(snapshot: &InventorySnapshot) -> Vec<Value> {
-    legacy_tmux_runtime(
-        snapshot
-            .runtimes
-            .iter()
-            .find(|runtime| matches!(runtime, RuntimeInventory::Tmux { .. })),
-    )
-}
-
-fn legacy_tmux_runtime(runtime: Option<&RuntimeInventory>) -> Vec<Value> {
-    runtime.and_then(|runtime| match runtime {
-        RuntimeInventory::Tmux { sessions, .. } => Some(sessions.iter().map(|session| {
-            let tabs = session.spaces.first().map(|space| &space.tabs);
-            json!({
-                "name": session.name, "path": session.path, "windowCount": tabs.map_or(0, Vec::len),
-                "windows": tabs.into_iter().flatten().map(|tab| json!({
-                    "index": tab.ordinal, "id": tab.id, "name": tab.name, "target": tab.id,
-                    "path": tab.panes.first().and_then(|pane| pane.cwd.clone()),
-                    "currentCommand": tab.panes.iter().find(|pane| pane.focused).and_then(|pane| pane.command.clone()),
-                })).collect::<Vec<_>>(),
-            })
-        }).collect()),
-        _ => None,
-    }).unwrap_or_default()
 }
 
 fn peak_rss_mb() -> u64 {

@@ -94,7 +94,8 @@ export function BootstrapDeviceDialog({ open, onOpenChange }: BootstrapDeviceDia
           <h2 className="text-base font-semibold">Bootstrap new device</h2>
           <p className="mt-1 text-sm text-muted">
             Generates a one-time, 15-minute code. Run the command on the new device — it writes the
-            URL + token to <code className="font-mono text-xs">~/.termag/config.json</code> for you.
+            URL + token to <code className="font-mono text-xs">~/.terminalz/config.json</code> for
+            you.
           </p>
         </div>
         {!result && (
@@ -160,7 +161,7 @@ export function BootstrapDeviceDialog({ open, onOpenChange }: BootstrapDeviceDia
             </div>
             <div className="rounded-md border border-line bg-bg p-3">
               <div className="mb-2 text-xs font-medium text-muted">
-                Or paste this URL into <code className="font-mono">termag bootstrap</code>
+                Or paste this URL into <code className="font-mono">terminalz bootstrap</code>
               </div>
               <div className="flex items-center gap-2">
                 <code className="min-w-0 flex-1 break-all font-mono text-xs">

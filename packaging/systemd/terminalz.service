@@ -1,0 +1,15 @@
+[Unit]
+Description=Terminalz local terminal agent
+Documentation=https://github.com/yeutterg/terminalz
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/terminalz
+Restart=on-failure
+RestartSec=5s
+NoNewPrivileges=true
+
+[Install]
+WantedBy=default.target

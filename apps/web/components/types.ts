@@ -1,17 +1,6 @@
 export type Session = {
   id: string;
-  kind: string;
-  tmuxName: string;
-  tmuxWindowName?: string | null;
-  tmuxManaged: boolean;
-  agentType?: string | null;
-  spawnCommand?: string | null;
   status: string;
-  runtime?: "herdr" | "tmux" | string;
-  runtimeSessionId?: string | null;
-  externalId?: string | null;
-  terminalId?: string | null;
-  controllerMode?: string;
 };
 
 export type Tab = {
@@ -20,7 +9,6 @@ export type Tab = {
   ordinal: number;
   status: string;
   session?: Session | null;
-  externalId?: string | null;
   runtimeTabId?: string | null;
   runtimeTabName?: string | null;
   runtimeTabStatus?: string | null;
@@ -36,41 +24,17 @@ export type Project = {
   name: string;
   rootKey: string;
   relativePath: string;
-  tmuxSessionName?: string | null;
-  tmuxManaged: boolean;
-  agentType: string;
-  agentSpawnCommand: string;
+  directoryRootKey?: string | null;
   status: string;
-  position?: number | null;
-  openedAt: string | Date;
   tabs: Tab[];
-  sessions: Session[];
-  deviceId?: string | null;
-  runtime?: "herdr" | "tmux" | string;
-  runtimeSessionId?: string | null;
-  runtimeSessionName?: string | null;
-  runtimeSpaceName?: string | null;
+  deviceId: string;
+  runtime: "herdr" | "tmux";
+  runtimeSessionId: string;
+  runtimeSessionName: string;
+  runtimeSpaceName: string;
   runtimeIconStyle?: "dots" | "symbols" | string | null;
-  runtimeOrdinal?: number | null;
-  runtimeFocused?: boolean;
-  externalId?: string | null;
-  creationPath?: string | null;
-  mirrored?: boolean;
-};
-
-export type TmuxWindow = {
-  index: number;
-  id: string;
-  name: string;
-  target: string;
-  path?: string;
-};
-
-export type TmuxDeviceSession = {
-  name: string;
-  path?: string;
-  windowCount?: number;
-  windows: TmuxWindow[];
+  runtimeOrdinal: number;
+  runtimeFocused: boolean;
 };
 
 export type AgentDeviceStatus = {
@@ -82,10 +46,7 @@ export type AgentDeviceStatus = {
   uptimeSec?: number;
   memMb?: number;
   memPeakMb?: number;
-  kind?: "agent" | "ssh";
-  lastSeenAt?: string | null;
   roots?: Record<string, string>;
-  tmuxSessions?: TmuxDeviceSession[];
   deviceId?: string | null;
   protocolVersion?: number;
   capabilities?: Record<string, boolean>;

@@ -1,22 +1,21 @@
 {
-  "name": "@termag/web",
-  "version": "0.1.0",
+  "name": "@terminalz/web",
+  "version": "0.2.0",
   "private": true,
   "scripts": {
-    "dev": "node scripts/dev.js",
+    "dev": "NEXT_TELEMETRY_DISABLED=\"${NEXT_TELEMETRY_DISABLED:-1}\" NODE_OPTIONS=\"${NODE_OPTIONS:---max-old-space-size=384 --max-semi-space-size=2}\" node scripts/dev.js",
     "build": "node scripts/guard-build.js && prisma generate && next build",
-    "start": "NODE_ENV=production node server.js",
+    "start": "NODE_ENV=production NEXT_TELEMETRY_DISABLED=\"${NEXT_TELEMETRY_DISABLED:-1}\" NODE_OPTIONS=\"${NODE_OPTIONS:---max-old-space-size=192 --max-semi-space-size=2}\" node server.js",
     "lint": "eslint . --ext .ts,.tsx,.js",
     "lint:fix": "eslint . --ext .ts,.tsx,.js --fix",
-    "typecheck": "prisma generate && next typegen && tsc --noEmit",
+    "typecheck": "prisma generate && node -e \"require('node:fs').rmSync('.next/types',{recursive:true,force:true})\" && next typegen && tsc --noEmit",
     "db:generate": "prisma generate",
     "db:migrate": "prisma migrate dev",
-    "db:deploy": "prisma migrate deploy",
-    "preview:seed": "node scripts/seed-preview.js"
+    "db:deploy": "prisma migrate deploy"
   },
   "dependencies": {
-    "@lydell/node-pty": "^1.2.0-beta.12",
     "@prisma/client": "^5.22.0",
+    "@next/env": "^15.5.22",
     "@xterm/addon-fit": "^0.10.0",
     "@xterm/addon-web-links": "^0.11.0",
     "@xterm/xterm": "^5.5.0",
@@ -24,6 +23,7 @@
     "lucide-react": "^0.468.0",
     "next": "^15.5.22",
     "next-auth": "^4.24.15",
+    "prisma": "^5.22.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "tailwind-merge": "^2.5.5",
@@ -37,7 +37,6 @@
     "@types/ws": "^8.5.13",
     "autoprefixer": "^10.4.20",
     "postcss": "^8.5.25",
-    "prisma": "^5.22.0",
     "tailwindcss": "^3.4.17",
     "typescript": "^5.7.2"
   }

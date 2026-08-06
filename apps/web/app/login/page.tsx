@@ -1,11 +1,7 @@
 import { getServerSession } from "next-auth";
 import { redirect } from "next/navigation";
-import {
-  authOptions,
-  passwordCookieValid,
-  passwordGateEnabled,
-  trustedNetworkEnabled,
-} from "@/lib/auth";
+import { authOptions } from "@/lib/auth-options";
+import { passwordCookieValid, passwordGateEnabled, trustedNetworkEnabled } from "@/lib/auth";
 import { LoginButton } from "@/components/login-button";
 import { PasswordForm } from "@/components/password-form";
 
@@ -32,13 +28,13 @@ export default async function LoginPage() {
 
   const passwordMode = passwordGateEnabled();
   const devAuthAvailable =
-    process.env.NODE_ENV !== "production" && process.env.TERMAG_DEV_AUTH === "true";
+    process.env.NODE_ENV !== "production" && process.env.TERMINALZ_DEV_AUTH === "true";
 
   return (
     <main className="grid h-dvh place-items-center bg-bg px-6 text-text">
       <section className="w-full max-w-sm border border-line bg-panel p-6 shadow-2xl">
         <div className="mb-6">
-          <h1 className="text-2xl font-semibold tracking-normal">termag-next</h1>
+          <h1 className="text-2xl font-semibold tracking-normal">Terminalz</h1>
           <p className="mt-2 text-sm text-muted">
             {passwordMode
               ? "Enter the shared password to continue."

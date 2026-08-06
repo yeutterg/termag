@@ -1,22 +1,49 @@
 const http = require("node:http");
 const fs = require("node:fs");
 const path = require("node:path");
+const { loadEnvConfig } = require("@next/env");
+
+const dev = process.env.NODE_ENV !== "production";
+loadEnvConfig(path.resolve(__dirname), dev);
+
+// Terminalz is the canonical public configuration surface. Mirror legacy
+// TERMAG_* values in both directions for one migration window so upgrades do
+// not strand an already-running agent or deployment.
+const ENV_ALIASES = {
+  TERMINALZ_ALLOWED_EMAIL: "TERMAG_ALLOWED_EMAIL",
+  TERMINALZ_ALLOWED_ORIGINS: "TERMAG_ALLOWED_ORIGINS",
+  TERMINALZ_BROKER_ORIGIN: "TERMAG_BROKER_ORIGIN",
+  TERMINALZ_DEV_AUTH: "TERMAG_DEV_AUTH",
+  TERMINALZ_DEV_AUTH_EMAIL: "TERMAG_DEV_AUTH_EMAIL",
+  TERMINALZ_PASSWORD: "TERMAG_PASSWORD",
+  TERMINALZ_TRUSTED_NETWORK: "TERMAG_TRUSTED_NETWORK",
+  TERMINALZ_TRUSTED_PROXY: "TERMAG_TRUSTED_PROXY",
+  TERMINALZ_TRUSTED_USER_EMAIL: "TERMAG_TRUSTED_USER_EMAIL",
+};
+for (const [canonical, legacy] of Object.entries(ENV_ALIASES)) {
+  if (process.env[canonical] === undefined && process.env[legacy] !== undefined) {
+    process.env[canonical] = process.env[legacy];
+  }
+  if (process.env[legacy] === undefined && process.env[canonical] !== undefined) {
+    process.env[legacy] = process.env[canonical];
+  }
+}
+
 const next = require("next");
 const { WebSocketServer } = require("ws");
 const { PrismaClient } = require("@prisma/client");
 const { createBroker } = require("./server/broker");
 
-const dev = process.env.NODE_ENV !== "production";
-const hostname = process.env.HOSTNAME || "0.0.0.0";
+const hostname = process.env.TERMINALZ_BIND_HOST || process.env.HOSTNAME || "0.0.0.0";
 const port = Number(process.env.PORT || 3000);
-const trustedNetwork = process.env.TERMAG_TRUSTED_NETWORK === "true";
+const trustedNetwork = process.env.TERMINALZ_TRUSTED_NETWORK === "true";
 
 // In trusted-network mode NextAuth is bypassed entirely, but its module
 // still complains at boot if no secret is set. Provide a stable throwaway
 // so the log is clean. OAuth users must set their own NEXTAUTH_SECRET —
 // they'll see the warning from NextAuth itself if missing.
 if (trustedNetwork && !process.env.NEXTAUTH_SECRET) {
-  process.env.NEXTAUTH_SECRET = "termag-trusted-mode-unused";
+  process.env.NEXTAUTH_SECRET = "terminalz-trusted-mode-unused";
 }
 
 // Misconfiguration check. "trusted-network on + non-loopback bind + no
@@ -27,31 +54,31 @@ function isLoopbackBind(host) {
   return host === "127.0.0.1" || host === "::1" || host === "localhost";
 }
 const exposedTrustedMode =
-  trustedNetwork && !isLoopbackBind(hostname) && !process.env.TERMAG_PASSWORD;
+  trustedNetwork && !isLoopbackBind(hostname) && !process.env.TERMINALZ_PASSWORD;
 if (exposedTrustedMode) {
   const msg =
-    `TERMAG_TRUSTED_NETWORK=true bound to non-loopback (${hostname}) with no TERMAG_PASSWORD. ` +
+    `TERMINALZ_TRUSTED_NETWORK=true bound to non-loopback (${hostname}) with no TERMINALZ_PASSWORD. ` +
     "Anyone who can reach this host can attach to your sessions. Pick one:\n" +
-    "  - set TERMAG_PASSWORD to a long random string (shared-password gate), or\n" +
-    "  - set HOSTNAME=127.0.0.1 (loopback only — front it with Tailscale/Caddy/etc.), or\n" +
-    "  - set TERMAG_TRUSTED_NETWORK=false and configure OAuth (see .env.example).";
+    "  - set TERMINALZ_PASSWORD to a long random string (shared-password gate), or\n" +
+    "  - set TERMINALZ_BIND_HOST=127.0.0.1 (loopback only — front it with Tailscale/Caddy/etc.), or\n" +
+    "  - set TERMINALZ_TRUSTED_NETWORK=false and configure OAuth (see .env.example).";
   if (dev) {
-    console.warn(`\n\x1b[33m[termag] WARNING:\x1b[0m ${msg}\n`);
+    console.warn(`\n\x1b[33m[terminalz] WARNING:\x1b[0m ${msg}\n`);
   } else {
-    console.error(`[termag] refusing to start: ${msg}`);
+    console.error(`[terminalz] refusing to start: ${msg}`);
     process.exit(1);
   }
 }
 if (!trustedNetwork && !process.env.NEXTAUTH_SECRET) {
   console.error(
-    '[termag] refusing to start: TERMAG_TRUSTED_NETWORK is not "true" and NEXTAUTH_SECRET is missing. Generate one with `openssl rand -hex 32`.'
+    '[terminalz] refusing to start: TERMINALZ_TRUSTED_NETWORK is not "true" and NEXTAUTH_SECRET is missing. Generate one with `openssl rand -hex 32`.'
   );
   process.exit(1);
 }
 const app = next({ dev, hostname, port, dir: path.resolve(__dirname) });
 const handle = app.getRequestHandler();
 const prisma = new PrismaClient();
-const pidFile = path.join(__dirname, ".termag-server.json");
+const pidFile = path.join(__dirname, ".terminalz-server.json");
 let httpServer;
 const AGENT_TOKEN_MAX_LENGTH = 512;
 
@@ -113,7 +140,7 @@ function hostFromOrigin(value) {
 function allowedBrowserOriginHosts() {
   const values = [
     process.env.NEXTAUTH_URL,
-    ...(process.env.TERMAG_ALLOWED_ORIGINS || "").split(","),
+    ...(process.env.TERMINALZ_ALLOWED_ORIGINS || "").split(","),
   ];
   return new Set(values.map(hostFromOrigin).filter(Boolean));
 }
@@ -130,7 +157,7 @@ function browserOriginAllowed(req) {
   if (!originHost) {
     return false;
   }
-  // Prefer an explicit allowlist (NEXTAUTH_URL + TERMAG_ALLOWED_ORIGINS).
+  // Prefer an explicit allowlist (NEXTAUTH_URL + TERMINALZ_ALLOWED_ORIGINS).
   // If allowlist matches we're done — trust the deployment config over any
   // header the client sent.
   const allowed = allowedBrowserOriginHosts();
@@ -164,8 +191,8 @@ function warnOriginFallbackOnce() {
   }
   originFallbackWarned = true;
   console.warn(
-    "[termag] WS Origin allowlist is empty — falling back to Host-header comparison. " +
-      "Set NEXTAUTH_URL or TERMAG_ALLOWED_ORIGINS to a known-good host to close this gap."
+    "[terminalz] WS Origin allowlist is empty — falling back to Host-header comparison. " +
+      "Set NEXTAUTH_URL or TERMINALZ_ALLOWED_ORIGINS to a known-good host to close this gap."
   );
 }
 
@@ -199,10 +226,19 @@ app.prepare().then(() => {
     maxPayload: 1024 * 1024,
     perMessageDeflate: {
       threshold: 1024,
-      zlibDeflateOptions: { level: 3 },
+      zlibDeflateOptions: { level: 3, memLevel: 4 },
+      zlibInflateOptions: { chunkSize: 8 * 1024 },
+      serverMaxWindowBits: 12,
+      concurrencyLimit: 8,
       clientNoContextTakeover: true,
       serverNoContextTakeover: true,
     },
+  });
+  wss.on("wsClientError", (error, socket, req) => {
+    console.warn(
+      `[websocket-handshake-error] path=${new URL(req.url || "/", `http://${req.headers.host || "localhost"}`).pathname} message=${String(error?.message || error).slice(0, 256)} extensions=${String(req.headers["sec-websocket-extensions"] || "none").slice(0, 256)} agent=${String(req.headers["user-agent"] || "unknown").slice(0, 160)}`
+    );
+    socket.destroy();
   });
   const broker = createBroker({ prisma, wss });
 
@@ -219,6 +255,9 @@ app.prepare().then(() => {
       return;
     }
     if (url.pathname !== "/api/ws/agent" && !bearerAuthPresent(req) && !browserOriginAllowed(req)) {
+      console.warn(
+        `[browser-ws-reject] path=${url.pathname} origin=${hostFromOrigin(req.headers.origin)} host=${req.headers.host || "none"} agent=${String(req.headers["user-agent"] || "unknown").slice(0, 160)}`
+      );
       rejectUpgrade(socket, 403, "Forbidden");
       return;
     }
@@ -245,6 +284,6 @@ app.prepare().then(() => {
   server.listen(port, hostname, () => {
     writePidFile();
     // eslint-disable-next-line no-console -- startup destination is intentionally stdout
-    console.log(`termag listening on http://${hostname}:${port}`);
+    console.log(`terminalz listening on http://${hostname}:${port}`);
   });
 });

@@ -266,7 +266,7 @@ export function DirectoryBrowser({
             {!showRootPicker && !rootKey && (
               <div className="px-3 py-3 text-xs text-muted">
                 {emptyHint ||
-                  "No roots reported by this device. Set TERMAG_AGENT_ROOTS on the agent and reconnect."}
+                  "No roots reported by this device. Set TERMINALZ_AGENT_ROOTS on the agent and reconnect."}
               </div>
             )}
             {rootKey && listing?.parent && (

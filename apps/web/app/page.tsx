@@ -1,7 +1,7 @@
 import { headers } from "next/headers";
 import { redirect } from "next/navigation";
 import { currentUser, passwordGateEnabled, trustedNetworkEnabled } from "@/lib/auth";
-import { listProjects } from "@/lib/projects";
+import { listProjects } from "@/lib/runtime-projects";
 import { detectPlatformFromUserAgent } from "@/lib/platform";
 import { TermagApp } from "@/components/termag-app";
 

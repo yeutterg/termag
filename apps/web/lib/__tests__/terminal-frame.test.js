@@ -1,6 +1,6 @@
 // broker is CommonJS because it is loaded by the custom Next.js server.
 
-const { parseAgentTerminalFrame } = require("../../server/broker");
+const { coalesceReplayChunks, parseAgentTerminalFrame } = require("../../server/broker");
 
 describe("binary terminal frame", () => {
   it("preserves checkpoint boundaries, sequence, target, and raw bytes", () => {
@@ -30,5 +30,13 @@ describe("binary terminal frame", () => {
     frame.write("TMG2", 0, "ascii");
     frame.writeUInt16BE(513, 9);
     expect(parseAgentTerminalFrame(frame)).toBeNull();
+  });
+
+  it("coalesces small replay frames without changing terminal bytes", () => {
+    const chunks = Array.from({ length: 100 }, (_, index) => Buffer.from(`frame-${index}\n`));
+    const coalesced = [...coalesceReplayChunks(chunks, 256)];
+
+    expect(coalesced.length).toBeLessThan(chunks.length / 2);
+    expect(Buffer.concat(coalesced)).toEqual(Buffer.concat(chunks));
   });
 });

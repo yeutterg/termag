@@ -4,8 +4,6 @@ import { Fragment, lazy, Suspense, useCallback, useEffect, useMemo, useRef, useS
 import {
   Bell,
   BellOff,
-  ChevronLeft,
-  ChevronRight,
   ChevronsLeft,
   ChevronsRight,
   Command as CommandIcon,
@@ -15,9 +13,7 @@ import {
   Menu,
   Monitor,
   Moon,
-  Network,
   Plus,
-  Search,
   Sun,
   Terminal,
   Zap,
@@ -29,9 +25,11 @@ import { useSessionNotifications } from "./use-session-notifications";
 import { PlatformProvider, Shortcut, shortcutSuffix } from "./shortcut";
 import { TabLabel } from "./tab-label";
 import { useTabHistory } from "./use-tab-history";
-import type { AgentDeviceStatus, Project, Tab, TmuxDeviceSession, TmuxWindow } from "./types";
+import type { AgentDeviceStatus, Project, Tab } from "./types";
 import type { Platform } from "@/lib/platform";
 import type { GitOperation, GitOperationResult } from "@/lib/broker";
+import { applyLiveInventoryPatch } from "@/lib/live-inventory-patch";
+import { prefersLowDataMode } from "@/lib/mobile-data";
 import { cn, statusDot } from "@/lib/utils";
 import { HerdrStatusIcon } from "./herdr-status-icon";
 import { MirroredTerminalLayout } from "./mirrored-terminal-layout";
@@ -39,9 +37,6 @@ import { MirroredTerminalLayout } from "./mirrored-terminal-layout";
 // Heavy dialogs are split into their own chunks and loaded only when opened.
 const CommandPalette = lazy(() =>
   import("./command-palette").then(m => ({ default: m.TermagCommandPalette }))
-);
-const SearchPalette = lazy(() =>
-  import("./search-palette").then(m => ({ default: m.SearchPalette }))
 );
 const DevicesDialog = lazy(() =>
   import("./devices-dialog").then(m => ({ default: m.DevicesDialog }))
@@ -54,12 +49,6 @@ const NewDeviceDialog = lazy(() =>
 );
 const NewProjectDialog = lazy(() =>
   import("./new-project-dialog").then(m => ({ default: m.NewProjectDialog }))
-);
-const AttachTmuxDialog = lazy(() =>
-  import("./attach-tmux-dialog").then(m => ({ default: m.AttachTmuxDialog }))
-);
-const NewSshHostDialog = lazy(() =>
-  import("./new-ssh-host-dialog").then(m => ({ default: m.NewSshHostDialog }))
 );
 const BootstrapDeviceDialog = lazy(() =>
   import("./bootstrap-device-dialog").then(m => ({ default: m.BootstrapDeviceDialog }))
@@ -113,7 +102,7 @@ async function updatePowerLease(
   return { active: Boolean(result.state?.active ?? result.state?.isActive) };
 }
 
-function aggregateHerdRStatus(tabs: Tab[]): string {
+function aggregateHerdrStatus(tabs: Tab[]): string {
   const nativeTabStatus = tabs.find(tab => tab.runtimeTabStatus)?.runtimeTabStatus;
   if (nativeTabStatus) {
     return nativeTabStatus;
@@ -133,6 +122,33 @@ function preferredProjectTab(project?: Project | null): Tab | undefined {
   return project?.tabs.find(tab => tab.focused) ?? project?.tabs[0];
 }
 
+type SidebarTabGroup = {
+  id: string;
+  name: string;
+  tabs: Tab[];
+};
+
+function sidebarTabGroups(project: Project): SidebarTabGroup[] {
+  const groups = new Map<string, SidebarTabGroup>();
+  for (const tab of project.tabs) {
+    const id = project.runtime === "herdr" ? tab.runtimeTabId || tab.id : tab.id;
+    const existing = groups.get(id);
+    if (existing) {
+      existing.tabs.push(tab);
+      continue;
+    }
+    groups.set(id, {
+      id,
+      name:
+        project.runtime === "herdr"
+          ? tab.runtimeTabName || tab.runtimePaneName || tab.name
+          : tab.name,
+      tabs: [tab],
+    });
+  }
+  return [...groups.values()];
+}
+
 function preferredProject(projects: Project[]): Project | undefined {
   return projects.find(project => project.runtimeFocused) ?? projects[0];
 }
@@ -142,8 +158,6 @@ function normalizeAgentDevice(input: unknown): AgentDeviceStatus {
     return { name: input, connected: true };
   }
   const raw = (input && typeof input === "object" ? input : {}) as Record<string, unknown>;
-  const rawTmux =
-    raw.tmux && typeof raw.tmux === "object" ? (raw.tmux as Record<string, unknown>) : null;
   return {
     name: String(raw.name || "Local device"),
     connected: raw.connected !== false,
@@ -153,10 +167,8 @@ function normalizeAgentDevice(input: unknown): AgentDeviceStatus {
     uptimeSec: Number.isFinite(Number(raw.uptimeSec)) ? Number(raw.uptimeSec) : undefined,
     memMb: Number.isFinite(Number(raw.memMb)) ? Number(raw.memMb) : undefined,
     memPeakMb: Number.isFinite(Number(raw.memPeakMb)) ? Number(raw.memPeakMb) : undefined,
-    kind: raw.kind === "ssh" ? "ssh" : "agent",
-    lastSeenAt: typeof raw.lastSeenAt === "string" ? raw.lastSeenAt : null,
     deviceId: typeof raw.deviceId === "string" ? raw.deviceId : null,
-    protocolVersion: Number.isFinite(Number(raw.protocolVersion)) ? Number(raw.protocolVersion) : 1,
+    protocolVersion: Number.isFinite(Number(raw.protocolVersion)) ? Number(raw.protocolVersion) : 2,
     capabilities:
       raw.capabilities && typeof raw.capabilities === "object"
         ? (raw.capabilities as Record<string, boolean>)
@@ -168,46 +180,46 @@ function normalizeAgentDevice(input: unknown): AgentDeviceStatus {
       raw.roots && typeof raw.roots === "object"
         ? (raw.roots as Record<string, string>)
         : undefined,
-    tmuxSessions: normalizeTmuxSessions(raw.tmuxSessions ?? rawTmux?.sessions),
   };
 }
 
-function normalizeTmuxSessions(input: unknown): TmuxDeviceSession[] | undefined {
-  if (!Array.isArray(input)) {
-    return undefined;
+function mergeAgentDeviceHealth(devices: AgentDeviceStatus[], input: unknown): AgentDeviceStatus[] {
+  if (!input || typeof input !== "object") {
+    return devices;
   }
-  return input
-    .map((session): TmuxDeviceSession => {
-      const raw = (session && typeof session === "object" ? session : {}) as Record<
-        string,
-        unknown
-      >;
-      return {
-        name: String(raw.name || ""),
-        path: typeof raw.path === "string" ? raw.path : undefined,
-        windowCount: Number.isFinite(Number(raw.windowCount)) ? Number(raw.windowCount) : undefined,
-        windows: normalizeTmuxWindows(raw.windows),
-      };
-    })
-    .filter(session => session.name);
-}
-
-function normalizeTmuxWindows(input: unknown): TmuxWindow[] {
-  if (!Array.isArray(input)) {
-    return [];
+  const raw = input as Record<string, unknown>;
+  if (typeof raw.name !== "string") {
+    return devices;
   }
-  return input
-    .map((window): TmuxWindow => {
-      const raw = (window && typeof window === "object" ? window : {}) as Record<string, unknown>;
-      return {
-        index: Number.isFinite(Number(raw.index)) ? Number(raw.index) : 0,
-        id: String(raw.id || ""),
-        name: String(raw.name || ""),
-        target: String(raw.target || ""),
-        path: typeof raw.path === "string" ? raw.path : undefined,
-      };
-    })
-    .filter(window => window.target || window.id || window.name);
+  const index = devices.findIndex(device => device.name === raw.name);
+  if (index < 0) {
+    return [...devices, normalizeAgentDevice(raw)];
+  }
+  const current = devices[index];
+  const next: AgentDeviceStatus = {
+    ...current,
+    connected: raw.connected !== false,
+    version: typeof raw.version === "string" ? raw.version : null,
+    streamCount: Number.isFinite(Number(raw.streamCount))
+      ? Number(raw.streamCount)
+      : current.streamCount,
+    uptimeSec: Number.isFinite(Number(raw.uptimeSec)) ? Number(raw.uptimeSec) : current.uptimeSec,
+    memMb: Number.isFinite(Number(raw.memMb)) ? Number(raw.memMb) : current.memMb,
+    memPeakMb: Number.isFinite(Number(raw.memPeakMb)) ? Number(raw.memPeakMb) : current.memPeakMb,
+  };
+  if (
+    next.connected === current.connected &&
+    next.version === current.version &&
+    next.streamCount === current.streamCount &&
+    next.uptimeSec === current.uptimeSec &&
+    next.memMb === current.memMb &&
+    next.memPeakMb === current.memPeakMb
+  ) {
+    return devices;
+  }
+  const updated = devices.slice();
+  updated[index] = next;
+  return updated;
 }
 
 type AuthMode = "oauth" | "password" | "trusted";
@@ -236,7 +248,6 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
   // initial decision is made server-side via platform.showShortcuts (false on
   // phones) so there's no flash of an open drawer.
   const [sidebarOpen, setSidebarOpen] = useState(platform.showShortcuts);
-  const [showCtrl, setShowCtrl] = useState(true);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [gitBusy, setGitBusy] = useState(false);
   const [gitResult, setGitResult] = useState<{
@@ -244,20 +255,13 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
     ok: boolean;
     output: string;
   } | null>(null);
-  const [searchOpen, setSearchOpen] = useState(false);
   const [devicesOpen, setDevicesOpen] = useState(false);
   const [focusedDevice, setFocusedDevice] = useState<string | null>(null);
   const [createMenuOpen, setCreateMenuOpen] = useState(false);
   const [projectMenuId, setProjectMenuId] = useState<string | null>(null);
   const [newDeviceOpen, setNewDeviceOpen] = useState(false);
-  const [newSshHostOpen, setNewSshHostOpen] = useState(false);
   const [bootstrapOpen, setBootstrapOpen] = useState(false);
-  // Counter incremented after a successful host add. DevicesDialog
-  // re-runs its parallel fetch whenever this changes, so background
-  // additions show up immediately if Devices happens to be open.
-  const [hostsRefreshTrigger, setHostsRefreshTrigger] = useState(0);
   const [newProjectOpen, setNewProjectOpen] = useState(false);
-  const [attachTmuxOpen, setAttachTmuxOpen] = useState(false);
   const [newProjectDevice, setNewProjectDevice] = useState<string | null>(null);
   const [helpOpen, setHelpOpen] = useState(false);
   const [agentDevices, setAgentDevices] = useState<AgentDeviceStatus[]>([]);
@@ -269,13 +273,6 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
   // Live xterm titles keyed by sessionId. Tools inside the terminal can set
   // a title via OSC 0/2; we mirror it onto the corresponding tab label.
   const [liveTitles, setLiveTitles] = useState<Record<string, string>>({});
-  // Mobile-only: viewing the ctrl shell instead of the active agent tab.
-  // On desktop the ctrl pane is always visible side-by-side, so this state
-  // doesn't change what gets rendered there.
-  const [mobileViewCtrl, setMobileViewCtrl] = useState(false);
-  // Drag-and-drop reorder state for the sidebar project list.
-  const [dragProjectId, setDragProjectId] = useState<string | null>(null);
-  const [dropTarget, setDropTarget] = useState<{ id: string; before: boolean } | null>(null);
 
   const handleSessionTitle = useCallback(
     (sessionId: string, title: string) => {
@@ -307,10 +304,6 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
     () =>
       activeProject?.tabs.find(tab => tab.id === activeTabId) ?? preferredProjectTab(activeProject),
     [activeProject, activeTabId]
-  );
-  const ctrlSession = useMemo(
-    () => activeProject?.sessions.find(session => session.kind === "ctrl"),
-    [activeProject]
   );
   const topTabs = useMemo(() => {
     if (!activeProject || activeProject.runtime !== "herdr") {
@@ -345,15 +338,10 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
   const activeAgentDevice = agentDevices.find(device => device.name === activeProject?.rootKey);
   const powerSupported = Boolean(
     activeAgentDevice &&
-    activeAgentDevice.kind !== "ssh" &&
-    (activeAgentDevice.protocolVersion ?? 1) >= 2 &&
+    activeAgentDevice.protocolVersion === 2 &&
     activeAgentDevice.capabilities?.powerPolicy
   );
-  const gitSupported = Boolean(
-    activeAgentDevice &&
-    activeAgentDevice.kind !== "ssh" &&
-    activeAgentDevice.capabilities?.gitOperations
-  );
+  const gitSupported = Boolean(activeAgentDevice && activeAgentDevice.capabilities?.gitOperations);
   const ownsCurrentPowerLease = Boolean(
     powerSupported && activeProject && caffeinateLeaseDevice === activeProject.rootKey
   );
@@ -456,12 +444,10 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
       // out (Esc) or into the palette (⌘K) regardless of focus.
       if (event.key === "Escape") {
         setPaletteOpen(false);
-        setSearchOpen(false);
         setDevicesOpen(false);
         setFocusedDevice(null);
         setNewDeviceOpen(false);
         setNewProjectOpen(false);
-        setAttachTmuxOpen(false);
         setCreateMenuOpen(false);
         setProjectMenuId(null);
         setHelpOpen(false);
@@ -494,28 +480,6 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
           }
         }
         return;
-      }
-
-      if (mod && event.shiftKey && event.key.toLowerCase() === "f") {
-        event.preventDefault();
-        setSearchOpen(true);
-        return;
-      }
-
-      // `/` opens the search palette when nothing typeable has focus
-      // (vim/help convention). xterm.js focuses a hidden textarea while
-      // the terminal is active — we treat that as typing too and skip,
-      // so `/` inside a shell still works normally. The Mod+Shift+F
-      // shortcut stays as the always-works alternative.
-      if (!mod && !event.altKey && !event.shiftKey && event.key === "/") {
-        const target = event.target as HTMLElement | null;
-        const tagName = target?.tagName?.toLowerCase();
-        const isTyping = tagName === "input" || tagName === "textarea" || target?.isContentEditable;
-        if (!isTyping) {
-          event.preventDefault();
-          setSearchOpen(true);
-          return;
-        }
       }
 
       // Note: ⌃Tab / ⌃⇧Tab and ⌘W are intentionally NOT bound — every
@@ -579,20 +543,36 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
   useEffect(() => {
     const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
     const url = `${protocol}//${window.location.host}/api/ws/status`;
+    const lowData = prefersLowDataMode();
     let ws: WebSocket | null = null;
     let retryTimer: ReturnType<typeof setTimeout> | null = null;
     let attempts = 0;
     let cancelled = false;
+    let suspended = lowData && document.visibilityState === "hidden";
+    let needsProjectReconcile = suspended;
 
     const connect = () => {
-      if (cancelled) {
+      if (
+        cancelled ||
+        suspended ||
+        ws?.readyState === WebSocket.OPEN ||
+        ws?.readyState === WebSocket.CONNECTING
+      ) {
         return;
+      }
+      if (retryTimer) {
+        clearTimeout(retryTimer);
+        retryTimer = null;
       }
       const socket = new WebSocket(url);
       ws = socket;
       socket.onopen = () => {
         attempts = 0;
         socket.send(JSON.stringify({ type: "subscribe-devices" }));
+        if (needsProjectReconcile) {
+          needsProjectReconcile = false;
+          window.dispatchEvent(new CustomEvent("termag:refresh-projects"));
+        }
       };
       socket.onmessage = event => {
         try {
@@ -601,59 +581,27 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
             if (Array.isArray(msg.devices)) {
               setAgentDevices(msg.devices.map(normalizeAgentDevice));
             }
+          } else if (msg.type === "device-health") {
+            setAgentDevices(current => mergeAgentDeviceHealth(current, msg.device));
+          } else if (msg.type === "inventory-patch") {
+            setProjects(current => applyLiveInventoryPatch(current, msg));
           } else if (msg.type === "refresh") {
             window.dispatchEvent(new CustomEvent("termag:refresh-projects"));
-          } else if (msg.type === "projects.patch" && Array.isArray(msg.projects)) {
-            const byProject = new Map(
-              msg.projects.map((patch: { id: string }) => [patch.id, patch])
-            );
-            setProjects(current =>
-              current.map(project => {
-                const patch = byProject.get(project.id) as
-                  | (Omit<Partial<Project>, "tabs"> & {
-                      tabs?: Array<Partial<Tab> & { id: string; sessionStatus?: string }>;
-                    })
-                  | undefined;
-                if (!patch) {
-                  return project;
-                }
-                const { tabs: tabPatches = [], ...projectFields } = patch;
-                const byTab = new Map(tabPatches.map(tabPatch => [tabPatch.id, tabPatch]));
-                return {
-                  ...project,
-                  ...projectFields,
-                  tabs: project.tabs
-                    .map(tab => {
-                      const tabPatch = byTab.get(tab.id);
-                      if (!tabPatch) {
-                        return tab;
-                      }
-                      const { sessionStatus, ...tabFields } = tabPatch;
-                      return {
-                        ...tab,
-                        ...tabFields,
-                        session:
-                          tab.session && sessionStatus
-                            ? { ...tab.session, status: sessionStatus }
-                            : tab.session,
-                      };
-                    })
-                    .sort((left, right) => left.ordinal - right.ordinal),
-                };
-              })
-            );
           }
         } catch {
           // ignore malformed payloads
         }
       };
       socket.onclose = () => {
-        if (cancelled) {
+        if (cancelled || suspended || ws !== socket) {
           return;
         }
+        ws = null;
+        needsProjectReconcile = true;
         setAgentDevices(current => current.map(device => ({ ...device, connected: false })));
         attempts += 1;
-        const delay = Math.min(15000, 500 * 2 ** Math.min(attempts, 5));
+        const ceiling = Math.min(15_000, 500 * 2 ** Math.min(attempts, 5));
+        const delay = Math.round(ceiling * (0.5 + Math.random() * 0.5));
         retryTimer = setTimeout(connect, delay);
       };
       socket.onerror = () => {
@@ -661,10 +609,35 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
       };
     };
 
+    const reconnectNow = () => {
+      if (document.visibilityState === "visible") {
+        connect();
+      }
+    };
+    const onVisibility = () => {
+      if (lowData && document.visibilityState === "hidden") {
+        suspended = true;
+        needsProjectReconcile = true;
+        if (retryTimer) {
+          clearTimeout(retryTimer);
+          retryTimer = null;
+        }
+        const socket = ws;
+        ws = null;
+        socket?.close(1000, "page hidden");
+        return;
+      }
+      suspended = false;
+      connect();
+    };
     connect();
+    window.addEventListener("online", reconnectNow);
+    document.addEventListener("visibilitychange", onVisibility);
 
     return () => {
       cancelled = true;
+      window.removeEventListener("online", reconnectNow);
+      document.removeEventListener("visibilitychange", onVisibility);
       if (retryTimer) {
         clearTimeout(retryTimer);
       }
@@ -704,10 +677,9 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
             state.nextTabId = undefined;
             setProjects(next);
             const liveSessionIds = new Set(
-              next.flatMap(project => [
-                ...project.sessions.map(session => session.id),
-                ...project.tabs.flatMap(tab => (tab.session ? [tab.session.id] : [])),
-              ])
+              next.flatMap(project =>
+                project.tabs.flatMap(tab => (tab.session ? [tab.session.id] : []))
+              )
             );
             setLiveTitles(current => {
               const entries = Object.entries(current).filter(([sessionId]) =>
@@ -761,62 +733,15 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
     };
   }, [reloadProjects]);
 
-  const reorderProjects = useCallback(
-    async (sourceId: string, targetId: string, before: boolean) => {
-      if (sourceId === targetId) {
-        return;
-      }
-      let nextOrder: string[] = [];
-      setProjects(current => {
-        const fromIdx = current.findIndex(p => p.id === sourceId);
-        if (fromIdx < 0) {
-          return current;
-        }
-        const reordered = [...current];
-        const [source] = reordered.splice(fromIdx, 1);
-        let toIdx = reordered.findIndex(p => p.id === targetId);
-        if (toIdx < 0) {
-          toIdx = reordered.length;
-        } else if (!before) {
-          toIdx += 1;
-        }
-        reordered.splice(toIdx, 0, source);
-        nextOrder = reordered.map(p => p.id);
-        return reordered;
-      });
-      if (nextOrder.length === 0) {
-        return;
-      }
-      const res = await fetch("/api/projects/order", {
-        method: "PATCH",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ projectIds: nextOrder }),
-      });
-      if (!res.ok) {
-        console.error(
-          "[termag] reorderProjects failed",
-          res.status,
-          await res.text().catch(() => "")
-        );
-        await reloadProjects();
-      }
-    },
-    [reloadProjects, setProjects]
-  );
-
   const createProject = useCallback(
     async (input: {
       deviceName: string;
       rootKey: string;
       relativePath: string;
       name?: string;
-      agentTypes: string[];
-      customAgents: string[];
-      runtime?: "herdr" | "tmux";
+      runtime: "herdr" | "tmux";
       runtimeSessionId?: string;
     }) => {
-      const customAgents = input.customAgents.map(spawnCommand => ({ spawnCommand }));
-      const builtinAgents = input.agentTypes.map(agentType => ({ agentType }));
       const res = await fetch("/api/projects", {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -825,7 +750,6 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
           deviceName: input.deviceName,
           rootKey: input.rootKey,
           relativePath: input.relativePath,
-          agents: [...customAgents, ...builtinAgents],
           runtime: input.runtime,
           runtimeSessionId: input.runtimeSessionId,
         }),
@@ -834,43 +758,18 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
         const body = (await res.json().catch(() => null)) as { error?: string } | null;
         return { ok: false, error: body?.error };
       }
-      const project = await res.json();
-      await reloadProjects(project.id, project.tabs?.[0]?.id);
       return { ok: true };
     },
-    [reloadProjects]
+    []
   );
 
-  const attachTmuxSession = useCallback(
-    async (input: { rootKey: string; sessionName: string }) => {
-      const res = await fetch("/api/tmux/attach", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(input),
-      });
-      if (!res.ok) {
-        const body = (await res.json().catch(() => null)) as { error?: string } | null;
-        return { ok: false, error: body?.error };
-      }
-      const project = await res.json();
-      await reloadProjects(project.id, project.tabs?.[0]?.id);
-      return { ok: true };
-    },
-    [reloadProjects]
-  );
-
-  const createTab = useCallback(
-    async (projectId: string) => {
-      const res = await fetch(`/api/projects/${projectId}/tabs`, { method: "POST" });
-      if (!res.ok) {
-        console.error("[termag] createTab failed", res.status, await res.text().catch(() => ""));
-        return;
-      }
-      const tab = await res.json();
-      await reloadProjects(projectId, tab.id);
-    },
-    [reloadProjects]
-  );
+  const createTab = useCallback(async (projectId: string) => {
+    const res = await fetch(`/api/projects/${projectId}/tabs`, { method: "POST" });
+    if (!res.ok) {
+      console.error("[termag] createTab failed", res.status, await res.text().catch(() => ""));
+      return;
+    }
+  }, []);
 
   const renameProject = useCallback(
     async (projectId: string, name: string) => {
@@ -1213,17 +1112,9 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
         if (hierarchy) {
           return hierarchy;
         }
-        // Runtime mirrors follow the authoritative local order. Ordinary
-        // cloud-managed projects retain the user's drag-and-drop position.
-        if (left.mirrored || right.mirrored) {
-          return (
-            (left.runtimeOrdinal ?? 0) - (right.runtimeOrdinal ?? 0) ||
-            left.name.localeCompare(right.name)
-          );
-        }
         return (
-          (left.position ?? Number.POSITIVE_INFINITY) -
-            (right.position ?? Number.POSITIVE_INFINITY) || left.name.localeCompare(right.name)
+          (left.runtimeOrdinal ?? 0) - (right.runtimeOrdinal ?? 0) ||
+          left.name.localeCompare(right.name)
         );
       }),
     ]) as Array<[string, Project[]]>;
@@ -1252,12 +1143,14 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
   }, [activeProject, createTab]);
 
   const onCommandKill = useCallback(() => {
-    if (activeTab?.session) {
-      window.dispatchEvent(
-        new CustomEvent("termag:kill-session", { detail: { sessionId: activeTab.session.id } })
+    if (activeProject && activeTab) {
+      void closeTab(
+        activeProject.id,
+        activeTab.id,
+        activeProject.runtime === "herdr" ? "pane" : "tab"
       );
     }
-  }, [activeTab]);
+  }, [activeProject, activeTab, closeTab]);
 
   const onGitOperation = useCallback(
     async (operation: GitOperation) => {
@@ -1352,7 +1245,7 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
         >
           <div className="flex h-14 items-center justify-between px-3">
             <span className="flex items-baseline gap-1.5 px-1">
-              <span className="text-sm font-semibold tracking-tight">termag</span>
+              <span className="text-sm font-semibold tracking-tight">Terminalz</span>
               <span className="text-sm font-normal text-muted">next</span>
             </span>
             <div className="relative flex items-center gap-0.5">
@@ -1361,8 +1254,8 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
                 className="grid h-11 w-11 place-items-center rounded-md text-muted hover:bg-panel2 hover:text-text md:h-7 md:w-7"
                 onPointerDown={event => event.stopPropagation()}
                 onClick={() => setCreateMenuOpen(value => !value)}
-                title="New device, session, or tmux connection"
-                aria-label="New device, session, or tmux connection"
+                title="New machine or terminal"
+                aria-label="New machine or terminal"
               >
                 <Plus className="h-4 w-4" />
               </button>
@@ -1379,17 +1272,6 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
                     <FolderPlus className="h-3.5 w-3.5" />
                     <span className="flex-1 whitespace-nowrap">New session</span>
                     <Shortcut keys={["mod", "shift", "P"]} />
-                  </button>
-                  <button
-                    type="button"
-                    className="flex h-8 w-full items-center gap-2 rounded px-2 text-left text-sm text-muted hover:bg-panel2 hover:text-text"
-                    onClick={() => {
-                      setCreateMenuOpen(false);
-                      setAttachTmuxOpen(true);
-                    }}
-                  >
-                    <Terminal className="h-3.5 w-3.5" />
-                    <span className="whitespace-nowrap">Connect tmux session</span>
                   </button>
                   <div className="my-1 h-px bg-line" />
                   <button
@@ -1413,17 +1295,6 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
                   >
                     <Laptop className="h-3.5 w-3.5" />
                     <span className="whitespace-nowrap">New device (manual)</span>
-                  </button>
-                  <button
-                    type="button"
-                    className="flex h-8 w-full items-center gap-2 rounded px-2 text-left text-sm text-muted hover:bg-panel2 hover:text-text"
-                    onClick={() => {
-                      setCreateMenuOpen(false);
-                      setNewSshHostOpen(true);
-                    }}
-                  >
-                    <Network className="h-3.5 w-3.5" />
-                    <span className="whitespace-nowrap">New SSH host</span>
                   </button>
                 </div>
               )}
@@ -1468,91 +1339,32 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
                     )}
                     {groupProjects.map((project, projectIndex) => {
                       const previousProject = groupProjects[projectIndex - 1];
-                      const runtimeChanged = previousProject?.runtime !== project.runtime;
                       const runtimeSessionChanged =
-                        runtimeChanged ||
+                        previousProject?.runtime !== project.runtime ||
                         previousProject?.runtimeSessionId !== project.runtimeSessionId;
                       const isActiveProject = project.id === activeProject?.id;
-                      const isDragging = dragProjectId === project.id;
-                      const dropBefore = dropTarget?.id === project.id && dropTarget.before;
-                      const dropAfter = dropTarget?.id === project.id && !dropTarget.before;
+                      const tabGroups = sidebarTabGroups(project);
                       return (
                         <Fragment key={project.id}>
-                          {runtimeChanged && (
-                            <div className="mt-2 flex h-5 items-center gap-1.5 px-2 text-[10px] font-semibold uppercase tracking-wider text-muted">
-                              <Terminal className="h-3 w-3" />
-                              {project.runtime === "herdr" ? "HerdR" : project.runtime || "tmux"}
-                            </div>
-                          )}
-                          {project.runtime === "herdr" && runtimeSessionChanged && (
-                            <div className="h-5 truncate pl-5 pr-2 text-[11px] font-medium text-muted">
-                              {project.runtimeSessionName || project.runtimeSessionId || "default"}
+                          {runtimeSessionChanged && (
+                            <div className="mt-1 flex h-5 items-center gap-1.5 truncate px-2 text-[10px] font-semibold uppercase tracking-wider text-muted">
+                              <Terminal className="h-3 w-3 shrink-0" />
+                              <span className="truncate">
+                                {project.runtime === "herdr" ? "Herdr" : project.runtime || "tmux"}
+                                <span className="px-1 opacity-50">·</span>
+                                {project.runtimeSessionName ||
+                                  project.runtimeSessionId ||
+                                  "default"}
+                              </span>
                             </div>
                           )}
                           <div
-                            draggable={!project.mirrored}
                             style={{ contentVisibility: "auto", containIntrinsicSize: "auto 80px" }}
-                            onDragStart={event => {
-                              if (project.mirrored) {
-                                event.preventDefault();
-                                return;
-                              }
-                              setDragProjectId(project.id);
-                              event.dataTransfer.effectAllowed = "move";
-                              event.dataTransfer.setData("text/plain", project.id);
-                            }}
-                            onDragOver={event => {
-                              if (
-                                project.mirrored ||
-                                !dragProjectId ||
-                                dragProjectId === project.id
-                              ) {
-                                return;
-                              }
-                              event.preventDefault();
-                              event.dataTransfer.dropEffect = "move";
-                              const rect = (
-                                event.currentTarget as HTMLDivElement
-                              ).getBoundingClientRect();
-                              const before = event.clientY < rect.top + rect.height / 2;
-                              if (dropTarget?.id !== project.id || dropTarget.before !== before) {
-                                setDropTarget({ id: project.id, before });
-                              }
-                            }}
-                            onDragLeave={() => {
-                              if (dropTarget?.id === project.id) {
-                                setDropTarget(null);
-                              }
-                            }}
-                            onDrop={event => {
-                              if (!dragProjectId) {
-                                return;
-                              }
-                              event.preventDefault();
-                              const rect = (
-                                event.currentTarget as HTMLDivElement
-                              ).getBoundingClientRect();
-                              const before = event.clientY < rect.top + rect.height / 2;
-                              reorderProjects(dragProjectId, project.id, before);
-                              setDragProjectId(null);
-                              setDropTarget(null);
-                            }}
-                            onDragEnd={() => {
-                              setDragProjectId(null);
-                              setDropTarget(null);
-                            }}
-                            className={cn(
-                              "relative",
-                              isDragging && "opacity-40",
-                              dropBefore &&
-                                "before:absolute before:inset-x-2 before:-top-px before:h-px before:bg-text",
-                              dropAfter &&
-                                "after:absolute after:inset-x-2 after:-bottom-px after:h-px after:bg-text"
-                            )}
+                            className="relative"
                           >
                             <div
                               className={cn(
-                                "group/project flex h-9 w-full items-center rounded-md hover:bg-panel2",
+                                "group/project flex h-8 w-full items-center rounded-md hover:bg-panel2",
                                 isActiveProject && "bg-panel2 shadow-sm"
                               )}
                             >
@@ -1649,133 +1461,179 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
                             )}
                             {project.tabs.length > 0 && (
                               <div className="mt-0.5 space-y-0.5 pl-4">
-                                {project.tabs.map((tab, tabIndex) => {
-                                  const previousTab = project.tabs[tabIndex - 1];
-                                  const runtimeTabChanged =
-                                    previousTab?.runtimeTabId !== tab.runtimeTabId;
-                                  const isActiveTab = isActiveProject && tab.id === activeTab?.id;
-                                  const tabManaged = tab.session?.tmuxManaged !== false;
+                                {tabGroups.map(tabGroup => {
+                                  const hasMultiplePanes = tabGroup.tabs.length > 1;
+                                  const representative =
+                                    tabGroup.tabs.find(tab => tab.focused) ?? tabGroup.tabs[0];
+                                  const groupIsActive =
+                                    isActiveProject &&
+                                    tabGroup.tabs.some(tab => tab.id === activeTab?.id);
                                   return (
-                                    <Fragment key={tab.id}>
-                                      {tab.runtimeTabId && runtimeTabChanged && (
-                                        <div className="flex h-5 items-center gap-1.5 truncate px-2 text-[10px] font-medium text-muted">
+                                    <Fragment key={tabGroup.id}>
+                                      {hasMultiplePanes && (
+                                        <div
+                                          role="button"
+                                          tabIndex={0}
+                                          className={cn(
+                                            "group/native-tab flex h-6 cursor-pointer items-center gap-1.5 rounded px-2 text-[10px] font-medium text-muted hover:bg-panel2 hover:text-text",
+                                            groupIsActive && "text-text"
+                                          )}
+                                          onClick={() => selectTab(project.id, representative.id)}
+                                          onKeyDown={event => {
+                                            if (event.key === "Enter" || event.key === " ") {
+                                              event.preventDefault();
+                                              selectTab(project.id, representative.id);
+                                            }
+                                          }}
+                                        >
                                           <span className="font-mono opacity-70">↳</span>
-                                          {tab.runtimeTabName || "Terminal"}
+                                          <span className="min-w-0 flex-1 truncate">
+                                            {tabGroup.name}
+                                          </span>
+                                          <span className="shrink-0 tabular-nums opacity-60">
+                                            {tabGroup.tabs.length}
+                                          </span>
+                                          {tabGroups.length > 1 && (
+                                            <button
+                                              type="button"
+                                              className="grid h-4 w-4 shrink-0 place-items-center rounded opacity-0 hover:bg-bg group-hover/native-tab:opacity-100 focus:opacity-100"
+                                              title="Close Herdr tab"
+                                              onClick={event => {
+                                                event.stopPropagation();
+                                                closeTab(project.id, representative.id, "tab");
+                                              }}
+                                            >
+                                              ×
+                                            </button>
+                                          )}
                                         </div>
                                       )}
-                                      <div
-                                        role="button"
-                                        tabIndex={0}
-                                        className={cn(
-                                          "group/tab flex h-10 w-full cursor-pointer items-center gap-2 rounded-md px-2 text-left text-xs hover:bg-panel2 md:h-7",
-                                          isActiveTab && "bg-panel2 shadow-sm"
-                                        )}
-                                        onClick={() => selectTab(project.id, tab.id)}
-                                        onKeyDown={event => {
-                                          if (event.key === "Enter" || event.key === " ") {
-                                            event.preventDefault();
-                                            selectTab(project.id, tab.id);
-                                          }
-                                        }}
-                                      >
-                                        {project.runtime === "herdr" ? (
-                                          <HerdrStatusIcon
-                                            status={
-                                              connectedDeviceNames.has(project.rootKey)
-                                                ? tab.status
-                                                : "offline"
-                                            }
-                                            variant={herdRIndicatorVariant(project)}
-                                            className="h-3 w-3 text-xs"
-                                          />
-                                        ) : (
-                                          <span
+                                      {tabGroup.tabs.map(tab => {
+                                        const isActiveTab =
+                                          isActiveProject && tab.id === activeTab?.id;
+                                        return (
+                                          <div
+                                            key={tab.id}
+                                            role="button"
+                                            tabIndex={0}
                                             className={cn(
-                                              "h-1.5 w-1.5 shrink-0 rounded-full",
-                                              statusDot(
-                                                connectedDeviceNames.has(project.rootKey)
-                                                  ? tab.status
-                                                  : "offline"
-                                              )
+                                              "group/tab flex h-10 w-full cursor-pointer items-center gap-2 rounded-md px-2 text-left text-xs hover:bg-panel2 md:h-7",
+                                              hasMultiplePanes && "ml-3 w-[calc(100%-0.75rem)]",
+                                              isActiveTab && "bg-panel2 shadow-sm"
                                             )}
-                                          />
-                                        )}
-                                        <TabLabel
-                                          name={tab.runtimePaneName || tab.name}
-                                          liveTitle={
-                                            tab.session ? liveTitles[tab.session.id] : null
-                                          }
-                                          className="min-w-0 flex-1 truncate"
-                                          onRename={next =>
-                                            renameTab(
-                                              project.id,
-                                              tab.id,
-                                              next,
-                                              project.runtime === "herdr" ? "pane" : "tab"
-                                            )
-                                          }
-                                        />
-                                        {/* Per-tab notification toggle. First
+                                            onClick={() => selectTab(project.id, tab.id)}
+                                            onKeyDown={event => {
+                                              if (event.key === "Enter" || event.key === " ") {
+                                                event.preventDefault();
+                                                selectTab(project.id, tab.id);
+                                              }
+                                            }}
+                                          >
+                                            {project.runtime === "herdr" ? (
+                                              <HerdrStatusIcon
+                                                status={
+                                                  connectedDeviceNames.has(project.rootKey)
+                                                    ? hasMultiplePanes
+                                                      ? tab.status
+                                                      : aggregateHerdrStatus(tabGroup.tabs)
+                                                    : "offline"
+                                                }
+                                                variant={herdRIndicatorVariant(project)}
+                                                className="h-3 w-3 text-xs"
+                                              />
+                                            ) : (
+                                              <span
+                                                className={cn(
+                                                  "h-1.5 w-1.5 shrink-0 rounded-full",
+                                                  statusDot(
+                                                    connectedDeviceNames.has(project.rootKey)
+                                                      ? tab.status
+                                                      : "offline"
+                                                  )
+                                                )}
+                                              />
+                                            )}
+                                            <TabLabel
+                                              name={
+                                                hasMultiplePanes
+                                                  ? tab.runtimePaneName || tab.name
+                                                  : tabGroup.name
+                                              }
+                                              liveTitle={
+                                                tab.session ? liveTitles[tab.session.id] : null
+                                              }
+                                              className="min-w-0 flex-1 truncate"
+                                              onRename={next =>
+                                                renameTab(
+                                                  project.id,
+                                                  tab.id,
+                                                  next,
+                                                  project.runtime === "herdr" && hasMultiplePanes
+                                                    ? "pane"
+                                                    : "tab"
+                                                )
+                                              }
+                                            />
+                                            {/* Per-tab notification toggle. First
                                       click on any tab requests Notification
                                       permission (cached after that). The
                                       hook then watches for working/waiting
                                       → idle/error transitions and fires a
                                       browser notification for subscribed
                                       tabs only. */}
-                                        {notify.permission !== "unsupported" && (
-                                          <button
-                                            type="button"
-                                            className={cn(
-                                              "grid h-9 w-9 shrink-0 place-items-center rounded text-muted hover:bg-bg hover:text-text md:h-4 md:w-4",
-                                              notify.subscribed.has(tab.id)
-                                                ? "opacity-100 text-accent"
-                                                : "opacity-100 md:opacity-0 md:group-hover/tab:opacity-100"
+                                            {notify.permission !== "unsupported" && (
+                                              <button
+                                                type="button"
+                                                className={cn(
+                                                  "grid h-9 w-9 shrink-0 place-items-center rounded text-muted hover:bg-bg hover:text-text md:h-4 md:w-4",
+                                                  notify.subscribed.has(tab.id)
+                                                    ? "opacity-100 text-accent"
+                                                    : "opacity-100 md:opacity-0 md:group-hover/tab:opacity-100"
+                                                )}
+                                                title={
+                                                  notify.subscribed.has(tab.id)
+                                                    ? "Stop notifying when this session goes idle/errors"
+                                                    : "Notify me when this session goes idle or errors"
+                                                }
+                                                onClick={async event => {
+                                                  event.stopPropagation();
+                                                  if (notify.permission === "default") {
+                                                    await notify.requestPermission();
+                                                  }
+                                                  notify.toggle(tab.id);
+                                                }}
+                                              >
+                                                {notify.subscribed.has(tab.id) ? (
+                                                  <Bell className="h-3 w-3" />
+                                                ) : (
+                                                  <BellOff className="h-3 w-3" />
+                                                )}
+                                              </button>
                                             )}
-                                            title={
-                                              notify.subscribed.has(tab.id)
-                                                ? "Stop notifying when this session goes idle/errors"
-                                                : "Notify me when this session goes idle or errors"
-                                            }
-                                            onClick={async event => {
-                                              event.stopPropagation();
-                                              if (notify.permission === "default") {
-                                                await notify.requestPermission();
-                                              }
-                                              notify.toggle(tab.id);
-                                            }}
-                                          >
-                                            {notify.subscribed.has(tab.id) ? (
-                                              <Bell className="h-3 w-3" />
-                                            ) : (
-                                              <BellOff className="h-3 w-3" />
-                                            )}
-                                          </button>
-                                        )}
-                                        {project.tabs.length > 1 && (
-                                          <button
-                                            type="button"
-                                            className="grid h-9 w-9 shrink-0 place-items-center rounded text-muted opacity-100 hover:bg-bg hover:text-text md:h-4 md:w-4 md:opacity-0 md:group-hover/tab:opacity-100"
-                                            title={
-                                              tabManaged ? "Delete (kill tmux window)" : "Detach"
-                                            }
-                                            onClick={event => {
-                                              event.stopPropagation();
-                                              const paneCount = project.tabs.filter(
-                                                item => item.runtimeTabId === tab.runtimeTabId
-                                              ).length;
-                                              closeTab(
-                                                project.id,
-                                                tab.id,
-                                                project.runtime === "herdr" && paneCount > 1
-                                                  ? "pane"
-                                                  : "tab"
-                                              );
-                                            }}
-                                          >
-                                            ×
-                                          </button>
-                                        )}
-                                      </div>
+                                            {project.tabs.length > 1 &&
+                                              (!hasMultiplePanes || tabGroup.tabs.length > 1) && (
+                                                <button
+                                                  type="button"
+                                                  className="grid h-9 w-9 shrink-0 place-items-center rounded text-muted opacity-100 hover:bg-bg hover:text-text md:h-4 md:w-4 md:opacity-0 md:group-hover/tab:opacity-100"
+                                                  title="Close local tab"
+                                                  onClick={event => {
+                                                    event.stopPropagation();
+                                                    closeTab(
+                                                      project.id,
+                                                      tab.id,
+                                                      project.runtime === "herdr" &&
+                                                        hasMultiplePanes
+                                                        ? "pane"
+                                                        : "tab"
+                                                    );
+                                                  }}
+                                                >
+                                                  ×
+                                                </button>
+                                              )}
+                                          </div>
+                                        );
+                                      })}
                                     </Fragment>
                                   );
                                 })}
@@ -1867,23 +1725,6 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
             </div>
             <div className="flex items-center gap-1">
               <IconButton
-                title={`Search scrollback${shortcutSuffix(["mod", "shift", "F"], platform)}`}
-                onClick={() => setSearchOpen(true)}
-              >
-                <Search className="h-4 w-4" />
-              </IconButton>
-              <IconButton
-                title="Toggle ctrl pane"
-                onClick={() => setShowCtrl(value => !value)}
-                className="hidden md:grid"
-              >
-                {showCtrl ? (
-                  <ChevronRight className="h-4 w-4" />
-                ) : (
-                  <ChevronLeft className="h-4 w-4" />
-                )}
-              </IconButton>
-              <IconButton
                 title={`Cycle theme${shortcutSuffix(["mod", "."], platform)}`}
                 onClick={cycleTheme}
               >
@@ -1914,11 +1755,8 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
 
           <div className="flex min-h-0 flex-1 gap-3 bg-bg p-2 md:p-3">
             {activeTab?.session && activeProject ? (
-              // Agent pane: tabs become the pane's top edge — active tab merges
-              // with the canvas below it. On mobile, a ctrl pseudo-tab is appended
-              // so the user can swap the single visible terminal to the project's
-              // ctrl shell. On desktop the ctrl shell is the side pane and the
-              // pseudo-tab is hidden.
+              // Tabs become the terminal's top edge. Their order and grouping are
+              // taken directly from the local runtime inventory.
               <section className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-lg border border-line bg-bg">
                 <div className="flex h-12 items-end gap-px overflow-x-auto bg-panel pl-1.5 pr-1 md:h-9">
                   {topTabs.map(tab => {
@@ -1926,11 +1764,9 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
                       ? activeProject.tabs.filter(item => item.runtimeTabId === tab.runtimeTabId)
                       : [tab];
                     const preferredPane = paneGroup.find(item => item.focused) ?? paneGroup[0];
-                    const isActive =
-                      (tab.runtimeTabId
-                        ? tab.runtimeTabId === activeTab.runtimeTabId
-                        : tab.id === activeTab.id) && !mobileViewCtrl;
-                    const tabManaged = tab.session?.tmuxManaged !== false;
+                    const isActive = tab.runtimeTabId
+                      ? tab.runtimeTabId === activeTab.runtimeTabId
+                      : tab.id === activeTab.id;
                     const displayName = tab.runtimeTabName || tab.name;
                     return (
                       <div
@@ -1942,13 +1778,11 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
                           isActive ? "bg-bg text-text" : "text-muted hover:text-text"
                         )}
                         onClick={() => {
-                          setMobileViewCtrl(false);
                           selectTab(activeProject.id, preferredPane.id);
                         }}
                         onKeyDown={event => {
                           if (event.key === "Enter" || event.key === " ") {
                             event.preventDefault();
-                            setMobileViewCtrl(false);
                             selectTab(activeProject.id, preferredPane.id);
                           }
                         }}
@@ -1956,7 +1790,7 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
                         {activeProject.runtime === "herdr" ? (
                           <HerdrStatusIcon
                             status={
-                              activeDeviceConnected ? aggregateHerdRStatus(paneGroup) : "offline"
+                              activeDeviceConnected ? aggregateHerdrStatus(paneGroup) : "offline"
                             }
                             variant={herdRIndicatorVariant(activeProject)}
                             className="h-3 w-3 text-xs"
@@ -1983,7 +1817,7 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
                           <button
                             type="button"
                             className="grid h-11 w-11 shrink-0 place-items-center rounded text-muted opacity-100 hover:bg-panel2 hover:text-text md:h-4 md:w-4 md:opacity-0 md:group-hover/tab:opacity-100"
-                            title={tabManaged ? "Delete (kill tmux window)" : "Detach"}
+                            title="Close local tab"
                             onClick={event => {
                               event.stopPropagation();
                               closeTab(activeProject.id, tab.id, "tab");
@@ -2004,46 +1838,9 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
                     <Plus className="h-3.5 w-3.5" />
                     <Shortcut keys={["mod", "enter"]} />
                   </button>
-                  {/* ctrl pseudo-tab — mobile only */}
-                  {ctrlSession && (
-                    <div
-                      role="button"
-                      tabIndex={0}
-                      className={cn(
-                        "group/tab ml-auto flex h-11 cursor-pointer items-center gap-2 rounded-t-md px-3 text-xs md:hidden",
-                        mobileViewCtrl ? "bg-bg text-text" : "text-muted hover:text-text"
-                      )}
-                      onClick={() => setMobileViewCtrl(true)}
-                      onKeyDown={event => {
-                        if (event.key === "Enter" || event.key === " ") {
-                          event.preventDefault();
-                          setMobileViewCtrl(true);
-                        }
-                      }}
-                      title="Project ctrl shell"
-                    >
-                      <span
-                        className={cn(
-                          "h-1.5 w-1.5 shrink-0 rounded-full",
-                          statusDot(activeDeviceConnected ? ctrlSession.status : "sleeping")
-                        )}
-                      />
-                      <span className="font-mono">ctrl</span>
-                    </div>
-                  )}
                 </div>
                 <div className="flex min-h-0 flex-1">
-                  {mobileViewCtrl && ctrlSession ? (
-                    <TerminalPane
-                      key={ctrlSession.id}
-                      active
-                      sessionId={ctrlSession.id}
-                      title={liveTitles[ctrlSession.id] || "ctrl"}
-                      status={activeDeviceConnected ? ctrlSession.status : "sleeping"}
-                      onTitleChange={handleSessionTitle}
-                      hideHeader
-                    />
-                  ) : activeProject.runtime === "herdr" ? (
+                  {activeProject.runtime === "herdr" ? (
                     <MirroredTerminalLayout
                       tabs={activeRuntimePanes}
                       connected={activeDeviceConnected}
@@ -2068,27 +1865,20 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
                 <div className="w-full max-w-lg text-sm">
                   <div className="mb-2 font-medium text-text">No mirrored terminals yet.</div>
                   <div className="mb-3 text-muted">
-                    Bootstrap the lightweight agent. Running HerdR and tmux sessions appear here
+                    Bootstrap the lightweight agent. Running Herdr and tmux sessions appear here
                     automatically.
                   </div>
-                  <div className="flex flex-wrap items-center gap-2">
+                  <div>
                     <button
                       type="button"
-                      className="inline-flex h-9 items-center rounded-md bg-accent px-3 text-xs font-medium text-black hover:brightness-110"
+                      className="inline-flex min-h-11 items-center rounded-md bg-accent px-3 text-xs font-medium text-black hover:brightness-110"
                       onClick={() => setBootstrapOpen(true)}
                     >
                       Bootstrap a device
                     </button>
-                    <button
-                      type="button"
-                      className="inline-flex h-9 items-center rounded-md border border-line bg-bg px-3 text-xs text-muted hover:bg-panel2 hover:text-text"
-                      onClick={() => setAttachTmuxOpen(true)}
-                    >
-                      Connect discovered tmux
-                    </button>
                   </div>
                   <a
-                    href="https://github.com/yeutterg/termag-next#quick-setup"
+                    href="https://github.com/yeutterg/terminalz#quick-setup"
                     target="_blank"
                     rel="noreferrer"
                     className="mt-3 inline-flex items-center gap-1 text-xs text-accent hover:underline"
@@ -2097,19 +1887,6 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
                     <ExternalLink className="h-3 w-3" />
                   </a>
                 </div>
-              </div>
-            )}
-            {/* ctrl pane: only on md+, hidden on mobile */}
-            {showCtrl && ctrlSession && (
-              <div className="hidden min-h-0 flex-1 md:flex">
-                <TerminalPane
-                  key={ctrlSession.id}
-                  active
-                  sessionId={ctrlSession.id}
-                  title={liveTitles[ctrlSession.id] || "ctrl"}
-                  status={activeDeviceConnected ? ctrlSession.status : "sleeping"}
-                  onTitleChange={handleSessionTitle}
-                />
               </div>
             )}
           </div>
@@ -2125,13 +1902,8 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
               onNewTab={onCommandNewTab}
               onKill={onCommandKill}
               onTheme={cycleTheme}
-              onSearch={() => setSearchOpen(true)}
               onDevices={() => openDevices()}
               onAddDevice={() => setNewDeviceOpen(true)}
-              // SSH host add lives inside the Devices dialog (the section
-              // owns the dialog state). Open Devices first; the SSH add
-              // button is one click away.
-              onAddSshHost={() => openDevices()}
               onGitOperation={
                 gitSupported && activeProject && !gitBusy ? onGitOperation : undefined
               }
@@ -2171,11 +1943,6 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
             </div>
           </div>
         )}
-        {searchOpen && (
-          <Suspense fallback={null}>
-            <SearchPalette open={searchOpen} onOpenChange={setSearchOpen} />
-          </Suspense>
-        )}
         {devicesOpen && (
           <Suspense fallback={null}>
             <DevicesDialog
@@ -2189,16 +1956,12 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
               user={user}
               devices={agentDevices}
               knownDeviceNames={devices}
-              projects={projects}
               focusedDevice={focusedDevice}
               onTokenDeleted={name => {
                 setTokenDevices(current => current.filter(device => device !== name));
               }}
               onAddDevice={() => setNewDeviceOpen(true)}
-              onAddSshHost={() => setNewSshHostOpen(true)}
               onBootstrap={() => setBootstrapOpen(true)}
-              onCleanup={() => reloadProjects()}
-              refreshTrigger={hostsRefreshTrigger}
             />
           </Suspense>
         )}
@@ -2212,19 +1975,6 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
                   setTokenDevices(current => [...new Set([...current, token.name])]);
                 }
               }}
-            />
-          </Suspense>
-        )}
-        {newSshHostOpen && (
-          <Suspense fallback={null}>
-            <NewSshHostDialog
-              open={newSshHostOpen}
-              onOpenChange={setNewSshHostOpen}
-              // Bump a counter so the DevicesDialog's parent-side fetch
-              // re-runs if Devices is open in the background. Without
-              // this, a host added while Devices is showing wouldn't
-              // appear until the user closes and re-opens Devices.
-              onCreated={() => setHostsRefreshTrigger(n => n + 1)}
             />
           </Suspense>
         )}
@@ -2248,21 +1998,6 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
               agentDevices={agentDevices}
               knownDeviceNames={devices}
               selectedDevice={newProjectDevice}
-            />
-          </Suspense>
-        )}
-        {attachTmuxOpen && (
-          <Suspense fallback={null}>
-            <AttachTmuxDialog
-              open={attachTmuxOpen}
-              onOpenChange={setAttachTmuxOpen}
-              onAttach={async input => {
-                const result = await attachTmuxSession(input);
-                if (result.ok && !platform.showShortcuts) {
-                  setSidebarOpen(false);
-                }
-                return result;
-              }}
             />
           </Suspense>
         )}

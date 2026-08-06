@@ -1,46 +1,25 @@
-# Usability features
+# Usability status
 
-Replaces `USABILITY_IMPROVEMENTS.md` and `USABILITY_IMPLEMENTATION_SUMMARY.md`.
-The latter claimed "ALL FEATURES COMPLETED (22 out of 21)" in one section and
-"Remaining Implementations (9 out of 21)" in another, so neither could be
-trusted as a status record.
+Only features reachable from the live application count here.
 
-Status below is by a reachable path from the live app. Merely having a module
-on disk is not counted as a feature.
+## Shipped
 
-## Shipped and wired
+- Mobile device viewport, safe areas, visual-keyboard resizing, and 44 px primary touch targets.
+- Reachable terminal soft keys for Esc, Tab, arrows, control keys, paging, and F1–F12.
+- Jittered reconnect with immediate online/foreground recovery and a manual reconnect control.
+- Machine → Herdr session → space → tab/pane organization with native order and iconography.
+- Herdr split-layout rendering and direct tmux pane rendering.
+- Keyboard shortcut help, tab swipes, theme switching, and a lazy-loaded command palette.
+- Typed git operations with a visible bounded result dialog.
+- Installable PWA whose worker bypasses APIs, auth, sockets, navigation, and terminal data.
 
-| Feature                         | Where                                                    |
-| ------------------------------- | -------------------------------------------------------- |
-| Keyboard shortcut help          | `components/termag-app.tsx`                              |
-| Project and tab reordering      | `components/termag-app.tsx`                              |
-| Theme and font controls         | `app/globals.css`, `tailwind.config.ts`                  |
-| Terminal touch/swipe navigation | `components/terminal/terminal-pane.tsx`                  |
-| Accessible labels and dialogs   | live components under `components/`                      |
-| Runtime-safe command palette    | `components/command-palette.tsx`, navigation + typed git |
+## Deliberately absent
 
-## Retired scaffolding
+- Cloud-only project/tab reordering; local runtime order is authoritative.
+- Database scrollback search or terminal-output retention.
+- Broker-side SSH hosts and public share links.
+- Arbitrary command execution, snippets, templates, toasts, and future-feature scaffolding.
+- A second local desktop/menu-bar UI.
 
-The old example command-palette execution tree, arbitrary shell-command
-facade, unmounted toast/dialog tree, duplicate touch hook, and standalone
-observability experiments were deleted. The same cleanup removed the unused
-snippet, bookmark, template, history, and clipboard-storage modules after
-their last placeholder palette references disappeared. They had no importer
-from the live application and several referenced database fields that no
-longer exist. Future git or filesystem actions must use typed Protocol v2
-operations rather than reviving the arbitrary `execute-command` channel.
-
-## Not implemented
-
-- Split panes in the browser. The agent mirrors HerdR and tmux pane layout
-  (`RuntimeTab.layout`), so the data is available; the renderer shows one pane
-  per tab.
-- Multi-select operations across tabs or projects.
-
-## Working on this area
-
-Prefer driving the app on a phone over adding modules. The two defects that
-most affected real use were both invisible from the code and obvious in a
-minute of handling: background timers freezing the power lease, and a shared
-rate-limit bucket returning 429 to everyone. Neither would have surfaced from
-another read of the module list.
+When changing this area, test on real iOS Safari and Android Chrome. Desktop narrow-width emulation
+does not reproduce visual-keyboard occlusion, background timer suspension, or network handoff.

@@ -3,9 +3,9 @@ import type { MetadataRoute } from "next";
 export default function manifest(): MetadataRoute.Manifest {
   return {
     id: "/",
-    name: "Termag",
-    short_name: "Termag",
-    description: "Remote access to your mirrored HerdR and tmux terminals.",
+    name: "Terminalz",
+    short_name: "Terminalz",
+    description: "Remote access to your mirrored Herdr and tmux terminals.",
     start_url: "/",
     scope: "/",
     display: "standalone",
