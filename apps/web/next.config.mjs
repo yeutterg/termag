@@ -1,5 +1,9 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
+  // The pre-Terminalz service worker cached build assets by their full URL.
+  // A permanent branded prefix guarantees a clean namespace even for clients
+  // whose obsolete worker is still controlling the first recovery request.
+  assetPrefix: "/terminalz-assets-v1",
   devIndicators: false,
   // This app is dynamic API/WebSocket traffic and has no ISR content. Disable
   // Next's 50 MiB in-process response cache; static assets still use normal
