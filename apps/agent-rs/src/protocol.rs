@@ -14,6 +14,7 @@ pub struct CapabilitySet {
     pub directory_policy: bool,
     pub power_policy: bool,
     pub git_operations: bool,
+    pub file_uploads: bool,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]

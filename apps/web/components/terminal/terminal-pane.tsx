@@ -4,6 +4,7 @@ import { memo, useCallback, useEffect, useRef, useState } from "react";
 import type { TouchEvent as ReactTouchEvent } from "react";
 import type { ITheme, Terminal as XTerm } from "@xterm/xterm";
 import { prefersLowDataMode } from "@/lib/mobile-data";
+import { detectPlatformFromUserAgent } from "@/lib/platform";
 import { cn, statusDot } from "@/lib/utils";
 
 // Palettes hoisted so they're stable references — set as term.options.theme
@@ -59,6 +60,8 @@ const RECONNECT_RESET_AFTER_MS = 60_000;
 const MAX_INPUT_CHARS = 32 * 1024;
 const XTERM_WRITE_PAUSE_BYTES = 1024 * 1024;
 const XTERM_WRITE_RESUME_BYTES = 256 * 1024;
+const FILE_UPLOAD_CHUNK_BYTES = 192 * 1024;
+const FILE_UPLOAD_MAX_BYTES = 16 * 1024 * 1024;
 const pageActivityListeners = new Set<(active: boolean) => void>();
 let pageVisibilityTimer: ReturnType<typeof setTimeout> | null = null;
 let pageVisibilityBound = false;
@@ -158,6 +161,8 @@ interface TerminalPaneProps {
   onTitleChange?: (sessionId: string, title: string) => void;
   /** Suppress the pane's own header — used when tabs above provide it. */
   hideHeader?: boolean;
+  /** Locally echo simple composer edits until the authoritative Herdr tail arrives. */
+  optimisticInput?: boolean;
 }
 
 function TerminalPaneImpl({
@@ -167,6 +172,7 @@ function TerminalPaneImpl({
   status,
   onTitleChange,
   hideHeader,
+  optimisticInput = false,
 }: TerminalPaneProps) {
   const hostRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<XTerm | null>(null);
@@ -184,6 +190,16 @@ function TerminalPaneImpl({
     message: string;
   } | null>(null);
   const manualReconnectRef = useRef<(() => void) | null>(null);
+  // xterm receives programmatic focus after its first connection so keyboard
+  // users can type immediately. That focus must not claim Herdr's controller
+  // lease: merely opening Terminalz should remain an observer and must not
+  // resize the terminal shown in the native Herdr app.
+  const suppressFocusClaimRef = useRef(false);
+  const uploadWaitersRef = useRef(
+    new Map<string, { resolve: (path: string) => void; reject: (error: Error) => void }>()
+  );
+  const [dragActive, setDragActive] = useState(false);
+  const [uploading, setUploading] = useState(false);
   // Capture latest onTitleChange so the xterm listener (set up once) always
   // invokes the current callback without rebinding the terminal.
   const onTitleChangeRef = useRef(onTitleChange);
@@ -207,19 +223,28 @@ function TerminalPaneImpl({
     let observer: ResizeObserver | null = null;
     let onVisibilityRef: (() => void) | null = null;
     let onOnlineRef: (() => void) | null = null;
+    let onWindowBlurRef: (() => void) | null = null;
+    let onWindowFocusRef: (() => void) | null = null;
+    let onPageShowRef: ((event: PageTransitionEvent) => void) | null = null;
     let onVisualViewportRef: (() => void) | null = null;
     let unsubscribeTheme: (() => void) | null = null;
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
     let titleTimer: ReturnType<typeof setTimeout> | null = null;
+    let checkpointFollowTimer: ReturnType<typeof setTimeout> | null = null;
+    let wakeWatchdog: ReturnType<typeof setInterval> | null = null;
     let pendingTitle = "";
     let reconnectAttempts = 0;
     let connectedAt = 0;
+    let lastSocketActivity = 0;
     let fatalMessage = "";
     let resyncRequested = false;
     let queuedWriteBytes = 0;
     let parserPaused = false;
     let visibilityPaused = document.visibilityState === "hidden";
     let brokerPaused = false;
+    let followCheckpoint = false;
+    let optimisticSinceCheckpoint = false;
+    let optimisticBackground = "";
 
     function syncBrokerPause() {
       const ws = wsRef.current;
@@ -234,7 +259,7 @@ function TerminalPaneImpl({
       ws.send(JSON.stringify({ type: shouldPause ? "pause" : "resume" }));
     }
 
-    function writeTerminal(data: string | Uint8Array) {
+    function writeTerminal(data: string | Uint8Array, followBottom = false, restoreCursor = "") {
       if (!term || disposed) {
         return;
       }
@@ -246,6 +271,15 @@ function TerminalPaneImpl({
       }
       term.write(data, () => {
         queuedWriteBytes = Math.max(0, queuedWriteBytes - byteCount);
+        if (followBottom && !disposed) {
+          term?.scrollToBottom();
+        }
+        if (restoreCursor && !disposed) {
+          // Reapply the authoritative cursor after scrollToBottom. Some xterm
+          // renderers otherwise paint the cursor at the final footer write
+          // even though the checkpoint's last CSI moved it into the composer.
+          term?.write(restoreCursor);
+        }
         if (parserPaused && queuedWriteBytes <= XTERM_WRITE_RESUME_BYTES) {
           parserPaused = false;
           if (!disposed) {
@@ -253,6 +287,26 @@ function TerminalPaneImpl({
           }
         }
       });
+    }
+
+    function echoOptimisticInput(data: string) {
+      if (!optimisticInput || !term || disposed) {
+        return;
+      }
+      if (/^[^\u0000-\u001f\u007f]+$/u.test(data)) {
+        if (!optimisticSinceCheckpoint) {
+          // Removes Codex's placeholder (or any stale cells after the real
+          // cursor) before the first locally-echoed character.
+          writeTerminal(`${optimisticBackground}\x1b[K`);
+        }
+        optimisticSinceCheckpoint = true;
+        writeTerminal("\x1b[?25h");
+        writeTerminal(data);
+      } else if (data === "\u007f" || data === "\b") {
+        optimisticSinceCheckpoint = true;
+        writeTerminal(`${optimisticBackground}\x1b[?25h`);
+        writeTerminal("\b \b");
+      }
     }
 
     function fitAndResize() {
@@ -308,6 +362,7 @@ function TerminalPaneImpl({
 
       ws.onopen = () => {
         connectedAt = Date.now();
+        lastSocketActivity = connectedAt;
         brokerPaused = false;
         visibilityPaused = document.visibilityState === "hidden";
         if (reconnectAttempts > 0) {
@@ -332,27 +387,59 @@ function TerminalPaneImpl({
         // Only steal focus on the initial connect — yanking focus mid-typing
         // when the broker hiccups would be infuriating.
         if (!justReconnected) {
+          suppressFocusClaimRef.current = true;
           term!.focus();
+          queueMicrotask(() => {
+            suppressFocusClaimRef.current = false;
+          });
         }
       };
       ws.onmessage = event => {
+        lastSocketActivity = Date.now();
         // Binary frames carry raw terminal output (no JSON wrapper). Text
         // frames carry control messages — ready/sleeping/exit/refresh.
         if (typeof event.data !== "string") {
-          writeTerminal(new Uint8Array(event.data as ArrayBuffer));
+          const bytes = new Uint8Array(event.data as ArrayBuffer);
+          const decoded = new TextDecoder().decode(bytes);
+          const tail = decoded.slice(-64);
+          const cursor = tail.match(/(\x1b\[\d+;\d+H\x1b\[\?25h)$/)?.[1] ?? "";
+          if (optimisticInput && followCheckpoint) {
+            const backgrounds = [...decoded.matchAll(/\x1b\[(?:48;2;\d+;\d+;\d+|48;5;\d+)m/g)];
+            optimisticBackground = backgrounds.at(-1)?.[0] ?? optimisticBackground;
+          }
+          writeTerminal(bytes, followCheckpoint, cursor);
+          if (followCheckpoint) {
+            if (checkpointFollowTimer) {
+              clearTimeout(checkpointFollowTimer);
+            }
+            checkpointFollowTimer = setTimeout(() => {
+              followCheckpoint = false;
+              checkpointFollowTimer = null;
+            }, 250);
+          }
           return;
         }
-        let msg: { type?: string; data?: string; message?: string };
+        let msg: {
+          type?: string;
+          data?: string;
+          message?: string;
+          uploadId?: string;
+          offset?: number;
+          path?: string;
+        };
         try {
           msg = JSON.parse(event.data);
         } catch {
           return;
         }
-        // Queue RIS through xterm's parser so bytes already waiting in its
-        // write buffer cannot land after a synchronous reset and corrupt the
-        // newly-arriving full checkpoint.
+        // Full checkpoint payloads already begin with RIS. Do not clear xterm
+        // when this control message arrives: the payload is a separate
+        // WebSocket message, and clearing here exposes an empty black frame on
+        // every interactive Herdr redraw. Parsing reset + replacement content
+        // together keeps the update visually atomic.
         if (msg.type === "checkpoint") {
-          writeTerminal("\x1bc");
+          followCheckpoint = true;
+          optimisticSinceCheckpoint = false;
         }
         if (msg.type === "resync") {
           resyncRequested = true;
@@ -383,8 +470,26 @@ function TerminalPaneImpl({
           driverStateRef.current = nextDriverState;
           setDriverState(nextDriverState);
         }
+        if (
+          (msg.type === "file-upload-complete" || msg.type === "file-upload-error") &&
+          msg.uploadId &&
+          Number.isSafeInteger(msg.offset)
+        ) {
+          const key = `${msg.uploadId}:${msg.offset}`;
+          const waiter = uploadWaitersRef.current.get(key);
+          uploadWaitersRef.current.delete(key);
+          if (msg.type === "file-upload-complete" && msg.path) {
+            waiter?.resolve(msg.path);
+          } else {
+            waiter?.reject(new Error(msg.message || "Upload failed"));
+          }
+        }
       };
       ws.onclose = event => {
+        for (const waiter of uploadWaitersRef.current.values()) {
+          waiter.reject(new Error("Terminal disconnected during upload"));
+        }
+        uploadWaitersRef.current.clear();
         if (disposed) {
           return;
         }
@@ -439,7 +544,7 @@ function TerminalPaneImpl({
       };
     }
 
-    function reconnectImmediately() {
+    function reconnectImmediately(force = false) {
       if (disposed || !term) {
         return;
       }
@@ -448,7 +553,7 @@ function TerminalPaneImpl({
         reconnectTimer = null;
       }
       const current = wsRef.current;
-      if (current?.readyState === WebSocket.OPEN) {
+      if (current?.readyState === WebSocket.OPEN && !force) {
         return;
       }
       if (current) {
@@ -456,6 +561,12 @@ function TerminalPaneImpl({
         current.close();
       }
       connectWS();
+    }
+
+    function reconnectAfterWake(force = false) {
+      scheduleFit();
+      const stale = lastSocketActivity > 0 && Date.now() - lastSocketActivity > 30_000;
+      reconnectImmediately(force || stale);
     }
 
     manualReconnectRef.current = () => {
@@ -493,7 +604,7 @@ function TerminalPaneImpl({
         cursorBlink: true,
         fontFamily,
         fontSize: 12,
-        lineHeight: 1.4,
+        lineHeight: 1,
         scrollback: lowData ? 500 : 2000,
         theme: currentTheme(),
       });
@@ -512,6 +623,35 @@ function TerminalPaneImpl({
       term.loadAddon(fit);
       term.open(hostRef.current);
       termRef.current = term;
+      if (detectPlatformFromUserAgent(navigator.userAgent).isMac) {
+        term.attachCustomKeyEventHandler(event => {
+          if (event.type !== "keydown" || event.ctrlKey || event.metaKey) {
+            return true;
+          }
+          if (event.key === "Enter" && event.shiftKey && !event.altKey) {
+            event.preventDefault();
+            sendInput("\x1b[13;2u");
+            return false;
+          }
+          if (!event.altKey || event.shiftKey) {
+            return true;
+          }
+          const data =
+            event.key === "Backspace"
+              ? "\x1b\x7f"
+              : event.key === "ArrowLeft"
+                ? "\x1bb"
+                : event.key === "ArrowRight"
+                  ? "\x1bf"
+                  : null;
+          if (!data) {
+            return true;
+          }
+          event.preventDefault();
+          sendInput(data);
+          return false;
+        });
+      }
       if (!lowData && window.matchMedia("(hover: hover) and (pointer: fine)").matches) {
         void import("@xterm/addon-web-links").then(({ WebLinksAddon }) => {
           if (!disposed && term) {
@@ -541,6 +681,7 @@ function TerminalPaneImpl({
       // assigned to wsRef.current. After a reconnect, the new WS just gets
       // the keystrokes naturally.
       term.onData(data => {
+        echoOptimisticInput(data);
         sendInput(data);
       });
 
@@ -549,19 +690,54 @@ function TerminalPaneImpl({
       // keeps a bounded tail and requests a fresh runtime checkpoint if the
       // stream overflows while paused.
       const onVisibility = () => {
+        const wasHidden = visibilityPaused;
         visibilityPaused = document.visibilityState === "hidden";
+        if (visibilityPaused && wsRef.current?.readyState === WebSocket.OPEN) {
+          wsRef.current.send(JSON.stringify({ type: "release-drive" }));
+        }
         syncBrokerPause();
         if (!visibilityPaused) {
-          scheduleFit();
-          reconnectImmediately();
+          reconnectAfterWake(wasHidden);
         }
       };
       document.addEventListener("visibilitychange", onVisibility);
       onVisibilityRef = onVisibility;
 
-      const onOnline = () => reconnectImmediately();
+      const onOnline = () => reconnectAfterWake(true);
       window.addEventListener("online", onOnline);
       onOnlineRef = onOnline;
+
+      const onWindowBlur = () => {
+        if (wsRef.current?.readyState === WebSocket.OPEN) {
+          wsRef.current.send(JSON.stringify({ type: "release-drive" }));
+        }
+      };
+      window.addEventListener("blur", onWindowBlur);
+      onWindowBlurRef = onWindowBlur;
+
+      const onWindowFocus = () => reconnectAfterWake();
+      window.addEventListener("focus", onWindowFocus);
+      onWindowFocusRef = onWindowFocus;
+
+      const onPageShow = (event: PageTransitionEvent) => reconnectAfterWake(event.persisted);
+      window.addEventListener("pageshow", onPageShow);
+      onPageShowRef = onPageShow;
+
+      wakeWatchdog = setInterval(() => {
+        if (document.visibilityState !== "visible") {
+          return;
+        }
+        const ws = wsRef.current;
+        if (ws?.readyState === WebSocket.OPEN) {
+          if (lastSocketActivity > 0 && Date.now() - lastSocketActivity > 30_000) {
+            reconnectImmediately(true);
+          } else {
+            ws.send(JSON.stringify({ type: "ping" }));
+          }
+        } else {
+          reconnectImmediately();
+        }
+      }, 15_000);
 
       const onVisualViewport = () => scheduleFit();
       window.visualViewport?.addEventListener("resize", onVisualViewport);
@@ -601,6 +777,12 @@ function TerminalPaneImpl({
       if (titleTimer) {
         clearTimeout(titleTimer);
       }
+      if (checkpointFollowTimer) {
+        clearTimeout(checkpointFollowTimer);
+      }
+      if (wakeWatchdog) {
+        clearInterval(wakeWatchdog);
+      }
       observer?.disconnect();
       if (resizeTimer) {
         clearTimeout(resizeTimer);
@@ -613,6 +795,15 @@ function TerminalPaneImpl({
       if (onOnlineRef) {
         window.removeEventListener("online", onOnlineRef);
       }
+      if (onWindowBlurRef) {
+        window.removeEventListener("blur", onWindowBlurRef);
+      }
+      if (onWindowFocusRef) {
+        window.removeEventListener("focus", onWindowFocusRef);
+      }
+      if (onPageShowRef) {
+        window.removeEventListener("pageshow", onPageShowRef);
+      }
       if (onVisualViewportRef) {
         window.visualViewport?.removeEventListener("resize", onVisualViewportRef);
         window.visualViewport?.removeEventListener("scroll", onVisualViewportRef);
@@ -623,11 +814,15 @@ function TerminalPaneImpl({
       term?.dispose();
       termRef.current = null;
     };
-  }, [active, pageActive, sessionId]);
+  }, [active, optimisticInput, pageActive, sessionId]);
 
   function claimDrive() {
     const ws = wsRef.current;
-    if (ws?.readyState !== WebSocket.OPEN || driverStateRef.current?.readOnly) {
+    if (
+      suppressFocusClaimRef.current ||
+      ws?.readyState !== WebSocket.OPEN ||
+      driverStateRef.current?.readOnly
+    ) {
       return;
     }
     // Send even when our cached state says we are the driver. Another viewer
@@ -645,6 +840,53 @@ function TerminalPaneImpl({
     // latest keystroke authoritative without a second browser→broker frame or
     // a race where control changes between separate claim and input messages.
     sendTerminalInput(ws, data);
+  }
+
+  function uploadChunk(file: File, uploadId: string, offset: number, data: string) {
+    const ws = wsRef.current;
+    if (ws?.readyState !== WebSocket.OPEN) {
+      return Promise.reject(new Error("Terminal is not connected"));
+    }
+    return new Promise<string>((resolve, reject) => {
+      const key = `${uploadId}:${offset}`;
+      uploadWaitersRef.current.set(key, { resolve, reject });
+      ws.send(
+        JSON.stringify({ type: "file-upload-chunk", uploadId, fileName: file.name, offset, data })
+      );
+    });
+  }
+
+  async function uploadDroppedFiles(files: FileList) {
+    setUploading(true);
+    try {
+      for (const file of Array.from(files).slice(0, 5)) {
+        if (file.size > FILE_UPLOAD_MAX_BYTES) {
+          throw new Error(`${file.name} exceeds the 16 MiB upload limit`);
+        }
+        const uploadId = crypto.randomUUID().replaceAll("-", "");
+        let uploadedPath = "";
+        for (let offset = 0; offset < Math.max(file.size, 1); offset += FILE_UPLOAD_CHUNK_BYTES) {
+          const bytes = new Uint8Array(
+            await file.slice(offset, offset + FILE_UPLOAD_CHUNK_BYTES).arrayBuffer()
+          );
+          let binary = "";
+          for (let index = 0; index < bytes.length; index += 0x8000) {
+            binary += String.fromCharCode(...bytes.subarray(index, index + 0x8000));
+          }
+          uploadedPath = await uploadChunk(file, uploadId, offset, btoa(binary));
+        }
+        // Insert a safely shell-quoted local path at the current cursor. This
+        // is terminal input, not broker-side command execution.
+        sendInput(`'${uploadedPath.replaceAll("'", `'\\''`)}' `);
+      }
+    } catch (error) {
+      setConnectionIssue({
+        fatal: false,
+        message: error instanceof Error ? error.message : "File upload failed",
+      });
+    } finally {
+      setUploading(false);
+    }
   }
 
   const isReadOnly = driverState?.readOnly === true;
@@ -707,6 +949,11 @@ function TerminalPaneImpl({
           </button>
         </div>
       )}
+      {(dragActive || uploading) && (
+        <div className="pointer-events-none absolute inset-2 z-40 grid place-items-center rounded-lg border-2 border-dashed border-accent bg-bg/90 text-sm font-medium text-text">
+          {uploading ? "Uploading attachment…" : "Drop files to attach"}
+        </div>
+      )}
       {hideHeader && isReadOnly && (
         <div
           className="absolute right-2 top-2 z-20 inline-flex h-6 items-center gap-1 rounded border border-line bg-panel/95 px-2 text-[10px] text-muted shadow"
@@ -741,6 +988,23 @@ function TerminalPaneImpl({
         className="min-h-0 flex-1 bg-bg"
         onPointerDown={claimDrive}
         onFocusCapture={claimDrive}
+        onDragEnter={event => {
+          event.preventDefault();
+          setDragActive(true);
+        }}
+        onDragOver={event => event.preventDefault()}
+        onDragLeave={event => {
+          if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
+            setDragActive(false);
+          }
+        }}
+        onDrop={event => {
+          event.preventDefault();
+          setDragActive(false);
+          if (event.dataTransfer.files.length) {
+            void uploadDroppedFiles(event.dataTransfer.files);
+          }
+        }}
         // iPad-first: two-finger horizontal swipe switches tabs. The
         // gesture dispatches a window-level CustomEvent ('termag:tab-swipe')
         // that termag-app resolves against the active project's tab order.

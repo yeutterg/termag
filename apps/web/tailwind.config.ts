@@ -2,7 +2,13 @@ import type { Config } from "tailwindcss";
 
 const config: Config = {
   darkMode: ["class"],
-  content: ["./app/**/*.{ts,tsx}", "./components/**/*.{ts,tsx}", "./lib/**/*.{ts,tsx}"],
+  content: {
+    // Resolve globs from this config file, not the process cwd. The root-level
+    // `npm run dev` starts Node from the repository root, while workspace
+    // builds start from apps/web; both must generate the same utilities.
+    relative: true,
+    files: ["./app/**/*.{ts,tsx}", "./components/**/*.{ts,tsx}", "./lib/**/*.{ts,tsx}"],
+  },
   theme: {
     extend: {
       colors: {

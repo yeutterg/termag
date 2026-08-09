@@ -1,5 +1,4 @@
 use anyhow::{bail, Context, Result};
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use serde_json::{json, Value};
 use std::{
     collections::HashMap,
@@ -13,6 +12,7 @@ use tokio::{
     sync::mpsc,
     time::{interval, timeout, Interval, MissedTickBehavior},
 };
+use unicode_width::UnicodeWidthStr;
 
 static TMUX_CONTROL_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 const DEFAULT_CHECKPOINT_HISTORY_LINES: u16 = 2000;
@@ -42,8 +42,13 @@ impl CheckpointPolicy {
 pub struct Target {
     pub runtime: String,
     pub runtime_session_id: String,
+    pub pane_id: String,
     pub external_id: String,
     pub cwd: Option<String>,
+    // Herdr renders a virtual screen for the requested dimensions. Keep each
+    // browser viewer distinct so phone and desktop wrapping never share one
+    // observer. tmux remains shared because control mode is raw pane output.
+    viewer_id: Option<String>,
 }
 
 impl Target {
@@ -64,14 +69,21 @@ impl Target {
             .and_then(Value::as_str)
             .map(ToOwned::to_owned)
             .context("runtimeTarget.runtimeSessionId is required")?;
-        let external_id = raw
+        let pane_id = raw
             .get("paneId")
             .and_then(Value::as_str)
             .map(ToOwned::to_owned)
             .context("runtimeTarget.paneId is required")?;
+        let external_id = raw
+            .get("terminalId")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(|| pane_id.clone());
         if runtime_session_id.is_empty()
+            || pane_id.is_empty()
             || external_id.is_empty()
             || runtime_session_id.len() > 512
+            || pane_id.len() > 512
             || external_id.len() > 512
         {
             bail!("runtime target is incomplete");
@@ -79,11 +91,13 @@ impl Target {
         Ok(Self {
             runtime,
             runtime_session_id,
+            pane_id,
             external_id,
             cwd: raw
                 .get("cwd")
                 .and_then(Value::as_str)
                 .map(ToOwned::to_owned),
+            viewer_id: None,
         })
     }
 }
@@ -110,7 +124,6 @@ enum StreamEventKind {
     Data { bytes: Vec<u8>, full: bool },
     Gap,
     Exit,
-    Controller(bool),
 }
 
 /// Binds a runtime task to the exact `SharedStream` that spawned it. A task
@@ -247,10 +260,13 @@ impl Registry {
     pub fn attach(
         &mut self,
         stream_id: String,
-        target: Target,
+        mut target: Target,
         options: AttachOptions,
     ) -> Result<Vec<Value>> {
         self.close(&stream_id);
+        if target.runtime == "herdr" {
+            target.viewer_id = Some(stream_id.clone());
+        }
         let already_streaming = self.targets.contains_key(&target);
         let checkpoint_policy = CheckpointPolicy::new(
             options.checkpoint_history_lines,
@@ -336,11 +352,12 @@ impl Registry {
                 shared.cols = subscriber.cols;
                 shared.rows = subscriber.rows;
             }
-            let _ = shared
-                .tx
-                .try_send(StreamCommand::Resize(shared.cols, shared.rows));
             if target.runtime == "herdr" {
                 let _ = shared.tx.try_send(StreamCommand::TakeControl);
+            } else {
+                let _ = shared
+                    .tx
+                    .try_send(StreamCommand::Resize(shared.cols, shared.rows));
             }
         }
         if let Some(subscriber) = shared.subscribers.get_mut(stream_id) {
@@ -406,6 +423,23 @@ impl Registry {
             .try_send(StreamCommand::Resize(shared.cols, shared.rows));
         if target.runtime == "herdr" {
             let _ = shared.tx.try_send(StreamCommand::TakeControl);
+        }
+        self.driver_messages(&target)
+    }
+
+    pub fn release(&mut self, stream_id: &str) -> Vec<Value> {
+        let Some(target) = self.by_stream.get(stream_id).cloned() else {
+            return Vec::new();
+        };
+        let Some(shared) = self.targets.get_mut(&target) else {
+            return Vec::new();
+        };
+        if shared.driver.as_deref() != Some(stream_id) {
+            return Vec::new();
+        }
+        shared.driver = None;
+        if target.runtime == "herdr" {
+            let _ = shared.tx.try_send(StreamCommand::ReleaseControl);
         }
         self.driver_messages(&target)
     }
@@ -486,17 +520,6 @@ impl Registry {
                     checkpoint,
                     bytes,
                 }]
-            }
-            StreamEventKind::Controller(controlled) => {
-                if !controlled {
-                    if let Some(shared) = self.targets.get_mut(&target) {
-                        shared.driver = None;
-                    }
-                }
-                self.driver_messages(&target)
-                    .into_iter()
-                    .map(Outbound::Json)
-                    .collect()
             }
             StreamEventKind::Gap => {
                 let Some(shared) = self.targets.get(&target) else {
@@ -994,44 +1017,26 @@ fn retry_terminal_gap(sink: &EventSink, output_gap: &mut bool) {
 
 struct HerdrChild {
     child: Child,
-    stdin: Option<ChildStdin>,
     reader: BufReader<ChildStdout>,
-    controller: bool,
 }
 
-async fn spawn_herdr(
-    target: &Target,
-    cols: u16,
-    rows: u16,
-    controller: bool,
-) -> Result<HerdrChild> {
+async fn spawn_herdr(target: &Target, cols: u16, rows: u16) -> Result<HerdrChild> {
     let mut command = Command::new("herdr");
-    command.args([
-        "terminal",
-        "session",
-        if controller { "control" } else { "observe" },
-        &target.external_id,
-    ]);
-    if controller {
-        command.arg("--takeover");
-    }
+    command.args(["terminal", "session", "observe", &target.external_id]);
     command.args(["--cols", &cols.to_string(), "--rows", &rows.to_string()]);
     command
         .env("HERDR_SESSION", &target.runtime_session_id)
-        .stdin(Stdio::piped())
+        .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .kill_on_drop(true);
     let mut child = command
         .spawn()
         .context("could not start Herdr terminal helper")?;
-    let stdin = child.stdin.take();
     let stdout = child.stdout.take().context("Herdr helper has no stdout")?;
     Ok(HerdrChild {
         child,
-        stdin,
         reader: BufReader::with_capacity(32 * 1024, stdout),
-        controller,
     })
 }
 
@@ -1072,75 +1077,438 @@ async fn run_herdr_cli(
     mut rx: mpsc::Receiver<StreamCommand>,
 ) -> Result<()> {
     let target = sink.target().clone();
-    let mut helper = spawn_herdr(&target, cols, rows, false).await?;
+    // Rendering and input intentionally use separate Herdr interfaces. The
+    // observer produces a virtual frame at the browser's dimensions without
+    // changing the native Herdr client. Input goes through the typed pane API,
+    // so Terminalz never has to take over the shared terminal controller.
+    let mut helper = spawn_herdr(&target, cols, rows).await?;
     let mut output_gap = false;
     let mut gap_tick = gap_retry_interval();
+    let mut input_refresh_tick = interval(Duration::from_millis(16));
+    input_refresh_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    let mut refresh_after_input: Option<Instant> = None;
     let mut line = Vec::with_capacity(32 * 1024);
+    let mut last_frame = String::new();
+    let mut composer_cursor_from_end = 0;
     loop {
         tokio::select! {
             read = read_herdr_line(&mut helper.reader, &mut line) => {
-                if !read? {
-                    break;
+                if !read.unwrap_or(false) {
+                    let _ = helper.child.start_kill();
+                    let _ = helper.child.wait().await;
+                    tokio::time::sleep(Duration::from_millis(250)).await;
+                    helper = spawn_herdr(&target, cols, rows).await?;
+                    last_frame.clear();
+                    continue;
                 }
                 let value: Value = match serde_json::from_slice(&line) { Ok(value) => value, Err(_) => continue };
-                    if value.get("type").and_then(Value::as_str) == Some("terminal.frame") {
-                        if let Some(bytes) = value.get("bytes").and_then(Value::as_str).and_then(|v| BASE64.decode(v).ok()) {
-                            let full = value.get("full").and_then(Value::as_bool).unwrap_or(false);
-                            emit_terminal_data(&sink, &mut output_gap, bytes, full);
-                        }
+                    if value.get("type").and_then(Value::as_str) == Some("terminal.frame") && refresh_after_input.is_none() {
+                        // The native Herdr pane may be scrolled up. Terminalz is
+                        // an agent-first tail view: read logical recent lines,
+                        // let each xterm wrap them for its own width, and keep
+                        // the composer/model footer at the bottom.
+                        emit_herdr_tail(&sink, &target, cols, rows, composer_cursor_from_end, &mut output_gap, &mut last_frame).await?;
                     } else if value.get("type").and_then(Value::as_str) == Some("terminal.closed") { break; }
             }
+            _ = input_refresh_tick.tick(), if refresh_after_input.is_some() => {
+                if refresh_after_input.is_some_and(|deadline| Instant::now() >= deadline) {
+                    refresh_after_input = None;
+                    emit_herdr_tail(&sink, &target, cols, rows, composer_cursor_from_end, &mut output_gap, &mut last_frame).await?;
+                }
+            }
             command = rx.recv() => match command {
-                Some(StreamCommand::Input(data)) if helper.controller => {
-                    if let Some(stdin) = helper.stdin.as_mut() {
-                        let line = json!({ "type": "terminal.input", "bytes": BASE64.encode(data) }).to_string() + "\n";
-                        stdin.write_all(line.as_bytes()).await?; stdin.flush().await?;
+                Some(StreamCommand::Input(data)) => {
+                    let text = String::from_utf8(data).context("Herdr terminal input was not UTF-8")?;
+                    update_herdr_composer_cursor(
+                        &text,
+                        &last_frame,
+                        &mut composer_cursor_from_end,
+                    );
+                    let herdr_key = herdr_key_for_input(&text);
+                    if let Some(key) = herdr_key {
+                        let sent = crate::herdr::mutate(
+                            &target.runtime_session_id,
+                            "pane.send_keys",
+                            json!({ "pane_id": target.pane_id, "keys": [key] }),
+                        ).await;
+                        if let Err(error) = sent {
+                            eprintln!("[terminalz] Herdr typed key failed: {error:#}");
+                            if let Err(error) = crate::herdr::mutate(
+                                &target.runtime_session_id,
+                                "pane.send_input",
+                                json!({ "pane_id": target.pane_id, "text": text }),
+                            ).await {
+                                eprintln!("[terminalz] Herdr input fallback failed: {error:#}");
+                            }
+                        }
+                    } else {
+                        if let Err(error) = crate::herdr::mutate(
+                            &target.runtime_session_id,
+                            "pane.send_input",
+                            json!({ "pane_id": target.pane_id, "text": text }),
+                        ).await {
+                            eprintln!("[terminalz] Herdr text input failed: {error:#}");
+                        }
                     }
+                    // pane.send_input updates pane.read synchronously, but it
+                    // does not consistently wake terminal-session observers.
+                    // Debounce rapid keystrokes into one authoritative tail
+                    // read. Codex is echoed optimistically in its browser, so
+                    // intermediate full-canvas snapshots only add latency and
+                    // can overwrite newer local input with older state.
+                    refresh_after_input = Some(Instant::now() + Duration::from_millis(40));
                 }
                 Some(StreamCommand::Resize(next_cols, next_rows)) => {
                     cols = next_cols; rows = next_rows;
-                    if helper.controller {
-                        if let Some(stdin) = helper.stdin.as_mut() {
-                            let line = json!({ "type": "terminal.resize", "cols": cols, "rows": rows }).to_string() + "\n";
-                            stdin.write_all(line.as_bytes()).await?; stdin.flush().await?;
-                        }
-                    }
-                }
-                Some(StreamCommand::TakeControl) if !helper.controller => {
+                    last_frame.clear();
                     let _ = helper.child.start_kill(); let _ = helper.child.wait().await;
-                    helper = spawn_herdr(&target, cols, rows, true).await?;
-                    sink.send(StreamEventKind::Controller(true)).await;
+                    helper = spawn_herdr(&target, cols, rows).await?;
                 }
                 Some(StreamCommand::TakeControl) => {}
-                Some(StreamCommand::ReleaseControl) if helper.controller => {
-                    if let Some(stdin) = helper.stdin.as_mut() {
-                        let _ = stdin.write_all(b"{\"type\":\"terminal.release\"}\n").await;
-                        let _ = stdin.flush().await;
-                    }
-                    let _ = helper.child.start_kill(); let _ = helper.child.wait().await;
-                    helper = spawn_herdr(&target, cols, rows, false).await?;
-                    sink.send(StreamEventKind::Controller(false)).await;
-                }
                 Some(StreamCommand::ReleaseControl) => {}
                 Some(StreamCommand::Checkpoint(_)) => {
-                    let controller = helper.controller;
                     let _ = helper.child.start_kill(); let _ = helper.child.wait().await;
-                    helper = spawn_herdr(&target, cols, rows, controller).await?;
+                    helper = spawn_herdr(&target, cols, rows).await?;
                 }
                 Some(StreamCommand::Stop) | None => {
-                    if helper.controller {
-                        if let Some(stdin) = helper.stdin.as_mut() { let _ = stdin.write_all(b"{\"type\":\"terminal.release\"}\n").await; }
-                    }
                     let _ = helper.child.start_kill(); break;
                 }
-                Some(StreamCommand::Input(_)) => {}
             },
             _ = gap_tick.tick(), if output_gap => retry_terminal_gap(&sink, &mut output_gap),
-            _ = helper.child.wait() => break,
+            _ = helper.child.wait() => {
+                tokio::time::sleep(Duration::from_millis(250)).await;
+                helper = spawn_herdr(&target, cols, rows).await?;
+                last_frame.clear();
+            },
         }
     }
     sink.send(StreamEventKind::Exit).await;
     Ok(())
+}
+
+async fn emit_herdr_tail(
+    sink: &EventSink,
+    target: &Target,
+    cols: u16,
+    rows: u16,
+    composer_cursor_from_end: usize,
+    output_gap: &mut bool,
+    last_frame: &mut String,
+) -> Result<()> {
+    let Ok(response) = crate::herdr::mutate(
+        &target.runtime_session_id,
+        "pane.read",
+        json!({
+            "pane_id": target.pane_id,
+            "source": "recent_unwrapped",
+            "lines": rows,
+            "format": "ansi",
+        }),
+    )
+    .await
+    else {
+        return Ok(());
+    };
+    let Some(text) = response
+        .pointer("/result/read/text")
+        .and_then(Value::as_str)
+    else {
+        return Ok(());
+    };
+    if text != last_frame {
+        last_frame.clear();
+        last_frame.push_str(text);
+        let rendered = render_herdr_tail(text, cols, rows, composer_cursor_from_end);
+        emit_terminal_data(sink, output_gap, rendered.into_bytes(), true);
+    }
+    Ok(())
+}
+
+fn render_herdr_tail(text: &str, cols: u16, rows: u16, composer_cursor_from_end: usize) -> String {
+    let cols = usize::from(cols.max(1));
+    let rows = usize::from(rows.max(1));
+    let mut raw_lines = text.split('\n').collect::<Vec<_>>();
+    while raw_lines
+        .last()
+        .is_some_and(|line| line.trim_end_matches(['\r', ' ', '\t']).is_empty())
+    {
+        raw_lines.pop();
+    }
+    let mut lines = raw_lines
+        .iter()
+        .map(|line| compact_herdr_line(line))
+        .collect::<Vec<_>>();
+    while lines.last().is_some_and(|(_, plain)| plain.is_empty()) {
+        lines.pop();
+        raw_lines.pop();
+    }
+    let composer_index = lines
+        .iter()
+        .enumerate()
+        .rev()
+        .find_map(|(index, (_, plain))| plain.trim_start().starts_with('›').then_some(index));
+    if let Some(composer_index) = composer_index {
+        let start = composer_index.saturating_sub(1);
+        let end = (composer_index + 1).min(lines.len().saturating_sub(1));
+        for index in start..=end {
+            if let Some(background) = herdr_background_sequence(raw_lines[index]) {
+                lines[index].0 =
+                    fill_herdr_composer_line(&lines[index].0, &lines[index].1, &background, cols);
+            }
+        }
+    }
+
+    let line_rows = lines
+        .iter()
+        .map(|(_, plain)| UnicodeWidthStr::width(plain.as_str()).max(1).div_ceil(cols))
+        .collect::<Vec<_>>();
+    let content_rows = line_rows.iter().sum::<usize>();
+    let top_padding = rows.saturating_sub(content_rows);
+    let scroll_rows = content_rows.saturating_sub(rows);
+
+    let mut rendered = String::from("\x1bc");
+    rendered.push_str(&"\r\n".repeat(top_padding));
+    for (index, (ansi, _)) in lines.iter().enumerate() {
+        if index > 0 {
+            rendered.push_str("\r\n");
+        }
+        rendered.push_str(ansi);
+    }
+
+    let composer = composer_index.map(|index| (index, &lines[index].1));
+    if let Some((index, plain)) = composer {
+        let trimmed = plain.trim_end();
+        let cursor_width = if trimmed.trim_start() == "› Implement {feature}" {
+            UnicodeWidthStr::width(plain.as_str()) - UnicodeWidthStr::width(plain.trim_start()) + 2
+        } else {
+            let characters = trimmed.chars().collect::<Vec<_>>();
+            let cursor_character = characters.len().saturating_sub(composer_cursor_from_end);
+            let cursor_prefix = characters[..cursor_character].iter().collect::<String>();
+            UnicodeWidthStr::width(cursor_prefix.as_str())
+        };
+        let rows_before = top_padding + line_rows[..index].iter().sum::<usize>();
+        let (cursor_line_offset, cursor_col) = if cursor_width == 0 {
+            (0, 1)
+        } else if cursor_width % cols == 0 {
+            (cursor_width / cols - 1, cols)
+        } else {
+            (cursor_width / cols, cursor_width % cols + 1)
+        };
+        let cursor_row = (rows_before + cursor_line_offset + 1)
+            .saturating_sub(scroll_rows)
+            .clamp(1, rows);
+        // Paint the caret into the authoritative frame and hide xterm's
+        // hardware cursor. Safari's canvas renderer can repaint the hardware
+        // cursor at the final footer cell after scrollToBottom even when the
+        // last CSI moved it correctly. A frame-owned caret cannot drift.
+        rendered.push_str(&format!(
+            "\x1b[{cursor_row};{cursor_col}H\x1b[7m \x1b[27m\x1b[{cursor_row};{cursor_col}H\x1b[?25l"
+        ));
+    } else {
+        rendered.push_str("\x1b[?25l");
+    }
+    rendered
+}
+
+fn herdr_key_for_input(input: &str) -> Option<&'static str> {
+    const CTRL_KEYS: [&str; 26] = [
+        "ctrl+a",
+        "ctrl+b",
+        "ctrl+c",
+        "ctrl+d",
+        "ctrl+e",
+        "ctrl+f",
+        "ctrl+g",
+        "Backspace",
+        "Tab",
+        "ctrl+j",
+        "ctrl+k",
+        "ctrl+l",
+        "Enter",
+        "ctrl+n",
+        "ctrl+o",
+        "ctrl+p",
+        "ctrl+q",
+        "ctrl+r",
+        "ctrl+s",
+        "ctrl+t",
+        "ctrl+u",
+        "ctrl+v",
+        "ctrl+w",
+        "ctrl+x",
+        "ctrl+y",
+        "ctrl+z",
+    ];
+    match input {
+        "\r" | "\n" => Some("Enter"),
+        "\u{7f}" => Some("Backspace"),
+        "\u{1b}" => Some("esc"),
+        "\u{1b}\u{7f}" => Some("alt+backspace"),
+        "\u{1b}b" => Some("alt+left"),
+        "\u{1b}f" => Some("alt+right"),
+        "\u{1b}[A" => Some("up"),
+        "\u{1b}[B" => Some("down"),
+        "\u{1b}[C" => Some("right"),
+        "\u{1b}[D" => Some("left"),
+        "\u{1b}[13;2u" => Some("shift+enter"),
+        _ if input.len() == 1 => {
+            let byte = input.as_bytes()[0];
+            (1..=26)
+                .contains(&byte)
+                .then(|| CTRL_KEYS[usize::from(byte - 1)])
+        }
+        _ => None,
+    }
+}
+
+fn update_herdr_composer_cursor(input: &str, frame: &str, cursor_from_end: &mut usize) {
+    let Some(content) = herdr_composer_content(frame) else {
+        *cursor_from_end = 0;
+        return;
+    };
+    let characters = content.chars().collect::<Vec<_>>();
+    let length = characters.len();
+    *cursor_from_end = (*cursor_from_end).min(length);
+    let mut cursor = length - *cursor_from_end;
+    match input {
+        "\u{1b}[D" => cursor = cursor.saturating_sub(1),
+        "\u{1b}[C" => cursor = (cursor + 1).min(length),
+        "\u{1b}b" => {
+            while cursor > 0 && characters[cursor - 1].is_whitespace() {
+                cursor -= 1;
+            }
+            if cursor > 0 {
+                let word = composer_word_character(characters[cursor - 1]);
+                while cursor > 0 && composer_word_character(characters[cursor - 1]) == word {
+                    cursor -= 1;
+                }
+            }
+        }
+        "\u{1b}f" => {
+            while cursor < length && characters[cursor].is_whitespace() {
+                cursor += 1;
+            }
+            if cursor < length {
+                let word = composer_word_character(characters[cursor]);
+                while cursor < length && composer_word_character(characters[cursor]) == word {
+                    cursor += 1;
+                }
+            }
+        }
+        "\u{1}" | "\u{1b}[H" | "\u{1b}OH" | "\u{1b}[1~" => cursor = 0,
+        "\u{5}" | "\u{1b}[F" | "\u{1b}OF" | "\u{1b}[4~" => cursor = length,
+        "\r" | "\n" => {
+            *cursor_from_end = 0;
+            return;
+        }
+        "\u{1b}[3~" if cursor < length => {
+            *cursor_from_end = cursor_from_end.saturating_sub(1);
+            return;
+        }
+        _ => return,
+    }
+    *cursor_from_end = length - cursor;
+}
+
+fn composer_word_character(character: char) -> bool {
+    character.is_alphanumeric() || character == '_'
+}
+
+fn herdr_composer_content(frame: &str) -> Option<String> {
+    frame.lines().rev().find_map(|line| {
+        let (_, plain) = compact_herdr_line(line);
+        let prompt = plain.trim_start().strip_prefix('›')?.strip_prefix(' ')?;
+        Some(if prompt == "Implement {feature}" {
+            String::new()
+        } else {
+            prompt.to_owned()
+        })
+    })
+}
+
+fn fill_herdr_composer_line(ansi: &str, plain: &str, background: &str, cols: usize) -> String {
+    let width = UnicodeWidthStr::width(plain);
+    let fill = if width == 0 {
+        cols
+    } else if width % cols == 0 {
+        0
+    } else {
+        cols - width % cols
+    };
+    format!("{background}{ansi}{background}{}\x1b[0m", " ".repeat(fill))
+}
+
+fn herdr_background_sequence(line: &str) -> Option<String> {
+    let bytes = line.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        if let Some(end) = ansi_sequence_end(bytes, index) {
+            let sequence = &line[index..end];
+            if sequence.starts_with("\x1b[48;") || sequence.starts_with("\x1b[48:") {
+                return Some(sequence.to_owned());
+            }
+            index = end;
+        } else {
+            let character = line[index..].chars().next()?;
+            index += character.len_utf8();
+        }
+    }
+    None
+}
+
+fn compact_herdr_line(line: &str) -> (String, String) {
+    let line = line.strip_suffix('\r').unwrap_or(line);
+    let bytes = line.as_bytes();
+    let mut rendered = String::with_capacity(line.len());
+    let mut plain = String::with_capacity(line.len());
+    let mut last_content_end = 0;
+    let mut index = 0;
+    while index < bytes.len() {
+        if let Some(end) = ansi_sequence_end(bytes, index) {
+            rendered.push_str(&line[index..end]);
+            index = end;
+            continue;
+        }
+        let character = line[index..].chars().next().expect("valid UTF-8 character");
+        let end = index + character.len_utf8();
+        rendered.push(character);
+        plain.push(character);
+        if !matches!(character, ' ' | '\t') {
+            last_content_end = rendered.len();
+        }
+        index = end;
+    }
+
+    let mut compact = rendered[..last_content_end].to_owned();
+    let suffix = rendered.as_bytes();
+    let mut suffix_index = last_content_end;
+    while suffix_index < suffix.len() {
+        if let Some(end) = ansi_sequence_end(suffix, suffix_index) {
+            compact.push_str(&rendered[suffix_index..end]);
+            suffix_index = end;
+        } else {
+            let character = rendered[suffix_index..]
+                .chars()
+                .next()
+                .expect("valid UTF-8 character");
+            suffix_index += character.len_utf8();
+        }
+    }
+    (compact, plain.trim_end_matches([' ', '\t']).to_owned())
+}
+
+fn ansi_sequence_end(bytes: &[u8], start: usize) -> Option<usize> {
+    if bytes.get(start) != Some(&0x1b) {
+        return None;
+    }
+    if bytes.get(start + 1) != Some(&b'[') {
+        return Some((start + 2).min(bytes.len()));
+    }
+    bytes[start + 2..]
+        .iter()
+        .position(|byte| (0x40..=0x7e).contains(byte))
+        .map(|offset| start + offset + 3)
+        .or(Some(bytes.len()))
 }
 
 async fn run_herdr(
@@ -1163,8 +1531,10 @@ mod tests {
         Target {
             runtime: "tmux".to_owned(),
             runtime_session_id: "$1".to_owned(),
+            pane_id: "%1".to_owned(),
             external_id: "%1".to_owned(),
             cwd: None,
+            viewer_id: None,
         }
     }
 
@@ -1260,6 +1630,33 @@ mod tests {
         assert!(matches!(rx.try_recv(), Ok(StreamCommand::Resize(100, 30))));
         assert!(matches!(rx.try_recv(), Ok(StreamCommand::Input(data)) if data == b"b"));
         assert!(matches!(rx.try_recv(), Ok(StreamCommand::Input(data)) if data == b"c"));
+    }
+
+    #[test]
+    fn releasing_driver_returns_herdr_to_observer_mode() {
+        let mut registry = Registry::new();
+        let mut target = test_target();
+        target.runtime = "herdr".to_owned();
+        let mut rx = seed(&mut registry, &target, 1);
+        registry
+            .targets
+            .get_mut(&target)
+            .unwrap()
+            .subscribers
+            .get_mut("stream-1")
+            .unwrap()
+            .read_only = false;
+
+        registry.claim("stream-1");
+        assert!(matches!(rx.try_recv(), Ok(StreamCommand::Resize(80, 24))));
+        assert!(matches!(rx.try_recv(), Ok(StreamCommand::TakeControl)));
+
+        let updates = registry.release("stream-1");
+        assert!(registry.targets.get(&target).unwrap().driver.is_none());
+        assert!(updates
+            .iter()
+            .any(|message| message["streamId"] == "stream-1" && message["driver"] == false));
+        assert!(matches!(rx.try_recv(), Ok(StreamCommand::ReleaseControl)));
     }
 
     #[test]
@@ -1463,5 +1860,51 @@ mod tests {
         oversized.push(b'\n');
         let mut reader = BufReader::new(oversized.as_slice());
         assert!(read_herdr_line(&mut reader, &mut line).await.is_err());
+    }
+
+    #[test]
+    fn herdr_tail_is_compacted_bottom_aligned_and_cursor_aware() {
+        let rendered = render_herdr_tail(
+            "\x1b[48;2;59;64;76m› q       \x1b[0m\r\nfooter     \x1b[0m",
+            10,
+            4,
+            0,
+        );
+        assert!(rendered.starts_with("\x1bc\r\n\r\n"));
+        assert!(rendered.contains("› q"));
+        assert!(rendered.contains("\x1b[48;2;59;64;76m       \x1b[0m\r\nfooter"));
+        assert!(rendered.ends_with("\x1b[3;4H\x1b[7m \x1b[27m\x1b[3;4H\x1b[?25l"));
+    }
+
+    #[test]
+    fn empty_codex_composer_places_cursor_before_placeholder() {
+        let rendered = render_herdr_tail("› Implement {feature}\r\nmodel footer", 40, 2, 0);
+        assert!(rendered.ends_with("\x1b[1;3H\x1b[7m \x1b[27m\x1b[1;3H\x1b[?25l"));
+    }
+
+    #[test]
+    fn codex_cursor_uses_terminal_cell_width_for_wide_input() {
+        let rendered = render_herdr_tail("› 🙂\r\nmodel footer", 40, 2, 0);
+        assert!(rendered.ends_with("\x1b[1;5H\x1b[7m \x1b[27m\x1b[1;5H\x1b[?25l"));
+    }
+
+    #[test]
+    fn herdr_input_maps_terminal_controls_to_typed_keys() {
+        assert_eq!(herdr_key_for_input("\r"), Some("Enter"));
+        assert_eq!(herdr_key_for_input("\u{1b}[D"), Some("left"));
+        assert_eq!(herdr_key_for_input("\u{1b}b"), Some("alt+left"));
+        assert_eq!(herdr_key_for_input("\u{17}"), Some("ctrl+w"));
+        assert_eq!(herdr_key_for_input("z"), None);
+        assert_eq!(herdr_key_for_input("pasted text"), None);
+    }
+
+    #[test]
+    fn herdr_cursor_tracks_word_navigation_inside_composer() {
+        let frame = "› one two\r\nmodel footer";
+        let mut cursor_from_end = 0;
+        update_herdr_composer_cursor("\u{1b}b", frame, &mut cursor_from_end);
+        assert_eq!(cursor_from_end, 3);
+        let rendered = render_herdr_tail(frame, 40, 2, cursor_from_end);
+        assert!(rendered.ends_with("\x1b[1;7H\x1b[7m \x1b[27m\x1b[1;7H\x1b[?25l"));
     }
 }

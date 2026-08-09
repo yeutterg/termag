@@ -4,6 +4,7 @@ use serde::Serialize;
 use std::{
     collections::BTreeMap,
     fs,
+    io::{Seek, SeekFrom, Write},
     path::{Component, Path, PathBuf},
 };
 
@@ -37,6 +38,51 @@ pub struct DirectoryListing {
 }
 
 const MAX_ENTRIES: usize = 500;
+pub const MAX_UPLOAD_CHUNK_BYTES: usize = 256 * 1024;
+pub const MAX_UPLOAD_BYTES: u64 = 16 * 1024 * 1024;
+
+pub fn write_upload_chunk(
+    config: &Config,
+    root_key: &str,
+    relative_directory: &str,
+    file_name: &str,
+    upload_id: &str,
+    offset: u64,
+    bytes: &[u8],
+) -> Result<PathBuf> {
+    if bytes.len() > MAX_UPLOAD_CHUNK_BYTES || offset + bytes.len() as u64 > MAX_UPLOAD_BYTES {
+        bail!("file upload exceeds the 16 MiB limit");
+    }
+    if upload_id.len() != 32 || !upload_id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        bail!("invalid upload id");
+    }
+    let name_path = Path::new(file_name);
+    if file_name.is_empty()
+        || file_name.len() > 255
+        || name_path.file_name().and_then(|name| name.to_str()) != Some(file_name)
+        || file_name.bytes().any(|byte| byte == 0 || byte < 0x20)
+    {
+        bail!("invalid upload file name");
+    }
+    let directory = resolve_creation_path(config, Some(root_key), relative_directory)?;
+    let upload_directory = directory.join(".terminalz-uploads");
+    fs::create_dir_all(&upload_directory)?;
+    let upload_directory = fs::canonicalize(upload_directory)?;
+    ensure_allowed(config, &upload_directory)?;
+    let destination = upload_directory.join(format!("{}-{}", &upload_id[..8], file_name));
+    let mut options = fs::OpenOptions::new();
+    options.write(true);
+    if offset == 0 {
+        options.create_new(true);
+    }
+    let mut file = options.open(&destination)?;
+    if file.metadata()?.len() != offset {
+        bail!("upload chunk is out of sequence");
+    }
+    file.seek(SeekFrom::End(0))?;
+    file.write_all(bytes)?;
+    Ok(destination)
+}
 
 pub fn resolve_creation_path(
     config: &Config,

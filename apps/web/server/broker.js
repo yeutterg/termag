@@ -337,6 +337,7 @@ const CAPABILITY_KEYS = [
   "directoryPolicy",
   "powerPolicy",
   "gitOperations",
+  "fileUploads",
 ];
 
 function normalizeCapabilities(value) {
@@ -391,7 +392,7 @@ function createBroker({ prisma, wss }) {
   const agents = new Map();
   const browserStreams = new Map();
   const terminalState = createTerminalCheckpointStore({
-    activeSessionIds: () => new Set([...browserStreams.values()].map(stream => stream.sessionId)),
+    activeSessionIds: () => new Set([...browserStreams.values()].map(stream => stream.stateKey)),
   });
   let sequence = 0;
   const sweep = setInterval(() => terminalState.sweep(), 60_000);
@@ -551,10 +552,10 @@ function createBroker({ prisma, wss }) {
     ) {
       return;
     }
-    const result = terminalState.ingest(anchor.sessionId, frame);
+    const result = terminalState.ingest(anchor.stateKey, frame);
     if (result.gap) {
       for (const stream of browserStreams.values()) {
-        if (stream.sessionId === anchor.sessionId) {
+        if (stream.stateKey === anchor.stateKey) {
           markNeedsResync(stream, "terminal frame sequence was interrupted");
           scheduleFlush(stream, BACKPRESSURE_RETRY_MS);
         }
@@ -562,7 +563,7 @@ function createBroker({ prisma, wss }) {
       return;
     }
     for (const stream of browserStreams.values()) {
-      if (stream.sessionId !== anchor.sessionId || stream.userId !== userId) {
+      if (stream.stateKey !== anchor.stateKey || stream.userId !== userId) {
         continue;
       }
       if (frame.full) {
@@ -764,9 +765,9 @@ function createBroker({ prisma, wss }) {
         if (!anchor || anchor.userId !== record.userId || anchor.deviceName !== deviceName) {
           return;
         }
-        terminalState.drop(anchor.sessionId);
+        terminalState.drop(anchor.stateKey);
         for (const stream of browserStreams.values()) {
-          if (stream.sessionId === anchor.sessionId) {
+          if (stream.stateKey === anchor.stateKey) {
             markNeedsResync(stream, "local terminal output exceeded its bounded queue");
             scheduleFlush(stream, BACKPRESSURE_RETRY_MS);
           }
@@ -868,6 +869,7 @@ function createBroker({ prisma, wss }) {
       userId,
       deviceName: target.agent.deviceName,
       sessionId,
+      stateKey: target.identity.runtime === "herdr" ? streamId : sessionId,
       target,
       attached: false,
       attachPromise: null,
@@ -905,8 +907,8 @@ function createBroker({ prisma, wss }) {
       if (stream.attached) {
         sendAgentEvent(userId, stream.deviceName, "terminal-close", { streamId });
       }
-      if (![...browserStreams.values()].some(other => other.sessionId === sessionId)) {
-        terminalState.drop(sessionId);
+      if (![...browserStreams.values()].some(other => other.stateKey === stream.stateKey)) {
+        terminalState.drop(stream.stateKey);
       }
     }
     ws.once("close", (code, reason) => {
@@ -925,7 +927,7 @@ function createBroker({ prisma, wss }) {
       );
     });
 
-    const checkpoint = terminalState.replay(sessionId);
+    const checkpoint = terminalState.replay(stream.stateKey);
     if (checkpoint) {
       const epoch = stream.replayEpoch;
       sendJson(ws, { type: "checkpoint", sequence: checkpoint.sequence });
@@ -985,7 +987,7 @@ function createBroker({ prisma, wss }) {
             runtimeTarget: {
               runtime: identity.runtime,
               runtimeSessionId: identity.runtimeSessionId,
-              paneId: identity.runtime === "herdr" ? identity.terminalId : identity.paneId,
+              paneId: identity.paneId,
               terminalId: identity.terminalId,
               tmuxSession: identity.runtimeSessionId,
               cwd: current.pane.cwd || current.runtimeSession.path || undefined,
@@ -993,7 +995,7 @@ function createBroker({ prisma, wss }) {
             cols: stream.cols,
             rows: stream.rows,
             readOnly: false,
-            requestCheckpoint: terminalState.claimCheckpointRequest(sessionId),
+            requestCheckpoint: terminalState.claimCheckpointRequest(stream.stateKey),
             checkpointHistoryLines: lowData
               ? LOW_DATA_CHECKPOINT_HISTORY_LINES
               : DEFAULT_CHECKPOINT_HISTORY_LINES,
@@ -1009,7 +1011,7 @@ function createBroker({ prisma, wss }) {
           sendJson(ws, { type: "ready" });
           return true;
         } catch (error) {
-          terminalState.releaseCheckpointRequest(sessionId);
+          terminalState.releaseCheckpointRequest(stream.stateKey);
           stream.attached = false;
           stream.driver = false;
           sendJson(ws, {
@@ -1033,7 +1035,9 @@ function createBroker({ prisma, wss }) {
       } catch {
         return;
       }
-      if (message.type === "input") {
+      if (message.type === "ping") {
+        sendJson(ws, { type: "pong" });
+      } else if (message.type === "input") {
         if (
           typeof message.data !== "string" ||
           Buffer.byteLength(message.data, "utf8") > 256 * 1024 ||
@@ -1062,6 +1066,69 @@ function createBroker({ prisma, wss }) {
       } else if (message.type === "claim-drive" && stream.attached) {
         stream.driver = true;
         sendAgentEvent(userId, stream.deviceName, "terminal-claim-drive", { streamId });
+      } else if (message.type === "release-drive" && stream.attached) {
+        stream.driver = false;
+        sendAgentEvent(userId, stream.deviceName, "terminal-release-drive", { streamId });
+      } else if (message.type === "file-upload-chunk" && stream.attached) {
+        const uploadId = typeof message.uploadId === "string" ? message.uploadId : "";
+        const fileName = typeof message.fileName === "string" ? message.fileName : "";
+        const data = typeof message.data === "string" ? message.data : "";
+        const offset = Number(message.offset);
+        if (
+          !/^[a-f0-9]{32}$/i.test(uploadId) ||
+          !fileName ||
+          fileName.length > 255 ||
+          !Number.isSafeInteger(offset) ||
+          offset < 0 ||
+          data.length > 400_000
+        ) {
+          sendJson(ws, {
+            type: "file-upload-error",
+            uploadId,
+            offset,
+            message: "Invalid upload chunk",
+          });
+          return;
+        }
+        try {
+          const current = findRuntimeTarget(userId, sessionId);
+          const cwd = current?.pane?.cwd;
+          const roots = current?.agent?.inventory?.roots || [];
+          const root = roots
+            .filter(
+              item =>
+                item?.key &&
+                item?.path &&
+                (cwd === item.path || cwd?.startsWith(`${item.path.replace(/\/+$/, "")}/`))
+            )
+            .sort((left, right) => right.path.length - left.path.length)[0];
+          if (!current || !cwd || !root) {
+            throw new Error("Terminal directory is outside the configured upload roots");
+          }
+          const base = root.path.replace(/\/+$/, "");
+          const relativeDirectory = cwd === base ? "" : cwd.slice(base.length + 1);
+          const result = await sendToAgent(userId, stream.deviceName, "file.upload-chunk", {
+            rootKey: root.key,
+            relativeDirectory,
+            fileName,
+            uploadId,
+            offset,
+            data,
+          });
+          sendJson(ws, {
+            type: "file-upload-complete",
+            uploadId,
+            offset,
+            path: result.path,
+          });
+        } catch (error) {
+          sendJson(ws, {
+            type: "file-upload-error",
+            uploadId,
+            offset,
+            message: sanitizeAgentText(error?.message || "Upload failed", 256),
+          });
+        }
       } else if (message.type === "pause") {
         stream.paused = true;
       } else if (message.type === "resume") {

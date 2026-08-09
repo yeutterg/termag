@@ -10,6 +10,7 @@ mod terminal;
 mod tmux;
 
 use anyhow::{Context, Result};
+use base64::Engine;
 use config::Config;
 use futures_util::{SinkExt, StreamExt};
 use power::{PowerManager, PowerMode};
@@ -259,6 +260,7 @@ fn is_terminal_request(kind: &str) -> bool {
             | "terminal-input"
             | "terminal-resize"
             | "terminal-claim-drive"
+            | "terminal-release-drive"
             | "terminal-close"
     )
 }
@@ -326,6 +328,7 @@ fn handle_terminal_request(terminal: &mut Registry, incoming: Incoming) -> Vec<V
             Ok((json!({ "ok": true }), Vec::new()))
         }
         "terminal-claim-drive" => Ok((json!({ "ok": true }), terminal.claim(&stream_id))),
+        "terminal-release-drive" => Ok((json!({ "ok": true }), terminal.release(&stream_id))),
         "terminal-close" => {
             terminal.close(&stream_id);
             Ok((json!({ "ok": true }), Vec::new()))
@@ -348,6 +351,26 @@ async fn handle_request(
                 let relative = incoming.string("relativePath").unwrap_or_default();
                 let listing = fs_policy::list_directory(config, &root, &relative)?;
                 Ok((serde_json::to_value(listing)?, Vec::new()))
+            }
+            "file.upload-chunk" => {
+                let root = incoming.string("rootKey").context("rootKey is required")?;
+                let directory = incoming.string("relativeDirectory").unwrap_or_default();
+                let name = incoming
+                    .string("fileName")
+                    .context("fileName is required")?;
+                let upload_id = incoming
+                    .string("uploadId")
+                    .context("uploadId is required")?;
+                let offset = incoming
+                    .value("offset")
+                    .and_then(Value::as_u64)
+                    .context("offset is required")?;
+                let encoded = incoming.string("data").context("data is required")?;
+                let bytes = base64::engine::general_purpose::STANDARD.decode(encoded)?;
+                let path = fs_policy::write_upload_chunk(
+                    config, &root, &directory, &name, &upload_id, offset, &bytes,
+                )?;
+                Ok((json!({ "path": path.to_string_lossy() }), Vec::new()))
             }
             kind if kind.starts_with("git.") => {
                 let cwd = request_cwd(config, &incoming)?;
@@ -621,6 +644,7 @@ fn inventory_message(snapshot: &InventorySnapshot) -> Value {
         directory_policy: true,
         power_policy: cfg!(target_os = "macos"),
         git_operations: true,
+        file_uploads: true,
     };
     json!({
         "type": "inventory.snapshot", "protocolVersion": PROTOCOL_VERSION,

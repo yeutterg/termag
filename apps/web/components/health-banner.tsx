@@ -43,12 +43,15 @@ function writeDismissed(ids: string[]): void {
 
 export function HealthBanner() {
   const [warnings, setWarnings] = useState<ConfigWarning[]>([]);
-  const [dismissed, setDismissed] = useState<string[]>(() =>
-    typeof window === "undefined" ? [] : readDismissed()
-  );
+  const [dismissed, setDismissed] = useState<string[]>([]);
 
   useEffect(() => {
     let cancelled = false;
+    queueMicrotask(() => {
+      if (!cancelled) {
+        setDismissed(readDismissed());
+      }
+    });
     async function load() {
       try {
         const res = await fetch("/api/health");

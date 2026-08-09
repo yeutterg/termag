@@ -52,9 +52,12 @@ across small writes. Fresh tmux checkpoints use 300 history lines and a 256 KiB 
 desktop 2,000-line / 1 MiB policy; all output produced while the terminal is visible remains lossless.
 
 tmux uses control mode with a stable pane id and `ignore-size`, so a browser does not select or reflow
-the window visible on the physical machine. Herdr viewers begin as observers; keyboard control is a
-renewable driver lease. A focus/click sends `terminal-claim-drive`; `terminal-input` atomically claims
-and writes, so the most recent focus or keystroke across all browser viewers owns input and resize.
+the window visible on the physical machine. Herdr output also stays observer-only: its frames trigger
+a bounded `pane.read` of recent unwrapped ANSI lines, which each browser xterm wraps at its own width
+and follows at the bottom. Input uses Herdr's typed `pane.send_input` API. Terminalz therefore never
+takes over, resizes, or inherits the scroll position of the native Herdr client. Browser viewers still
+use a renewable driver lease to choose the latest input source; programmatic initial focus does not
+claim it, and hiding or blurring Terminalz releases it.
 
 ## Typed requests
 
@@ -62,10 +65,12 @@ The broker and agent both allowlist request names.
 
 - Runtime: `runtime.create-session`, `runtime.create-space`, `runtime.create-tab`, rename/close
   variants for sessions, spaces, tabs, and panes.
-- Filesystem: `list-directory` with `rootKey` + `relativePath`.
+- Filesystem: `list-directory` and bounded `file.upload-chunk` writes with `rootKey` plus a relative
+  directory. Browser drops are capped at five files and 16 MiB each, stored under the canonicalized
+  session directory's `.terminalz-uploads`, and the resulting local path is inserted as input.
 - Git: `git.status`, `git.stage`, `git.branch`, `git.commit`, `git.pull`, `git.push`.
 - Power: `power.acquire`, `power.renew`, `power.release`, `power.get`.
-- Terminal events: attach, input, resize, claim-drive, close.
+- Terminal events: attach, input, resize, claim-drive, release-drive, close.
 
 There are no protocol-v1 aliases and no arbitrary command or shell-string request.
 

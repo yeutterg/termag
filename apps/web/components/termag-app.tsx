@@ -71,6 +71,15 @@ function isTypingTarget(target: EventTarget | null): boolean {
 const POWER_LEASE_MS = 600_000;
 const POWER_RENEW_MS = 120_000;
 
+type StoredRuntimeLocation = {
+  projectId: string;
+  tabId: string;
+};
+
+function activeRuntimeLocationKey(userId: string): string {
+  return `terminalz:active-runtime:${userId}`;
+}
+
 function powerLeaseId(deviceName: string): string {
   const key = `termag-power-lease:${deviceName}`;
   let leaseId = sessionStorage.getItem(key);
@@ -104,7 +113,10 @@ async function updatePowerLease(
 
 function aggregateHerdrStatus(tabs: Tab[]): string {
   const nativeTabStatus = tabs.find(tab => tab.runtimeTabStatus)?.runtimeTabStatus;
-  if (nativeTabStatus) {
+  // Newer Herdr snapshots expose the aggregate tab status directly. Older
+  // snapshots normalize a missing value to `unknown`, so fall back to the
+  // pane statuses instead of hiding a real agent state behind that sentinel.
+  if (nativeTabStatus && nativeTabStatus !== "unknown") {
     return nativeTabStatus;
   }
   const statuses = tabs.map(tab => tab.status);
@@ -244,6 +256,7 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
   const [tokenDevices, setTokenDevices] = useState<string[]>([]);
   const [activeProjectId, setActiveProjectId] = useState(initialProject?.id ?? "");
   const [activeTabId, setActiveTabId] = useState(preferredProjectTab(initialProject)?.id ?? "");
+  const [activeLocationRestored, setActiveLocationRestored] = useState(false);
   // Open by default on desktop, closed on mobile (the drawer pattern). The
   // initial decision is made server-side via platform.showShortcuts (false on
   // phones) so there's no flash of an open drawer.
@@ -359,6 +372,59 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
   useEffect(() => {
     activeTabIdRef.current = activeTabId;
   }, [activeTabId]);
+
+  // Keep this browser tab on the same exact runtime pane after a refresh. Read
+  // storage only after hydration, then accept the saved ids only when both are
+  // still present in the latest server-provided inventory.
+  useEffect(() => {
+    if (activeLocationRestored) {
+      return;
+    }
+    let cancelled = false;
+    let project: Project | undefined;
+    let tab: Tab | undefined;
+    try {
+      const raw = sessionStorage.getItem(activeRuntimeLocationKey(user.id));
+      const stored = raw ? (JSON.parse(raw) as Partial<StoredRuntimeLocation>) : null;
+      project = projects.find(item => item.id === stored?.projectId);
+      tab = project?.tabs.find(item => item.id === stored?.tabId);
+    } catch {
+      // Storage can be unavailable in hardened/private browser contexts. The
+      // normal focused/first-terminal selection remains the safe fallback.
+    }
+    const restore = window.setTimeout(() => {
+      if (cancelled) {
+        return;
+      }
+      if (project && tab) {
+        activeProjectIdRef.current = project.id;
+        activeTabIdRef.current = tab.id;
+        setActiveProjectId(project.id);
+        setActiveTabId(tab.id);
+        tabHistory.remember(project.id, tab.id);
+      }
+      setActiveLocationRestored(true);
+    }, 0);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(restore);
+    };
+  }, [activeLocationRestored, projects, tabHistory, user.id]);
+
+  useEffect(() => {
+    if (!activeLocationRestored || !activeProject || !activeTab) {
+      return;
+    }
+    try {
+      const location: StoredRuntimeLocation = {
+        projectId: activeProject.id,
+        tabId: activeTab.id,
+      };
+      sessionStorage.setItem(activeRuntimeLocationKey(user.id), JSON.stringify(location));
+    } catch {
+      // Selection still works when browser storage is disabled.
+    }
+  }, [activeLocationRestored, activeProject, activeTab, user.id]);
 
   useEffect(() => {
     if (!projectMenuId) {
@@ -1244,10 +1310,7 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
           )}
         >
           <div className="flex h-14 items-center justify-between px-3">
-            <span className="flex items-baseline gap-1.5 px-1">
-              <span className="text-sm font-semibold tracking-tight">Terminalz</span>
-              <span className="text-sm font-normal text-muted">next</span>
-            </span>
+            <span className="px-1 text-sm font-semibold tracking-tight">Terminalz</span>
             <div className="relative flex items-center gap-0.5">
               <button
                 type="button"
@@ -1487,6 +1550,15 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
                                           }}
                                         >
                                           <span className="font-mono opacity-70">↳</span>
+                                          <HerdrStatusIcon
+                                            status={
+                                              connectedDeviceNames.has(project.rootKey)
+                                                ? aggregateHerdrStatus(tabGroup.tabs)
+                                                : "offline"
+                                            }
+                                            variant={herdRIndicatorVariant(project)}
+                                            className="h-3 w-3 text-xs"
+                                          />
                                           <span className="min-w-0 flex-1 truncate">
                                             {tabGroup.name}
                                           </span>
@@ -1529,19 +1601,17 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
                                               }
                                             }}
                                           >
-                                            {project.runtime === "herdr" ? (
+                                            {project.runtime === "herdr" && !hasMultiplePanes ? (
                                               <HerdrStatusIcon
                                                 status={
                                                   connectedDeviceNames.has(project.rootKey)
-                                                    ? hasMultiplePanes
-                                                      ? tab.status
-                                                      : aggregateHerdrStatus(tabGroup.tabs)
+                                                    ? aggregateHerdrStatus(tabGroup.tabs)
                                                     : "offline"
                                                 }
                                                 variant={herdRIndicatorVariant(project)}
                                                 className="h-3 w-3 text-xs"
                                               />
-                                            ) : (
+                                            ) : project.runtime !== "herdr" ? (
                                               <span
                                                 className={cn(
                                                   "h-1.5 w-1.5 shrink-0 rounded-full",
@@ -1552,7 +1622,7 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
                                                   )
                                                 )}
                                               />
-                                            )}
+                                            ) : null}
                                             <TabLabel
                                               name={
                                                 hasMultiplePanes

@@ -49,17 +49,30 @@ export function useSessionNotifications(opts: {
     status: SessionStatus;
   }>;
 }) {
-  const [subscribed, setSubscribed] = useState<Set<string>>(() =>
-    typeof window === "undefined" ? new Set() : readSubscribed()
+  // Keep the server render and the client's first render identical. Browser
+  // capability, permission, and localStorage are all client-only inputs; if
+  // they are read in state initializers, the notification button can appear
+  // before hydration where the server rendered the adjacent close button.
+  const [subscribed, setSubscribed] = useState<Set<string>>(() => new Set());
+  const [permission, setPermission] = useState<NotificationPermission | "unsupported">(
+    "unsupported"
   );
-  const [permission, setPermission] = useState<NotificationPermission | "unsupported">(() => {
-    if (!notificationsSupported()) {
-      return "unsupported";
-    }
-    return Notification.permission;
-  });
   // Previous status snapshot keyed by tabId, used to detect transitions.
   const prevStatusRef = useRef<Map<string, SessionStatus>>(new Map());
+
+  useEffect(() => {
+    let cancelled = false;
+    queueMicrotask(() => {
+      if (cancelled || !notificationsSupported()) {
+        return;
+      }
+      setSubscribed(readSubscribed());
+      setPermission(Notification.permission);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   // Fire on transition into a "done-ish" state.
   useEffect(() => {

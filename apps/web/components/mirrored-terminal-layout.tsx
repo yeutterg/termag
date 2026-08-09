@@ -78,6 +78,7 @@ export function MirroredTerminalLayout({
         status={connected ? tab.session.status : "sleeping"}
         onTitleChange={onTitleChange}
         hideHeader
+        optimisticInput={(tab.runtimeTabName || tab.name).toLowerCase() === "codex"}
       />
     );
   }
@@ -101,6 +102,8 @@ export function MirroredTerminalLayout({
               title={liveTitles[tab.session.id] || tab.runtimePaneName || tab.name}
               status={connected ? tab.session.status : "sleeping"}
               onTitleChange={onTitleChange}
+              hideHeader
+              optimisticInput={(tab.runtimeTabName || tab.name).toLowerCase() === "codex"}
             />
           </div>
         );
