@@ -1141,14 +1141,14 @@ async fn run_herdr_cli(
                                 eprintln!("[terminalz] Herdr input fallback failed: {error:#}");
                             }
                         }
-                    } else {
-                        if let Err(error) = crate::herdr::mutate(
-                            &target.runtime_session_id,
-                            "pane.send_input",
-                            json!({ "pane_id": target.pane_id, "text": text }),
-                        ).await {
-                            eprintln!("[terminalz] Herdr text input failed: {error:#}");
-                        }
+                    } else if let Err(error) = crate::herdr::mutate(
+                        &target.runtime_session_id,
+                        "pane.send_input",
+                        json!({ "pane_id": target.pane_id, "text": text }),
+                    )
+                    .await
+                    {
+                        eprintln!("[terminalz] Herdr text input failed: {error:#}");
                     }
                     // pane.send_input updates pane.read synchronously, but it
                     // does not consistently wake terminal-session observers.

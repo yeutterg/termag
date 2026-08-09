@@ -198,6 +198,7 @@ function TerminalPaneImpl({
   const uploadWaitersRef = useRef(
     new Map<string, { resolve: (path: string) => void; reject: (error: Error) => void }>()
   );
+  const optimisticEchoRef = useRef<(data: string) => void>(() => {});
   const [dragActive, setDragActive] = useState(false);
   const [uploading, setUploading] = useState(false);
   // Capture latest onTitleChange so the xterm listener (set up once) always
@@ -307,6 +308,14 @@ function TerminalPaneImpl({
         writeTerminal(`${optimisticBackground}\x1b[?25h`);
         writeTerminal("\b \b");
       }
+    }
+    optimisticEchoRef.current = echoOptimisticInput;
+
+    function rejectUploadWaiters(message: string) {
+      for (const waiter of uploadWaitersRef.current.values()) {
+        waiter.reject(new Error(message));
+      }
+      uploadWaitersRef.current.clear();
     }
 
     function fitAndResize() {
@@ -486,10 +495,6 @@ function TerminalPaneImpl({
         }
       };
       ws.onclose = event => {
-        for (const waiter of uploadWaitersRef.current.values()) {
-          waiter.reject(new Error("Terminal disconnected during upload"));
-        }
-        uploadWaitersRef.current.clear();
         if (disposed) {
           return;
         }
@@ -499,6 +504,11 @@ function TerminalPaneImpl({
         if (wsRef.current !== ws) {
           return;
         }
+        // Upload waiters belong to the current socket generation. A browser
+        // focus event can replace a stale socket while a Finder drop is in
+        // progress; the superseded socket must not reject uploads already
+        // running on its replacement.
+        rejectUploadWaiters("Terminal disconnected during upload");
         wsRef.current = null;
         brokerPaused = false;
         // Code 1008 (policy violation) is the broker's "this session is gone /
@@ -787,6 +797,7 @@ function TerminalPaneImpl({
       if (resizeTimer) {
         clearTimeout(resizeTimer);
       }
+      rejectUploadWaiters("Terminal closed during upload");
       wsRef.current?.close();
       wsRef.current = null;
       if (onVisibilityRef) {
@@ -813,6 +824,9 @@ function TerminalPaneImpl({
       unsubscribeTheme?.();
       term?.dispose();
       termRef.current = null;
+      if (optimisticEchoRef.current === echoOptimisticInput) {
+        optimisticEchoRef.current = () => {};
+      }
     };
   }, [active, optimisticInput, pageActive, sessionId]);
 
@@ -831,15 +845,19 @@ function TerminalPaneImpl({
     ws.send(JSON.stringify({ type: "claim-drive" }));
   }
 
-  function sendInput(data: string) {
+  function sendInput(data: string, echoInBrowser = false): boolean {
     const ws = wsRef.current;
     if (ws?.readyState !== WebSocket.OPEN || driverStateRef.current?.readOnly) {
-      return;
+      return false;
     }
     // terminal-input is an atomic claim+write at the agent. That makes the
     // latest keystroke authoritative without a second browser→broker frame or
     // a race where control changes between separate claim and input messages.
+    if (echoInBrowser) {
+      optimisticEchoRef.current(data);
+    }
     sendTerminalInput(ws, data);
+    return true;
   }
 
   function uploadChunk(file: File, uploadId: string, offset: number, data: string) {
@@ -877,7 +895,11 @@ function TerminalPaneImpl({
         }
         // Insert a safely shell-quoted local path at the current cursor. This
         // is terminal input, not broker-side command execution.
-        sendInput(`'${uploadedPath.replaceAll("'", `'\\''`)}' `);
+        const inserted = sendInput(`'${uploadedPath.replaceAll("'", `'\\''`)}' `, true);
+        if (!inserted) {
+          throw new Error("File uploaded, but its path could not be inserted into the terminal");
+        }
+        termRef.current?.focus();
       }
     } catch (error) {
       setConnectionIssue({
@@ -938,14 +960,24 @@ function TerminalPaneImpl({
       {connectionIssue && (
         <div className="absolute left-2 top-2 z-30 flex max-w-[calc(100%-1rem)] items-center gap-2 rounded-md border border-line bg-panel/95 px-2 py-1 text-[11px] text-muted shadow-lg backdrop-blur">
           <span className="truncate">
-            {connectionIssue.fatal ? connectionIssue.message : "Reconnecting…"}
+            {!connectionIssue.fatal && connectionIssue.message === "Connection lost"
+              ? "Reconnecting…"
+              : connectionIssue.message}
           </span>
           <button
             type="button"
             className="min-h-9 shrink-0 rounded border border-line bg-bg px-2 font-medium text-text hover:bg-panel2 md:min-h-7"
-            onClick={() => manualReconnectRef.current?.()}
+            onClick={() => {
+              if (connectionIssue.fatal || connectionIssue.message === "Connection lost") {
+                manualReconnectRef.current?.();
+              } else {
+                setConnectionIssue(null);
+              }
+            }}
           >
-            Reconnect
+            {connectionIssue.fatal || connectionIssue.message === "Connection lost"
+              ? "Reconnect"
+              : "Dismiss"}
           </button>
         </div>
       )}
