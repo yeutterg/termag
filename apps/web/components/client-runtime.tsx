@@ -6,6 +6,7 @@ import { useEffect } from "react";
 export function ClientRuntime() {
   useEffect(() => {
     let frame = 0;
+    let refreshingForWorker = false;
     const updateViewport = () => {
       cancelAnimationFrame(frame);
       frame = requestAnimationFrame(() => {
@@ -24,9 +25,29 @@ export function ClientRuntime() {
     window.addEventListener("resize", updateViewport);
 
     if (process.env.NODE_ENV === "production" && "serviceWorker" in navigator) {
-      void navigator.serviceWorker.register("/sw.js", { scope: "/" }).catch(error => {
-        console.warn("[termag] service worker registration failed", error);
-      });
+      const hadController = Boolean(navigator.serviceWorker.controller);
+      const refreshForWorker = () => {
+        if (hadController && !refreshingForWorker) {
+          refreshingForWorker = true;
+          window.location.reload();
+        }
+      };
+      navigator.serviceWorker.addEventListener("controllerchange", refreshForWorker);
+      void navigator.serviceWorker
+        .register("/sw.js", { scope: "/", updateViaCache: "none" })
+        .then(registration => registration.update())
+        .catch(error => {
+          console.warn("[terminalz] service worker registration failed", error);
+        });
+
+      return () => {
+        cancelAnimationFrame(frame);
+        window.visualViewport?.removeEventListener("resize", updateViewport);
+        window.visualViewport?.removeEventListener("scroll", updateViewport);
+        window.removeEventListener("orientationchange", updateViewport);
+        window.removeEventListener("resize", updateViewport);
+        navigator.serviceWorker.removeEventListener("controllerchange", refreshForWorker);
+      };
     }
 
     return () => {
