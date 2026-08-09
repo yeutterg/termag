@@ -1,0 +1,50 @@
+name: terminalz
+
+services:
+  web:
+    image: ${TERMINALZ_IMAGE:-ghcr.io/yeutterg/terminalz}:${TERMINALZ_VERSION:-latest}
+    restart: unless-stopped
+    init: true
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      DATABASE_URL: file:/data/terminalz.db
+      NEXTAUTH_URL: ${NEXTAUTH_URL}
+      NEXTAUTH_SECRET: ${NEXTAUTH_SECRET}
+      TERMINALZ_TRUSTED_NETWORK: ${TERMINALZ_TRUSTED_NETWORK:-false}
+      TERMINALZ_PASSWORD: ${TERMINALZ_PASSWORD:-}
+      TERMINALZ_ALLOWED_ORIGINS: ${TERMINALZ_ALLOWED_ORIGINS:-}
+      TERMINALZ_TRUSTED_PROXY: ${TERMINALZ_TRUSTED_PROXY:-false}
+      # OAuth vars are only used when TERMINALZ_TRUSTED_NETWORK=false (Path B).
+      # `:-` default to empty so trusted-network deployments don't trip warnings.
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
+      TERMINALZ_ALLOWED_EMAIL: ${TERMINALZ_ALLOWED_EMAIL:-}
+    volumes:
+      - terminalz-data:/data
+    expose:
+      - "3000"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+  caddy:
+    image: caddy:2.8
+    restart: unless-stopped
+    depends_on:
+      - web
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      TERMINALZ_HOST: ${TERMINALZ_HOST:-localhost}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+
+volumes:
+  terminalz-data:
+  caddy-data:
+  caddy-config:

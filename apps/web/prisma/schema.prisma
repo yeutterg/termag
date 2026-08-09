@@ -1,0 +1,79 @@
+generator client {
+  provider      = "prisma-client-js"
+  // Each release image is built on its own target platform under buildx.
+  // The builder installs OpenSSL 3 before generation, so `native` selects
+  // exactly one matching engine instead of shipping ARM64 and AMD64 engines
+  // in every image.
+  binaryTargets = ["native"]
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id          String   @id @default(cuid())
+  email       String   @unique
+  displayName String?
+  image       String?
+  theme       String   @default("system")
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  agentTokens    AgentToken[]
+  bootstrapCodes BootstrapCode[]
+}
+
+model AgentToken {
+  id          String    @id @default(cuid())
+  name        String
+  activeName  String?
+  tokenHash   String    @unique
+  tokenPrefix String
+  createdAt   DateTime  @default(now())
+  lastUsedAt  DateTime?
+  revokedAt   DateTime?
+  // Optional accent color (hex like "#ef4444" or a Tailwind token name).
+  // The UI uses this to tint the device chip + pane border so you can
+  // tell "this is the prod box" at a glance.
+  color       String?
+
+  // Default folder the New Project dialog seeds when this device is selected.
+  // Identifies a (rootKey, relativePath) under the agent's reported roots.
+  defaultRootKey      String?
+  defaultRelativePath String?
+  protocolVersion     Int       @default(2)
+  capabilities        String?
+  inventorySnapshot   String?
+  lastInventoryAt     DateTime?
+
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, activeName])
+  @@index([userId])
+}
+
+// One-time, short-TTL code that a fresh agent CLI redeems to receive
+// pre-minted credentials. Used by `termag bootstrap <url>` to skip the
+// copy/paste relay of TERMINALZ_URL + TERMINALZ_AGENT_TOKEN + roots. The code
+// is consumed atomically (consumedAt set on first claim); a second claim
+// fails. The mints-on-claim flow means the new AgentToken row only
+// exists if someone actually claimed it — abandoned codes don't pollute
+// the token table.
+model BootstrapCode {
+  id         String    @id @default(cuid())
+  code       String    @unique
+  deviceName String?
+  expiresAt  DateTime
+  consumedAt DateTime?
+  tokenId    String? // populated on claim; references the AgentToken minted
+  createdAt  DateTime  @default(now())
+
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+}

@@ -1,112 +1,185 @@
-# termag
+# Terminalz
 
-A workspace manager for running multiple AI coding agents in parallel. Provides a web UI for managing projects, viewing agent terminals, choosing an agent runtime per project, and monitoring usage, with Slack integration for remote control.
+Terminalz is a lightweight terminal multiplexer that streams terminals from multiple machines to one
+web browser. A low-footprint Rust agent on each computer makes its local sessions available through an
+outbound encrypted connection—no inbound machine port is required.
+
+Terminalz is heavily inspired by [Termag](https://github.com/psecor/termag) and
+[Herdr](https://github.com/herdrdev/herdr).
+
+If Herdr is running, Terminalz mirrors its sessions, spaces, tabs, panes, split layout, ordering,
+statuses, and dot/symbol iconography. Herdr stays independent and authoritative. Without Herdr, local
+tmux sessions still appear and new sessions can be created inside allowlisted directories.
+
+![Terminalz browser UI](docs/images/termag-ui.png)
 
 ## What it does
 
-Each project gets a paired set of tmux sessions — an **agent** pane (where Codex, Claude Code, or other agents run) and a **ctrl** pane (a regular terminal for commands the agent can't run, like sudo or interactive auth). The web UI renders both terminals side-by-side with xterm.js and shows real-time agent status.
+- Connect any number of uniquely named machines to one web account and switch between all of them in
+  one compact sidebar.
+- Mirror machine → Herdr session → space → tab organization, revealing pane rows only for actual
+  multi-pane tabs.
+- Stream exact terminal bytes bidirectionally. The latest terminal focus, click, or keystroke owns the
+  writer/resize lease; a later interaction from another browser takes it back.
+- Keep local terminals awake on macOS while still allowing display sleep and lock.
+- Create, rename, and close runtime objects through typed Herdr/tmux operations—never an arbitrary
+  remote shell-command channel.
 
-### Key features
-
-- **Multi-project management** — create, rename, archive projects; each gets its own tmux sessions and working directory
-- **Live terminal streaming** — xterm.js terminals connected via WebSocket to server-side PTYs attached to tmux
-- **Per-project agent choice** — choose `Codex` or `Claude` when creating a project, with a persisted per-user default
-- **Agent status tracking** — Claude Code hooks and Codex app-server status report working/waiting/idle state; shown as green/yellow/red indicators and a hyperspace animation that speeds up with activity
-- **Usage dashboard** — tracks API token usage and cost with a thermometer gauge (today vs 14-day trailing median) and expandable 30-day/7-day histograms
-- **Slack + Discord integration** — `/t` commands to view and control terminals from Slack or Discord; emoji reactions to respond to numbered prompts; `/t create` to create projects from chat
-- **Channel-based routing** — projects get a `#proj-<name>` Slack channel on creation; `/t` commands in project channels auto-route without `/t switch`
-- **Slack notifications** — automatic pane capture posted to Slack when an agent needs input, with reaction hints for quick response
-- **Per-user agent architecture** — each user's agent runs as their unix user, handling tmux and filesystem operations with proper permissions
-- **Google OAuth** — multi-user authentication mapped to unix accounts
+On mobile and constrained networks, Terminalz keeps visible output exact while batching small frames,
+compressing WebSockets, requesting smaller reconnect checkpoints, applying compact inventory patches,
+and pausing hidden viewers. Phone xterm scrollback is capped at 500 lines; desktop is 2,000.
 
 ## Architecture
 
-```
-Browser (React + xterm.js)
-  ↕ WebSocket
-Express server (port 3040)
-  ├── REST API (projects, status, usage, auth)
-  ├── WebSocket: terminal streams, status push
-  ├── Slack Bolt (Socket Mode)
-  └── PostgreSQL (Prisma ORM)
-  ↕ WebSocket
-Per-user agent (node agent.js)
-  ├── node-pty → tmux attach
-  └── Codex bridge processes (per Codex-backed agent session)
+```text
+Browsers ── HTTPS/WSS ──> Terminalz web (Next.js custom server + SQLite)
+                              ▲
+                              │ outbound authenticated WSS
+                 ┌────────────┼────────────┐
+             terminalz     terminalz    terminalz
+             laptop        workstation  server
+             ├─ Herdr      ├─ Herdr     ├─ tmux
+             └─ tmux       └─ tmux      └─ allowlisted roots
 ```
 
-## Project structure
+SQLite stores users, hashed machine tokens, bootstrap codes, and one latest normalized inventory
+snapshot per machine. Terminal output and replay checkpoints remain memory-only and bounded.
 
-```
-backend/          Express + TypeScript server
-  src/
-    routes/       REST endpoints (projects, status, usage)
-    services/     tmux, status, agent registry
-    slack/        Slack bot (events, formatting, LTS relay, home view)
-    middleware/   auth
-  prisma/         schema + migrations
-frontend/         React 18 + Vite
-  src/
-    components/   Terminal, ProjectControl, UsageMini, Hyperspace
-    contexts/     AuthContext, ProjectContext
-    services/     API client
-agent/            Per-user agent (plain JS, no build step)
-relay/            Chrome tab capture relay (runs on laptop)
-deploy/           Systemd units, setup docs, hook configs
-```
+## Recommended installation
 
-## Prerequisites
+The web control plane and native machine agent are distributed separately but share one version tag:
 
-- **Node.js** 20+
-- **PostgreSQL** 14+
-- **tmux** 3.0+
-- **Apache** 2.4+ with `mod_proxy`, `mod_proxy_http`, `mod_proxy_wstunnel` (or another reverse proxy supporting WebSockets)
-- A **public HTTPS domain** — Google OAuth and Slack callbacks both require it. For local-only use you can run without auth, but the Slack/Discord features won't work.
+- Web: multi-architecture `ghcr.io/yeutterg/terminalz` image with Docker Compose.
+- Agent/CLI: `terminalz` native binary through Homebrew or GitHub Releases.
 
-## Quick start
+The agent is intentionally not containerized: it needs the current user's Herdr socket, tmux socket,
+filesystem policy, git credentials, and macOS power controls.
 
-See [deploy/setup.md](deploy/setup.md) for full setup instructions, including reverse-proxy config and how to wire up Slack and Discord apps.
+### 1. Run the web control plane
+
+Download `compose.yml` and `terminalz.env.example` from a release, then:
 
 ```bash
-# Build
-cd backend && npm install && npm run build
-cd ../frontend && npm install && npm run build
-
-# Run
-sudo systemctl start termag          # main server
-systemctl --user start termag-agent  # per-user agent
+cp terminalz.env.example .env
+openssl rand -hex 32 # put this value in NEXTAUTH_SECRET
+docker compose --env-file .env up -d
 ```
 
-## Claude Code hooks integration
+Or from a checkout:
 
-termag tracks live agent status (working / waiting / idle) by receiving
-status events from Claude Code's `UserPromptSubmit`, `PreToolUse`,
-`PostToolUse`, and `Stop` hooks. When a Claude session inside a termag
-project pane goes idle and needs input, termag posts the captured pane to
-your Slack channel automatically.
+```bash
+git clone https://github.com/yeutterg/terminalz.git
+cd terminalz
+cp infra/.env.example infra/.env
+docker compose --env-file infra/.env -f infra/docker-compose.yml up -d
+```
 
-Hook configuration is documented in [deploy/claude-hooks.md](deploy/claude-hooks.md).
+For private Tailscale/WireGuard/LAN use, set:
 
-## Configuration
+```env
+TERMINALZ_HOST=terminalz.tailnet
+NEXTAUTH_URL=https://terminalz.tailnet
+NEXTAUTH_SECRET=<random value>
+TERMINALZ_TRUSTED_NETWORK=true
+TERMINALZ_PASSWORD=<long random value>
+```
 
-All configuration is via environment variables in `backend/.env`. See `.env.example` for the full list.
+For a public hostname, leave `TERMINALZ_TRUSTED_NETWORK=false`, configure Google OAuth, and set
+`TERMINALZ_ALLOWED_EMAIL`. The callback is
+`https://terminalz.example.com/api/auth/callback/google`.
 
-Key variables:
-- `DATABASE_URL` — PostgreSQL connection string
-- `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` — OAuth credentials
-- `SESSION_SECRET` — Express session secret
-- `SLACK_BOT_TOKEN`, `SLACK_APP_TOKEN`, `SLACK_SIGNING_SECRET` — Slack bot
-- `ALLOWED_USERS` — comma-separated `email:unixuser` pairs
+To build the image locally instead of pulling GHCR:
 
-## Agent providers
+```bash
+docker compose --env-file infra/.env \
+  -f infra/docker-compose.yml -f infra/docker-compose.build.yml up -d --build
+```
 
-`termag` now persists the selected agent provider on each `agent` workflow.
+### 2. Install the agent on every machine
 
-- `codex` projects launch the managed Codex bridge and start `codex --remote` in the `*-agent` tmux pane
-- `claude` projects keep the existing Claude startup path
-- each user also has a saved `defaultAgentProvider`, used to initialize the create-project form
+Homebrew (recommended on macOS and Linux):
 
-The UI lets you:
-- choose `Codex` or `Claude` when creating a new project
-- change your default agent provider in the sidebar
-- see the current provider in the project list (`CX` / `CL`)
+```bash
+brew install yeutterg/tap/terminalz
+```
+
+GitHub Release fallback:
+
+```bash
+curl -fsSL https://github.com/yeutterg/terminalz/releases/latest/download/install-agent.sh | sh
+```
+
+In the web UI, choose **Machines → Bootstrap machine**, then run its one-use command on the target:
+
+```bash
+terminalz bootstrap https://terminalz.example.com/api/bootstrap/claim/...
+brew services start terminalz # macOS/Homebrew Linux
+```
+
+Manual configuration uses `~/.terminalz/config.json` or canonical environment variables:
+
+```bash
+export TERMINALZ_URL=wss://terminalz.example.com/api/ws/agent
+export TERMINALZ_AGENT_TOKEN=tmag_...
+export TERMINALZ_AGENT_ROOTS='{"projects":"~/Projects"}'
+terminalz
+```
+
+Existing `~/.termag/config.json` and `TERMAG_*` variables remain readable during migration. New writes
+go to `~/.terminalz/config.json`. Plain `ws://` is accepted only for exact loopback hosts.
+
+Useful commands:
+
+```bash
+terminalz list
+terminalz attach laptop:my-space
+terminalz config show
+terminalz config set roots '{"projects":"~/Projects","services":"~/Services"}'
+```
+
+## Local development
+
+```bash
+npm ci
+cp .env.example apps/web/.env.local
+npm run db:migrate
+npm run dev
+```
+
+Run the native agent in another terminal:
+
+```bash
+TERMINALZ_URL=ws://localhost:3000/api/ws/agent \
+TERMINALZ_AGENT_TOKEN=tmag_... \
+TERMINALZ_AGENT_ROOTS='{"local":"~/Projects"}' \
+cargo run --manifest-path apps/agent-rs/Cargo.toml
+```
+
+The production web server is much lighter than the development compiler. `npm start` uses a 192 MiB
+V8 old-space ceiling; the Rust release agent targets less than 20 MiB RSS and a binary below 15 MiB.
+
+## Verification
+
+```bash
+npm run typecheck
+npm run lint
+npm test -- --runInBand
+npm run build
+
+cd apps/agent-rs
+cargo fmt --check
+cargo clippy --locked --all-targets -- -D warnings
+cargo test --locked
+cargo build --release --locked
+```
+
+## Security notes
+
+- Raw machine tokens are shown once and stored hashed in SQLite.
+- Machine names are unique per account, so multiple connected agents cannot silently replace one
+  another; reconnecting the same named machine intentionally replaces only its old socket.
+- Directory, git, runtime, and power operations are allowlisted and validated on the local agent.
+- The service worker never caches API, auth, WebSocket, navigation, or terminal responses.
+- Terminal output is not persisted or sent to observability services.
+- Trusted-network mode is only as private as the network in front of it. Use OAuth on the open
+  internet.

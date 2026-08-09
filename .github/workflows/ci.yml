@@ -1,0 +1,82 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master, develop, "port/**"]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust-agent:
+    name: Rust agent (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.82.0
+        with:
+          components: rustfmt, clippy
+      - run: cargo fmt --manifest-path apps/agent-rs/Cargo.toml --check
+      - run: cargo clippy --locked --manifest-path apps/agent-rs/Cargo.toml --all-targets -- -D warnings
+      - run: cargo test --locked --manifest-path apps/agent-rs/Cargo.toml
+      - run: cargo build --release --locked --manifest-path apps/agent-rs/Cargo.toml
+      - name: Enforce 15 MiB binary ceiling
+        run: test $(wc -c < apps/agent-rs/target/release/terminalz) -le 15728640
+
+  web-quality:
+    name: Web lint, types, and tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run format:check
+      - run: npm run typecheck
+      - run: npm test -- --runInBand
+
+  web-build:
+    name: Web production build
+    runs-on: ubuntu-latest
+    needs: web-quality
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - run: npm ci
+      - run: npm run build -w apps/web
+        env:
+          NODE_ENV: production
+          DATABASE_URL: file:./dev.db
+          NEXTAUTH_URL: http://localhost:3000
+          NEXTAUTH_SECRET: test-secret-for-build
+
+  container:
+    name: Web container
+    runs-on: ubuntu-latest
+    needs: web-build
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: apps/web/Dockerfile
+          push: false
+          tags: terminalz:test
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

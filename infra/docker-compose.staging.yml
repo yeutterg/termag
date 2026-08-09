@@ -1,0 +1,51 @@
+name: terminalz-staging
+
+services:
+  web:
+    image: ${TERMINALZ_IMAGE:-ghcr.io/yeutterg/terminalz}:${TERMINALZ_VERSION:-edge}
+    restart: unless-stopped
+    environment:
+      NODE_ENV: staging
+      PORT: 3000
+      DATABASE_URL: file:/data/terminalz-staging.db
+      NEXTAUTH_URL: ${NEXTAUTH_URL}
+      NEXTAUTH_SECRET: ${NEXTAUTH_SECRET}
+      TERMINALZ_TRUSTED_NETWORK: ${TERMINALZ_TRUSTED_NETWORK:-false}
+      TERMINALZ_PASSWORD: ${TERMINALZ_PASSWORD:-}
+      # OAuth vars (optional for staging)
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
+      TERMINALZ_ALLOWED_EMAIL: ${TERMINALZ_ALLOWED_EMAIL:-}
+    volumes:
+      - terminalz-staging-data:/data
+    expose:
+      - "3000"
+    networks:
+      - terminalz-staging-network
+
+  caddy:
+    image: caddy:2.8
+    restart: unless-stopped
+    depends_on:
+      - web
+    ports:
+      - "8080:80"
+      - "8443:443"
+    environment:
+      TERMINALZ_HOST: ${TERMINALZ_HOST:-staging.terminalz.example.com}
+      ACME_AGREE: "true"
+    volumes:
+      - ./Caddyfile.staging:/etc/caddy/Caddyfile:ro
+      - caddy-staging-data:/data
+      - caddy-staging-config:/config
+    networks:
+      - terminalz-staging-network
+
+volumes:
+  terminalz-staging-data:
+  caddy-staging-data:
+  caddy-staging-config:
+
+networks:
+  terminalz-staging-network:
+    driver: bridge

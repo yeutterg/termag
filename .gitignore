@@ -1,20 +1,32 @@
 node_modules/
+.next/
 dist/
+build/
+target/
+coverage/
+
 .env
+.env.*
+!.env.example
+apps/web/.env.local
+apps/agent/.env
+
+*.log
+*.tsbuildinfo
 *.js.map
 *.d.ts.map
+apps/web/.termag-server.json
+apps/web/.terminalz-server.json
 
-# Prisma
-backend/prisma/migrations/**/migration_lock.toml
-
-# Frontend build
-frontend/dist/
-
-# Relay config (contains tokens)
-relay/relay.config.json
-
-# Agent config (contains tokens)
-agent/agent.config.json
+# SQLite
+*.db
+*.db-journal
+*.db-shm
+*.db-wal
+apps/web/prisma/dev.db*
 
 # OS
 .DS_Store
+
+# npm credentials — only ever live in ~/.npmrc, never inside the repo
+.npmrc

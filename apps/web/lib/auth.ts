@@ -1,0 +1,342 @@
+import { NextResponse } from "next/server";
+import { cookies } from "next/headers";
+import type { User } from "@prisma/client";
+import crypto from "node:crypto";
+import { prisma } from "./prisma";
+
+export const PASSWORD_COOKIE = "terminalz-auth";
+const LEGACY_PASSWORD_COOKIE = "termag-auth";
+
+/**
+ * "Trusted network" mode is opt-in: when enabled, termag assumes it sits
+ * behind a private-network ACL (Tailscale, WireGuard, ssh tunnel, etc.)
+ * and every request resolves to a single configured user. Set
+ * TERMINALZ_TRUSTED_NETWORK="true" to enable. The default is OAuth — that
+ * way a fresh deployment can't accidentally be world-readable.
+ *
+ * The laptop-agent token path is unaffected either way.
+ */
+export function trustedNetworkEnabled(): boolean {
+  return process.env.TERMINALZ_TRUSTED_NETWORK === "true";
+}
+
+export function trustedUserEmail(): string {
+  return (
+    process.env.TERMINALZ_TRUSTED_USER_EMAIL?.toLowerCase().trim() ||
+    process.env.TERMINALZ_ALLOWED_EMAIL?.toLowerCase().trim() ||
+    "trusted@terminalz.local"
+  );
+}
+
+async function ensureTrustedUser() {
+  return prisma.user.upsert({
+    where: { email: trustedUserEmail() },
+    update: {},
+    create: { email: trustedUserEmail(), displayName: "Trusted User", theme: "dark" },
+  });
+}
+
+/**
+ * Optional shared-password gate that layers on top of trusted-network mode.
+ * Useful when the URL leaks accidentally — won't survive a determined attacker
+ * but blocks casual access. Use OAuth for anything public.
+ */
+export function passwordGateEnabled(): boolean {
+  return trustedNetworkEnabled() && Boolean(process.env.TERMINALZ_PASSWORD);
+}
+
+export function passwordCookieValue(): string {
+  return crypto
+    .createHash("sha256")
+    .update(process.env.TERMINALZ_PASSWORD || "")
+    .digest("hex");
+}
+
+function safeTimingEqual(left: string, right: string): boolean {
+  const leftBuffer = Buffer.from(left);
+  const rightBuffer = Buffer.from(right);
+  return (
+    leftBuffer.length === rightBuffer.length && crypto.timingSafeEqual(leftBuffer, rightBuffer)
+  );
+}
+
+function sha256Hex(value: string): string {
+  return crypto.createHash("sha256").update(value).digest("hex");
+}
+
+export function checkPassword(provided: string): boolean {
+  const expected = process.env.TERMINALZ_PASSWORD || "";
+  return expected.length > 0 && safeTimingEqual(sha256Hex(expected), sha256Hex(provided));
+}
+
+export async function passwordCookieValid(): Promise<boolean> {
+  if (!passwordGateEnabled()) {
+    return true;
+  }
+  const expected = passwordCookieValue();
+  const cookieStore = await cookies();
+  const got =
+    cookieStore.get(PASSWORD_COOKIE)?.value || cookieStore.get(LEGACY_PASSWORD_COOKIE)?.value;
+  return Boolean(got && safeTimingEqual(got, expected));
+}
+
+export async function currentUser() {
+  if (trustedNetworkEnabled()) {
+    if (passwordGateEnabled() && !(await passwordCookieValid())) {
+      return null;
+    }
+    return ensureTrustedUser();
+  }
+  // Trusted/private deployments never load NextAuth, Google OAuth, JOSE, or
+  // OpenID modules. Keep that substantial dependency graph in its own lazy
+  // chunk and pay for it only when OAuth mode is actually used.
+  const [{ getServerSession }, { authOptions }] = await Promise.all([
+    import("next-auth"),
+    import("./auth-options"),
+  ]);
+  const session = await getServerSession(authOptions);
+  const userId = session?.user?.id;
+  if (!userId) {
+    return null;
+  }
+  return prisma.user.findUnique({ where: { id: userId } });
+}
+
+/**
+ * Bearer-token auth for the CLI / non-browser clients. Caller passes the
+ * raw token from `Authorization: Bearer …`; if it matches an unrevoked
+ * AgentToken row, we return its User. Used by `termag list` and
+ * `termag attach` so a CLI on any device with the agent token can reach
+ * the broker without a session cookie.
+ */
+export async function userFromBearerToken(token: string | undefined) {
+  if (!token) {
+    return null;
+  }
+  const trimmed = token.trim();
+  // Real tokens are `tmag_` + 43-char base64url(32 bytes) = 48 chars total.
+  // Reject anything well outside that band before a DB round-trip so blind
+  // probing can't enumerate tokens via timing of the hash + index lookup.
+  if (trimmed.length < 32 || trimmed.length > 256) {
+    return null;
+  }
+  if (!trimmed.startsWith("tmag_")) {
+    return null;
+  }
+  // Local import to avoid a top-level cycle (tokens.ts imports nothing).
+  const { hashToken } = await import("./tokens");
+  const record = await prisma.agentToken.findFirst({
+    where: { tokenHash: hashToken(trimmed), revokedAt: null },
+    include: { user: true },
+  });
+  if (!record) {
+    return null;
+  }
+  // Refresh lastUsedAt so the Devices dialog reflects CLI activity too.
+  prisma.agentToken
+    .update({
+      where: { id: record.id },
+      data: { lastUsedAt: new Date() },
+    })
+    .catch(() => {});
+  return record.user;
+}
+
+function extractBearerToken(
+  request: Request | { headers: { get(name: string): string | null } }
+): string | undefined {
+  const header = request.headers.get("authorization");
+  if (!header) {
+    return undefined;
+  }
+  const match = /^Bearer\s+(.+)$/i.exec(header);
+  return match?.[1]?.trim();
+}
+
+function unauthorized() {
+  return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+}
+
+function forbidden(reason: string) {
+  return NextResponse.json({ error: reason }, { status: 403 });
+}
+
+/**
+ * Hard cap on request body size for JSON API endpoints. Next.js Route
+ * Handlers don't honor experimental.serverActions.bodySizeLimit, and
+ * request.json() will buffer indefinitely. Without this, an attacker can
+ * POST a multi-GB payload to any endpoint and OOM the broker before any
+ * validation runs.
+ *
+ * Default ceiling is 256 KB — enough for the largest legitimate payload
+ * (publish, with arrays of windows) but well below what would matter for
+ * resource exhaustion. Routes that genuinely need more can override.
+ */
+const DEFAULT_BODY_LIMIT = 256 * 1024;
+
+export async function readJsonBody<T = unknown>(
+  request: Request,
+  limit = DEFAULT_BODY_LIMIT
+): Promise<{ ok: true; data: T } | { ok: false; response: Response }> {
+  const declared = request.headers.get("content-length");
+  if (declared) {
+    const parsed = Number(declared);
+    if (Number.isFinite(parsed) && parsed > limit) {
+      return {
+        ok: false,
+        response: NextResponse.json({ error: "Request body too large" }, { status: 413 }),
+      };
+    }
+  }
+  // Even when Content-Length lies or is absent, stream the body and abort
+  // once we exceed the cap. clone() so a caller could re-read on success.
+  let total = 0;
+  const chunks: Uint8Array[] = [];
+  const reader = request.body?.getReader();
+  if (!reader) {
+    return { ok: true, data: undefined as unknown as T };
+  }
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) {
+        break;
+      }
+      if (value) {
+        total += value.byteLength;
+        if (total > limit) {
+          reader.cancel().catch(() => {});
+          return {
+            ok: false,
+            response: NextResponse.json({ error: "Request body too large" }, { status: 413 }),
+          };
+        }
+        chunks.push(value);
+      }
+    }
+  } finally {
+    reader.releaseLock?.();
+  }
+  if (total === 0) {
+    return { ok: true, data: undefined as unknown as T };
+  }
+  const joined = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    joined.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  try {
+    const text = new TextDecoder().decode(joined);
+    return { ok: true, data: JSON.parse(text) as T };
+  } catch {
+    return {
+      ok: false,
+      response: NextResponse.json({ error: "Invalid JSON body" }, { status: 400 }),
+    };
+  }
+}
+
+/**
+ * Origin-header CSRF check. Mutating methods (POST/PATCH/PUT/DELETE) on a
+ * cookie-authenticated request must originate from the same host as the
+ * request (or an explicitly allowlisted origin). This shuts the door on
+ * cross-site form / fetch attacks even when SameSite=lax cookies are
+ * present. Bearer-authenticated calls (CLI) are exempt — they don't ride
+ * on cookies so CSRF isn't the threat model.
+ *
+ * We also honor Sec-Fetch-Site when present (Chromium/Firefox always send
+ * it): "same-origin" / "same-site" / "none" (top-level nav) are accepted;
+ * "cross-site" is rejected before we even look at Origin.
+ */
+const MUTATING_METHODS = new Set(["POST", "PATCH", "PUT", "DELETE"]);
+
+export function isOriginSafe(request: Request): boolean {
+  if (!MUTATING_METHODS.has(request.method.toUpperCase())) {
+    return true;
+  }
+
+  const fetchSite = request.headers.get("sec-fetch-site");
+  // Reject cross-site (different eTLD+1) and same-site (subdomain) outright.
+  // Same-site looks safe but isn't: if termag runs at termag.example.com
+  // alongside any other content at *.example.com, an XSS on a sibling host
+  // could mount CSRF against us. Only same-origin is acceptable.
+  if (fetchSite === "cross-site" || fetchSite === "same-site") {
+    return false;
+  }
+  if (fetchSite === "same-origin") {
+    return true;
+  }
+  // Top-level navigations send Sec-Fetch-Site: none. For a mutating method
+  // we still require the explicit Origin check below.
+
+  const origin = request.headers.get("origin");
+  if (!origin) {
+    // No Origin AND no Sec-Fetch-Site means a very old client or a non-browser
+    // (curl). Without a Bearer token, we don't trust it for a mutation.
+    return false;
+  }
+  let originHost: string;
+  try {
+    originHost = new URL(origin).host;
+  } catch {
+    return false;
+  }
+  const requestHost = request.headers.get("host");
+  if (requestHost && originHost === requestHost) {
+    return true;
+  }
+
+  // Allowlist via TERMINALZ_ALLOWED_ORIGINS (comma-separated). Same env knob
+  // the WS layer uses, so the two stay in sync.
+  const allowed = (process.env.TERMINALZ_ALLOWED_ORIGINS || "")
+    .split(",")
+    .map(entry => entry.trim())
+    .filter(Boolean)
+    .map(entry => {
+      try {
+        return new URL(entry).host;
+      } catch {
+        return entry.replace(/\/.*/, "");
+      }
+    });
+  return allowed.includes(originHost);
+}
+
+/**
+ * Wraps a route handler with auth: short-circuits to 401 when the user isn't
+ * signed in, otherwise calls the inner handler with the resolved User as the
+ * first argument. Throwing a Response from a Next.js route handler is treated
+ * as a 500, so this wrapper keeps auth flow declarative without throwing.
+ *
+ * Cookie-authenticated mutations also get a CSRF Origin check before the
+ * handler runs. Bearer-authenticated mutations skip it.
+ */
+export function withAuth<TArgs extends unknown[]>(
+  handler: (user: User, ...args: TArgs) => Promise<Response> | Response
+): (...args: TArgs) => Promise<Response> {
+  return async (...args: TArgs) => {
+    // Try Bearer token first when a Request is available — keeps the CLI's
+    // Authorization header from being defeated by a stray session cookie in
+    // some terminal setups. Browser callers don't send Bearer, so they fall
+    // through to currentUser() as before.
+    const maybeRequest = args.find((arg): arg is Request => arg instanceof Request);
+    if (maybeRequest) {
+      const token = extractBearerToken(maybeRequest);
+      if (token) {
+        const tokenUser = await userFromBearerToken(token);
+        if (tokenUser) {
+          return handler(tokenUser, ...args);
+        }
+      }
+    }
+    const user = await currentUser();
+    if (!user) {
+      return unauthorized();
+    }
+    if (maybeRequest && !isOriginSafe(maybeRequest)) {
+      return forbidden("CSRF check failed: cross-site request blocked");
+    }
+    return handler(user, ...args);
+  };
+}

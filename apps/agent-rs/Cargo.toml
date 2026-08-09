@@ -1,0 +1,33 @@
+[package]
+name = "terminalz"
+version = "0.2.0"
+edition = "2021"
+rust-version = "1.82"
+license = "MIT"
+description = "Low-footprint outbound agent and CLI for Terminalz"
+
+[[bin]]
+name = "terminalz"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1.0"
+base64 = "0.22"
+futures-util = "0.3"
+libc = "0.2"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1.45", features = ["io-std", "io-util", "macros", "net", "process", "rt", "signal", "sync", "time"] }
+tokio-tungstenite = { version = "0.26", features = ["rustls-tls-native-roots"] }
+unicode-width = "0.2"
+
+[profile.release]
+codegen-units = 1
+lto = true
+# "s" rather than "z": this daemon spends its time copying terminal bytes and
+# decoding tmux control output, and "z" additionally disables loop
+# vectorization for a fraction of a MiB against a 15 MiB ceiling the binary
+# clears by an order of magnitude.
+opt-level = "s"
+panic = "abort"
+strip = true

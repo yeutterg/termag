@@ -1,0 +1,59 @@
+{
+  "name": "terminalz",
+  "private": true,
+  "version": "0.2.0",
+  "type": "module",
+  "workspaces": [
+    "apps/web"
+  ],
+  "scripts": {
+    "dev": "NEXT_TELEMETRY_DISABLED=\"${NEXT_TELEMETRY_DISABLED:-1}\" NODE_OPTIONS=\"${NODE_OPTIONS:---max-old-space-size=384 --max-semi-space-size=2}\" node apps/web/scripts/dev.js",
+    "build": "npm run build -w apps/web",
+    "start": "NODE_ENV=production NEXT_TELEMETRY_DISABLED=\"${NEXT_TELEMETRY_DISABLED:-1}\" NODE_OPTIONS=\"${NODE_OPTIONS:---max-old-space-size=192 --max-semi-space-size=2}\" node apps/web/server.js",
+    "db:generate": "npm run db:generate -w apps/web",
+    "db:migrate": "npm run db:migrate -w apps/web",
+    "db:backup": "./scripts/backup-db.sh",
+    "db:restore": "./scripts/restore-db.sh",
+    "test": "jest",
+    "test:watch": "jest --watch",
+    "test:coverage": "jest --coverage",
+    "lint": "npm run lint -w apps/web",
+    "lint:fix": "npm run lint:fix -w apps/web",
+    "format": "prettier --write \"apps/**/*.{ts,tsx,js,jsx,json,css,md}\"",
+    "format:check": "prettier --check \"apps/**/*.{ts,tsx,js,jsx,json,css,md}\"",
+    "typecheck": "npm run typecheck -w apps/web",
+    "prepare": "husky"
+  },
+  "engines": {
+    "node": ">=20.9"
+  },
+  "overrides": {
+    "next": {
+      "postcss": "8.5.25",
+      "sharp": "0.35.0"
+    }
+  },
+  "devDependencies": {
+    "@next/eslint-plugin-next": "^15.5.22",
+    "@types/jest": "^30.0.0",
+    "@typescript-eslint/eslint-plugin": "^8.60.0",
+    "@typescript-eslint/parser": "^8.60.0",
+    "eslint": "^9.39.4",
+    "eslint-plugin-react": "^7.37.5",
+    "eslint-plugin-react-hooks": "^7.1.1",
+    "husky": "^9.1.7",
+    "jest": "^30.4.2",
+    "lint-staged": "^17.0.6",
+    "prettier": "^3.8.3",
+    "ts-jest": "^29.4.11"
+  },
+  "lint-staged": {
+    "*.{ts,tsx,js,jsx}": [
+      "eslint --fix",
+      "prettier --write"
+    ],
+    "*.{json,css,md}": [
+      "prettier --write"
+    ]
+  }
+}
