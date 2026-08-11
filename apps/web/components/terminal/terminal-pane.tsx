@@ -263,6 +263,7 @@ function TerminalPaneImpl({
     let visibilityPaused = document.visibilityState === "hidden";
     let brokerPaused = false;
     let followCheckpoint = false;
+    let checkpointScrollOffset = 0;
     let optimisticSinceCheckpoint = false;
     let optimisticBackground = "";
 
@@ -279,7 +280,12 @@ function TerminalPaneImpl({
       ws.send(JSON.stringify({ type: shouldPause ? "pause" : "resume" }));
     }
 
-    function writeTerminal(data: string | Uint8Array, followBottom = false, restoreCursor = "") {
+    function writeTerminal(
+      data: string | Uint8Array,
+      followBottom = false,
+      restoreCursor = "",
+      restoreScrollOffset = 0
+    ) {
       if (!term || disposed) {
         return;
       }
@@ -291,14 +297,23 @@ function TerminalPaneImpl({
       }
       term.write(data, () => {
         queuedWriteBytes = Math.max(0, queuedWriteBytes - byteCount);
-        if (followBottom && !disposed) {
-          term?.scrollToBottom();
-        }
-        if (restoreCursor && !disposed) {
+        const restoreScroll = () => {
+          if (!term || disposed) {
+            return;
+          }
+          if (followBottom) {
+            term.scrollToBottom();
+          } else if (restoreScrollOffset > 0) {
+            term.scrollToLine(Math.max(0, term.buffer.active.baseY - restoreScrollOffset));
+          }
+        };
+        if (restoreCursor && !disposed && term) {
           // Reapply the authoritative cursor after scrollToBottom. Some xterm
           // renderers otherwise paint the cursor at the final footer write
           // even though the checkpoint's last CSI moved it into the composer.
-          term?.write(restoreCursor);
+          term.write(restoreCursor, restoreScroll);
+        } else {
+          restoreScroll();
         }
         if (parserPaused && queuedWriteBytes <= XTERM_WRITE_RESUME_BYTES) {
           parserPaused = false;
@@ -443,7 +458,7 @@ function TerminalPaneImpl({
             const backgrounds = [...decoded.matchAll(/\x1b\[(?:48;2;\d+;\d+;\d+|48;5;\d+)m/g)];
             optimisticBackground = backgrounds.at(-1)?.[0] ?? optimisticBackground;
           }
-          writeTerminal(bytes, followCheckpoint, cursor);
+          writeTerminal(bytes, followCheckpoint, cursor, checkpointScrollOffset);
           if (followCheckpoint) {
             if (checkpointFollowTimer) {
               clearTimeout(checkpointFollowTimer);
@@ -475,7 +490,9 @@ function TerminalPaneImpl({
         // every interactive Herdr redraw. Parsing reset + replacement content
         // together keeps the update visually atomic.
         if (msg.type === "checkpoint") {
-          followCheckpoint = true;
+          const buffer = term?.buffer.active;
+          checkpointScrollOffset = buffer ? Math.max(0, buffer.baseY - buffer.viewportY) : 0;
+          followCheckpoint = checkpointScrollOffset === 0;
           optimisticSinceCheckpoint = false;
         }
         if (msg.type === "resync") {

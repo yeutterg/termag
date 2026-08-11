@@ -285,7 +285,7 @@ impl Registry {
             let spawn_sink = sink.clone();
             tokio::spawn(async move {
                 let result = if spawn_sink.target().runtime == "herdr" {
-                    run_herdr(spawn_sink.clone(), cols, rows, rx).await
+                    run_herdr(spawn_sink.clone(), cols, rows, checkpoint_policy, rx).await
                 } else {
                     run_tmux(spawn_sink.clone(), cols, rows, checkpoint_policy, rx).await
                 };
@@ -1077,6 +1077,7 @@ async fn run_herdr_cli(
     sink: EventSink,
     mut cols: u16,
     mut rows: u16,
+    checkpoint_policy: CheckpointPolicy,
     mut rx: mpsc::Receiver<StreamCommand>,
 ) -> Result<()> {
     let target = sink.target().clone();
@@ -1110,13 +1111,13 @@ async fn run_herdr_cli(
                         // an agent-first tail view: read logical recent lines,
                         // let each xterm wrap them for its own width, and keep
                         // the composer/model footer at the bottom.
-                        emit_herdr_tail(&sink, &target, cols, rows, composer_cursor_from_end, &mut output_gap, &mut last_frame).await?;
+                        emit_herdr_tail(&sink, &target, HerdrTailOptions { cols, rows, checkpoint_policy, composer_cursor_from_end }, &mut output_gap, &mut last_frame).await?;
                     } else if value.get("type").and_then(Value::as_str) == Some("terminal.closed") { break; }
             }
             _ = input_refresh_tick.tick(), if refresh_after_input.is_some() => {
                 if refresh_after_input.is_some_and(|deadline| Instant::now() >= deadline) {
                     refresh_after_input = None;
-                    emit_herdr_tail(&sink, &target, cols, rows, composer_cursor_from_end, &mut output_gap, &mut last_frame).await?;
+                    emit_herdr_tail(&sink, &target, HerdrTailOptions { cols, rows, checkpoint_policy, composer_cursor_from_end }, &mut output_gap, &mut last_frame).await?;
                 }
             }
             command = rx.recv() => match command {
@@ -1189,22 +1190,34 @@ async fn run_herdr_cli(
     Ok(())
 }
 
+#[derive(Clone, Copy)]
+struct HerdrTailOptions {
+    cols: u16,
+    rows: u16,
+    checkpoint_policy: CheckpointPolicy,
+    composer_cursor_from_end: usize,
+}
+
 async fn emit_herdr_tail(
     sink: &EventSink,
     target: &Target,
-    cols: u16,
-    rows: u16,
-    composer_cursor_from_end: usize,
+    options: HerdrTailOptions,
     output_gap: &mut bool,
     last_frame: &mut String,
 ) -> Result<()> {
+    let HerdrTailOptions {
+        cols,
+        rows,
+        checkpoint_policy,
+        composer_cursor_from_end,
+    } = options;
     let Ok(response) = crate::herdr::mutate(
         &target.runtime_session_id,
         "pane.read",
         json!({
             "pane_id": target.pane_id,
             "source": "recent_unwrapped",
-            "lines": rows,
+            "lines": checkpoint_policy.history_lines.max(rows),
             "format": "ansi",
         }),
     )
@@ -1218,6 +1231,7 @@ async fn emit_herdr_tail(
     else {
         return Ok(());
     };
+    let text = bounded_herdr_text(text, checkpoint_policy.max_bytes);
     if text != last_frame {
         last_frame.clear();
         last_frame.push_str(text);
@@ -1225,6 +1239,20 @@ async fn emit_herdr_tail(
         emit_terminal_data(sink, output_gap, rendered.into_bytes(), true);
     }
     Ok(())
+}
+
+fn bounded_herdr_text(text: &str, max_bytes: usize) -> &str {
+    if text.len() <= max_bytes {
+        return text;
+    }
+    let mut floor = text.len() - max_bytes;
+    while !text.is_char_boundary(floor) {
+        floor += 1;
+    }
+    let start = text[floor..]
+        .find('\n')
+        .map_or(floor, |offset| floor + offset + 1);
+    &text[start..]
 }
 
 fn render_herdr_tail(text: &str, cols: u16, rows: u16, composer_cursor_from_end: usize) -> String {
@@ -1518,12 +1546,13 @@ async fn run_herdr(
     sink: EventSink,
     cols: u16,
     rows: u16,
+    checkpoint_policy: CheckpointPolicy,
     rx: mpsc::Receiver<StreamCommand>,
 ) -> Result<()> {
     // Keep Herdr behind its public process boundary. One helper is shared by
     // every browser viewing this target and exists only while that target is
     // open in the cloud; idle inventory never retains a helper process.
-    run_herdr_cli(sink, cols, rows, rx).await
+    run_herdr_cli(sink, cols, rows, checkpoint_policy, rx).await
 }
 
 #[cfg(test)]
@@ -1887,6 +1916,14 @@ mod tests {
         assert!(rendered.contains("› q"));
         assert!(rendered.contains("\x1b[48;2;59;64;76m       \x1b[0m\r\nfooter"));
         assert!(rendered.ends_with("\x1b[3;4H\x1b[7m \x1b[27m\x1b[3;4H\x1b[?25l"));
+    }
+
+    #[test]
+    fn herdr_history_is_bounded_from_the_oldest_complete_line() {
+        let text = "old line\nkeep one\nkeep two";
+        assert_eq!(bounded_herdr_text(text, 18), "keep one\nkeep two");
+        assert_eq!(bounded_herdr_text("🙂 old\nnew", 6), "new");
+        assert_eq!(bounded_herdr_text("short", 100), "short");
     }
 
     #[test]
