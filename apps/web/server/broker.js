@@ -1038,21 +1038,50 @@ function createBroker({ prisma, wss }) {
       if (message.type === "ping") {
         sendJson(ws, { type: "pong" });
       } else if (message.type === "input") {
-        if (
+        const inputId = typeof message.inputId === "string" ? message.inputId : "";
+        const wantsConfirmation = inputId.length > 0;
+        const confirmed = /^[a-f0-9]{32}$/i.test(inputId);
+        const invalid =
+          (wantsConfirmation && !confirmed) ||
           typeof message.data !== "string" ||
-          Buffer.byteLength(message.data, "utf8") > 256 * 1024 ||
-          stream.readOnly ||
-          !(await attachToAgent())
-        ) {
+          Buffer.byteLength(message.data || "", "utf8") > 256 * 1024;
+        if (invalid || stream.readOnly || !(await attachToAgent())) {
+          if (inputId) {
+            sendJson(ws, {
+              type: "terminal-input-error",
+              inputId,
+              message: invalid
+                ? "Invalid terminal input"
+                : stream.readOnly
+                  ? "Terminal is read-only"
+                  : "Agent is not attached to this terminal",
+            });
+          }
           return;
         }
         // Protocol v2 terminal-input is an atomic claim+write at the agent.
         // This keeps the latest keystroke authoritative even when two browser
         // connections interact with the same pane at nearly the same time.
-        sendAgentEvent(userId, stream.deviceName, "terminal-input", {
-          streamId,
-          data: message.data,
-        });
+        if (confirmed) {
+          try {
+            await sendToAgent(userId, stream.deviceName, "terminal-input", {
+              streamId,
+              data: message.data,
+            });
+            sendJson(ws, { type: "terminal-input-complete", inputId });
+          } catch (error) {
+            sendJson(ws, {
+              type: "terminal-input-error",
+              inputId,
+              message: sanitizeAgentText(error?.message || "Terminal input failed", 256),
+            });
+          }
+        } else {
+          sendAgentEvent(userId, stream.deviceName, "terminal-input", {
+            streamId,
+            data: message.data,
+          });
+        }
       } else if (message.type === "resize") {
         stream.cols = terminalDimension(message.cols, stream.cols, 20, 500);
         stream.rows = terminalDimension(message.rows, stream.rows, 5, 200);
@@ -1094,7 +1123,19 @@ function createBroker({ prisma, wss }) {
           const current = findRuntimeTarget(userId, sessionId);
           const cwd = current?.pane?.cwd;
           const roots = current?.agent?.inventory?.roots || [];
-          const root = roots
+          // Hermes can run inside a Docker container while Herdr remains on
+          // the host. The space name is the container identity in that setup;
+          // this value comes from the connected agent's inventory, never from
+          // a browser-supplied path or command. The machine agent still
+          // validates the name and local directory policy before using it.
+          const tabAgent = String(current?.pane?.agent || current?.tab?.name || "").toLowerCase();
+          const containerName =
+            current?.identity?.runtime === "herdr" &&
+            tabAgent === "hermes" &&
+            /^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$/.test(current?.space?.name || "")
+              ? current.space.name
+              : undefined;
+          const cwdRoot = roots
             .filter(
               item =>
                 item?.key &&
@@ -1102,11 +1143,22 @@ function createBroker({ prisma, wss }) {
                 (cwd === item.path || cwd?.startsWith(`${item.path.replace(/\/+$/, "")}/`))
             )
             .sort((left, right) => right.path.length - left.path.length)[0];
-          if (!current || !cwd || !root) {
+          // A containerized pane's reported cwd belongs to the host-side Herdr
+          // process and need not be inside the container's data bind. Select
+          // the explicitly configured root named for that container instead.
+          const containerRoot = containerName
+            ? roots.find(item => item?.key === containerName && item?.path)
+            : undefined;
+          const root = containerRoot || cwdRoot;
+          if (!current || !cwd || !root || (containerName && !containerRoot)) {
             throw new Error("Terminal directory is outside the configured upload roots");
           }
           const base = root.path.replace(/\/+$/, "");
-          const relativeDirectory = cwd === base ? "" : cwd.slice(base.length + 1);
+          const relativeDirectory = containerName
+            ? ""
+            : cwd === base
+              ? ""
+              : cwd.slice(base.length + 1);
           const result = await sendToAgent(userId, stream.deviceName, "file.upload-chunk", {
             rootKey: root.key,
             relativeDirectory,
@@ -1114,6 +1166,7 @@ function createBroker({ prisma, wss }) {
             uploadId,
             offset,
             data,
+            ...(containerName ? { containerName } : {}),
           });
           sendJson(ws, {
             type: "file-upload-complete",

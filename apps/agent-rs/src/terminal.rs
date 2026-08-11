@@ -332,18 +332,21 @@ impl Registry {
     }
 
     pub fn input(&mut self, stream_id: &str, data: Vec<u8>) -> Result<Vec<Value>> {
-        let Some(target) = self.by_stream.get(stream_id).cloned() else {
-            return Ok(Vec::new());
-        };
-        let Some(shared) = self.targets.get_mut(&target) else {
-            return Ok(Vec::new());
-        };
+        let target = self
+            .by_stream
+            .get(stream_id)
+            .cloned()
+            .context("terminal stream is not attached")?;
+        let shared = self
+            .targets
+            .get_mut(&target)
+            .context("terminal target is not attached")?;
         if shared
             .subscribers
             .get(stream_id)
             .is_none_or(|subscriber| subscriber.read_only)
         {
-            return Ok(Vec::new());
+            bail!("terminal stream is read-only");
         }
         let driver_changed = shared.driver.as_deref() != Some(stream_id);
         if driver_changed {
@@ -1630,6 +1633,16 @@ mod tests {
         assert!(matches!(rx.try_recv(), Ok(StreamCommand::Resize(100, 30))));
         assert!(matches!(rx.try_recv(), Ok(StreamCommand::Input(data)) if data == b"b"));
         assert!(matches!(rx.try_recv(), Ok(StreamCommand::Input(data)) if data == b"c"));
+    }
+
+    #[test]
+    fn input_rejects_detached_and_read_only_streams() {
+        let mut registry = Registry::new();
+        assert!(registry.input("missing", b"path".to_vec()).is_err());
+
+        let target = test_target();
+        let _rx = seed(&mut registry, &target, 1);
+        assert!(registry.input("stream-1", b"path".to_vec()).is_err());
     }
 
     #[test]

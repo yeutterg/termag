@@ -46,6 +46,14 @@ in [the environment reference](../../docs/ENVIRONMENT_VARIABLES.md) override the
 Creation and browsing are restricted to the user's home directory by default. Every requested path is
 canonicalized and checked locally. Set `allowAllDirectories: true` only as an explicit opt-out.
 
+Files dropped into a browser terminal are transferred to the agent that owns that terminal and staged
+under `.terminalz-uploads` in that terminal's working directory so workspace-sandboxed coding agents
+can read them. The target-local path is bracketed-pasted only after the agent accepts the bytes.
+Staged files expire after 24 hours; the daemon checks active staging directories hourly.
+For a Herdr space whose `hermes` tab runs in a same-named Docker container, Terminalz resolves an
+allowed writable bind mount and pastes the corresponding container-visible path. It never executes a
+browser-provided container command or bypasses the local directory policy.
+
 Power modes are `terminals-awake` (`caffeinate -i`), `display-awake` (`caffeinate -d -i`), and
 `ac-awake` (`caffeinate -s`). Renewable machine-scoped leases prevent one browser from cancelling
 another browser's lease and ensure abandoned leases expire.
