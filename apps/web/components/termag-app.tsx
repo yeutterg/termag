@@ -256,6 +256,7 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
   const [tokenDevices, setTokenDevices] = useState<string[]>([]);
   const [activeProjectId, setActiveProjectId] = useState(initialProject?.id ?? "");
   const [activeTabId, setActiveTabId] = useState(preferredProjectTab(initialProject)?.id ?? "");
+  const [warmPageKey, setWarmPageKey] = useState<string | null>(null);
   const [activeLocationRestored, setActiveLocationRestored] = useState(false);
   // Open by default on desktop, closed on mobile (the drawer pattern). The
   // initial decision is made server-side via platform.showShortcuts (false on
@@ -930,12 +931,17 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
 
   const selectTab = useCallback(
     (projectId: string, tabId: string) => {
+      const currentProject = projects.find(project => project.id === activeProjectIdRef.current);
+      const currentTab = currentProject?.tabs.find(tab => tab.id === activeTabIdRef.current);
+      if (currentProject && currentTab) {
+        setWarmPageKey(`${currentProject.id}:${currentTab.runtimeTabId || currentTab.id}`);
+      }
       setActiveProjectId(projectId);
       setActiveTabId(tabId);
       tabHistory.remember(projectId, tabId);
       closeDrawerOnMobile();
     },
-    [tabHistory, closeDrawerOnMobile, setActiveProjectId, setActiveTabId]
+    [projects, tabHistory, closeDrawerOnMobile, setActiveProjectId, setActiveTabId, setWarmPageKey]
   );
 
   const cycleTheme = useCallback(async () => {
@@ -1912,9 +1918,13 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
                     if (!session) {
                       return null;
                     }
+                    const pageKey = `${activeProject.id}:${tab.runtimeTabId || tab.id}`;
+                    if (!isActive && pageKey !== warmPageKey) {
+                      return null;
+                    }
                     return (
                       <div
-                        key={tab.runtimeTabId || tab.id}
+                        key={pageKey}
                         className={cn(
                           "absolute inset-0 flex min-h-0",
                           !isActive && "invisible pointer-events-none"

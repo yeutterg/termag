@@ -242,12 +242,18 @@ function TerminalPaneImpl({
     if (active) {
       activateFrame = requestAnimationFrame(() => {
         setRetained(true);
-        syncBrokerPauseRef.current();
+        const ws = wsRef.current;
+        if (ws?.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: "wake" }));
+        }
         refitRef.current();
       });
     } else {
       termRef.current?.blur();
-      syncBrokerPauseRef.current();
+      const ws = wsRef.current;
+      if (ws?.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: "hibernate" }));
+      }
       releaseTimer = setTimeout(() => setRetained(false), INACTIVE_TERMINAL_RETENTION_MS);
     }
     return () => {
@@ -301,7 +307,7 @@ function TerminalPaneImpl({
       if (ws?.readyState !== WebSocket.OPEN) {
         return;
       }
-      const shouldPause = visibilityPaused || parserPaused || !activeRef.current;
+      const shouldPause = visibilityPaused || parserPaused;
       if (shouldPause === brokerPaused) {
         return;
       }
@@ -540,6 +546,9 @@ function TerminalPaneImpl({
           msg = JSON.parse(event.data);
         } catch {
           return;
+        }
+        if (msg.type === "ready" && !activeRef.current) {
+          ws.send(JSON.stringify({ type: "hibernate" }));
         }
         // Full checkpoint payloads already begin with RIS. Do not clear xterm
         // when this control message arrives: the payload is a separate

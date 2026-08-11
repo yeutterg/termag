@@ -1182,6 +1182,22 @@ function createBroker({ prisma, wss }) {
             message: sanitizeAgentText(error?.message || "Upload failed", 256),
           });
         }
+      } else if (message.type === "hibernate") {
+        stream.paused = true;
+        clearOutputBuffer(stream);
+        stream.replayQueue = [];
+        stream.replayQueueBytes = 0;
+        stream.replayQueueTruncated = false;
+        terminalState.drop(stream.stateKey);
+        if (stream.attached) {
+          sendAgentEvent(userId, stream.deviceName, "terminal-close", { streamId });
+          stream.attached = false;
+          stream.driver = false;
+        }
+      } else if (message.type === "wake") {
+        stream.paused = false;
+        await attachToAgent();
+        flushStream(stream);
       } else if (message.type === "pause") {
         stream.paused = true;
       } else if (message.type === "resume") {

@@ -209,5 +209,21 @@ describe("multi-machine broker registry", () => {
       offset: 0,
       path: "/opt/data/.terminalz-uploads/image.png",
     });
+
+    browser.emit("message", Buffer.from(JSON.stringify({ type: "hibernate" })));
+    await nextTurn();
+    expect(agent.sent).toContainEqual({ type: "terminal-close", streamId: attach.streamId });
+
+    browser.emit("message", Buffer.from(JSON.stringify({ type: "wake" })));
+    await nextTurn();
+    const reattach = agent.sent.filter(message => message.type === "terminal-attach").at(-1);
+    expect(reattach.requestId).not.toBe(attach.requestId);
+    agent.emit(
+      "message",
+      Buffer.from(JSON.stringify({ requestId: reattach.requestId, data: {} })),
+      false
+    );
+    await nextTurn();
+    expect(browser.sent.at(-1)).toEqual({ type: "ready" });
   });
 });
