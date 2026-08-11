@@ -20,6 +20,8 @@ const DEFAULT_CHECKPOINT_MAX_BYTES: usize = 1024 * 1024;
 const MIN_CHECKPOINT_HISTORY_LINES: u16 = 100;
 const MIN_CHECKPOINT_MAX_BYTES: usize = 64 * 1024;
 const MAX_HERDR_HISTORY_LINES: u16 = 500;
+const HERDR_OUTPUT_COALESCE: Duration = Duration::from_millis(32);
+const HERDR_HISTORY_IDLE_DELAY: Duration = Duration::from_secs(3);
 
 #[derive(Debug, Clone, Copy)]
 struct CheckpointPolicy {
@@ -1092,9 +1094,28 @@ async fn run_herdr_cli(
     let mut input_refresh_tick = interval(Duration::from_millis(16));
     input_refresh_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
     let mut refresh_after_input: Option<Instant> = None;
+    let mut refresh_after_output: Option<Instant> = None;
     let mut line = Vec::with_capacity(32 * 1024);
     let mut last_frame = String::new();
     let mut composer_cursor_from_end = 0;
+    // Do not wait for the observer to deliver its first event or for a large
+    // history read. A single viewport is enough to make the terminal useful;
+    // scrollback hydrates later after the session becomes quiet.
+    emit_herdr_tail(
+        &sink,
+        &target,
+        HerdrTailOptions {
+            cols,
+            rows,
+            checkpoint_policy,
+            composer_cursor_from_end,
+            mode: HerdrRefreshMode::Initial,
+        },
+        &mut output_gap,
+        &mut last_frame,
+    )
+    .await?;
+    let mut refresh_history_after = Some(Instant::now() + HERDR_HISTORY_IDLE_DELAY);
     loop {
         tokio::select! {
             read = read_herdr_line(&mut helper.reader, &mut line) => {
@@ -1104,21 +1125,35 @@ async fn run_herdr_cli(
                     tokio::time::sleep(Duration::from_millis(250)).await;
                     helper = spawn_herdr(&target, cols, rows).await?;
                     last_frame.clear();
+                    refresh_after_output = Some(Instant::now());
+                    refresh_history_after = Some(Instant::now() + HERDR_HISTORY_IDLE_DELAY);
                     continue;
                 }
                 let value: Value = match serde_json::from_slice(&line) { Ok(value) => value, Err(_) => continue };
-                    if value.get("type").and_then(Value::as_str) == Some("terminal.frame") && refresh_after_input.is_none() {
-                        // The native Herdr pane may be scrolled up. Terminalz is
-                        // an agent-first tail view: read logical recent lines,
-                        // let each xterm wrap them for its own width, and keep
-                        // the composer/model footer at the bottom.
-                        emit_herdr_tail(&sink, &target, HerdrTailOptions { cols, rows, checkpoint_policy, composer_cursor_from_end, include_history: true }, &mut output_gap, &mut last_frame).await?;
+                    if value.get("type").and_then(Value::as_str) == Some("terminal.frame") {
+                        if refresh_after_input.is_none() && refresh_after_output.is_none() {
+                            refresh_after_output = Some(Instant::now() + HERDR_OUTPUT_COALESCE);
+                        }
+                        refresh_history_after = Some(Instant::now() + HERDR_HISTORY_IDLE_DELAY);
                     } else if value.get("type").and_then(Value::as_str) == Some("terminal.closed") { break; }
             }
-            _ = input_refresh_tick.tick(), if refresh_after_input.is_some() => {
-                if refresh_after_input.is_some_and(|deadline| Instant::now() >= deadline) {
+            _ = input_refresh_tick.tick(), if refresh_after_input.is_some() || refresh_after_output.is_some() || refresh_history_after.is_some() => {
+                let now = Instant::now();
+                if refresh_after_input.is_some_and(|deadline| now >= deadline) {
                     refresh_after_input = None;
-                    emit_herdr_tail(&sink, &target, HerdrTailOptions { cols, rows, checkpoint_policy, composer_cursor_from_end, include_history: false }, &mut output_gap, &mut last_frame).await?;
+                    refresh_after_output = None;
+                    emit_herdr_tail(&sink, &target, HerdrTailOptions { cols, rows, checkpoint_policy, composer_cursor_from_end, mode: HerdrRefreshMode::Screen }, &mut output_gap, &mut last_frame).await?;
+                    refresh_history_after = Some(Instant::now() + HERDR_HISTORY_IDLE_DELAY);
+                } else if refresh_after_output.is_some_and(|deadline| now >= deadline) {
+                    refresh_after_output = None;
+                    emit_herdr_tail(&sink, &target, HerdrTailOptions { cols, rows, checkpoint_policy, composer_cursor_from_end, mode: HerdrRefreshMode::Screen }, &mut output_gap, &mut last_frame).await?;
+                    refresh_history_after = Some(Instant::now() + HERDR_HISTORY_IDLE_DELAY);
+                } else if refresh_after_input.is_none()
+                    && refresh_after_output.is_none()
+                    && refresh_history_after.is_some_and(|deadline| now >= deadline)
+                {
+                    refresh_history_after = None;
+                    emit_herdr_tail(&sink, &target, HerdrTailOptions { cols, rows, checkpoint_policy, composer_cursor_from_end, mode: HerdrRefreshMode::History }, &mut output_gap, &mut last_frame).await?;
                 }
             }
             command = rx.recv() => match command {
@@ -1162,18 +1197,42 @@ async fn run_herdr_cli(
                     // intermediate full-canvas snapshots only add latency and
                     // can overwrite newer local input with older state.
                     refresh_after_input = Some(Instant::now() + Duration::from_millis(40));
+                    refresh_history_after = Some(Instant::now() + HERDR_HISTORY_IDLE_DELAY);
                 }
                 Some(StreamCommand::Resize(next_cols, next_rows)) => {
-                    cols = next_cols; rows = next_rows;
-                    last_frame.clear();
-                    let _ = helper.child.start_kill(); let _ = helper.child.wait().await;
-                    helper = spawn_herdr(&target, cols, rows).await?;
+                    // Browser activation/refit commonly repeats the dimensions
+                    // already used to create this observer. Restarting Herdr
+                    // for an identical resize defeated the warm-tab cache and
+                    // doubled initial load work.
+                    if next_cols != cols || next_rows != rows {
+                        cols = next_cols; rows = next_rows;
+                        last_frame.clear();
+                        let _ = helper.child.start_kill(); let _ = helper.child.wait().await;
+                        helper = spawn_herdr(&target, cols, rows).await?;
+                        refresh_after_output = Some(Instant::now());
+                        refresh_history_after = Some(Instant::now() + HERDR_HISTORY_IDLE_DELAY);
+                    }
                 }
                 Some(StreamCommand::TakeControl) => {}
                 Some(StreamCommand::ReleaseControl) => {}
                 Some(StreamCommand::Checkpoint(_)) => {
                     let _ = helper.child.start_kill(); let _ = helper.child.wait().await;
                     helper = spawn_herdr(&target, cols, rows).await?;
+                    last_frame.clear();
+                    emit_herdr_tail(
+                        &sink,
+                        &target,
+                        HerdrTailOptions {
+                            cols,
+                            rows,
+                            checkpoint_policy,
+                            composer_cursor_from_end,
+                            mode: HerdrRefreshMode::Initial,
+                        },
+                        &mut output_gap,
+                        &mut last_frame,
+                    ).await?;
+                    refresh_history_after = Some(Instant::now() + HERDR_HISTORY_IDLE_DELAY);
                 }
                 Some(StreamCommand::Stop) | None => {
                     let _ = helper.child.start_kill(); break;
@@ -1182,8 +1241,10 @@ async fn run_herdr_cli(
             _ = gap_tick.tick(), if output_gap => retry_terminal_gap(&sink, &mut output_gap),
             _ = helper.child.wait() => {
                 tokio::time::sleep(Duration::from_millis(250)).await;
-                helper = spawn_herdr(&target, cols, rows).await?;
-                last_frame.clear();
+                    helper = spawn_herdr(&target, cols, rows).await?;
+                    last_frame.clear();
+                    refresh_after_output = Some(Instant::now());
+                    refresh_history_after = Some(Instant::now() + HERDR_HISTORY_IDLE_DELAY);
             },
         }
     }
@@ -1197,7 +1258,14 @@ struct HerdrTailOptions {
     rows: u16,
     checkpoint_policy: CheckpointPolicy,
     composer_cursor_from_end: usize,
-    include_history: bool,
+    mode: HerdrRefreshMode,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum HerdrRefreshMode {
+    Initial,
+    Screen,
+    History,
 }
 
 async fn emit_herdr_tail(
@@ -1212,8 +1280,10 @@ async fn emit_herdr_tail(
         rows,
         checkpoint_policy,
         composer_cursor_from_end,
-        include_history,
+        mode,
     } = options;
+    let include_history = mode == HerdrRefreshMode::History;
+    let checkpoint = mode != HerdrRefreshMode::Screen;
     let requested_lines = if include_history {
         checkpoint_policy
             .history_lines
@@ -1246,9 +1316,8 @@ async fn emit_herdr_tail(
     if text != last_frame {
         last_frame.clear();
         last_frame.push_str(text);
-        let rendered =
-            render_herdr_tail(text, cols, rows, composer_cursor_from_end, include_history);
-        emit_terminal_data(sink, output_gap, rendered.into_bytes(), include_history);
+        let rendered = render_herdr_tail(text, cols, rows, composer_cursor_from_end, checkpoint);
+        emit_terminal_data(sink, output_gap, rendered.into_bytes(), checkpoint);
     }
     Ok(())
 }
