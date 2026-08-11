@@ -19,6 +19,7 @@ const DEFAULT_CHECKPOINT_HISTORY_LINES: u16 = 2000;
 const DEFAULT_CHECKPOINT_MAX_BYTES: usize = 1024 * 1024;
 const MIN_CHECKPOINT_HISTORY_LINES: u16 = 100;
 const MIN_CHECKPOINT_MAX_BYTES: usize = 64 * 1024;
+const MAX_HERDR_HISTORY_LINES: u16 = 500;
 
 #[derive(Debug, Clone, Copy)]
 struct CheckpointPolicy {
@@ -1111,13 +1112,13 @@ async fn run_herdr_cli(
                         // an agent-first tail view: read logical recent lines,
                         // let each xterm wrap them for its own width, and keep
                         // the composer/model footer at the bottom.
-                        emit_herdr_tail(&sink, &target, HerdrTailOptions { cols, rows, checkpoint_policy, composer_cursor_from_end }, &mut output_gap, &mut last_frame).await?;
+                        emit_herdr_tail(&sink, &target, HerdrTailOptions { cols, rows, checkpoint_policy, composer_cursor_from_end, include_history: true }, &mut output_gap, &mut last_frame).await?;
                     } else if value.get("type").and_then(Value::as_str) == Some("terminal.closed") { break; }
             }
             _ = input_refresh_tick.tick(), if refresh_after_input.is_some() => {
                 if refresh_after_input.is_some_and(|deadline| Instant::now() >= deadline) {
                     refresh_after_input = None;
-                    emit_herdr_tail(&sink, &target, HerdrTailOptions { cols, rows, checkpoint_policy, composer_cursor_from_end }, &mut output_gap, &mut last_frame).await?;
+                    emit_herdr_tail(&sink, &target, HerdrTailOptions { cols, rows, checkpoint_policy, composer_cursor_from_end, include_history: false }, &mut output_gap, &mut last_frame).await?;
                 }
             }
             command = rx.recv() => match command {
@@ -1196,6 +1197,7 @@ struct HerdrTailOptions {
     rows: u16,
     checkpoint_policy: CheckpointPolicy,
     composer_cursor_from_end: usize,
+    include_history: bool,
 }
 
 async fn emit_herdr_tail(
@@ -1210,14 +1212,23 @@ async fn emit_herdr_tail(
         rows,
         checkpoint_policy,
         composer_cursor_from_end,
+        include_history,
     } = options;
+    let requested_lines = if include_history {
+        checkpoint_policy
+            .history_lines
+            .min(MAX_HERDR_HISTORY_LINES)
+            .max(rows)
+    } else {
+        rows
+    };
     let Ok(response) = crate::herdr::mutate(
         &target.runtime_session_id,
         "pane.read",
         json!({
             "pane_id": target.pane_id,
             "source": "recent_unwrapped",
-            "lines": checkpoint_policy.history_lines.max(rows),
+            "lines": requested_lines,
             "format": "ansi",
         }),
     )
@@ -1235,8 +1246,9 @@ async fn emit_herdr_tail(
     if text != last_frame {
         last_frame.clear();
         last_frame.push_str(text);
-        let rendered = render_herdr_tail(text, cols, rows, composer_cursor_from_end);
-        emit_terminal_data(sink, output_gap, rendered.into_bytes(), true);
+        let rendered =
+            render_herdr_tail(text, cols, rows, composer_cursor_from_end, include_history);
+        emit_terminal_data(sink, output_gap, rendered.into_bytes(), include_history);
     }
     Ok(())
 }
@@ -1255,7 +1267,13 @@ fn bounded_herdr_text(text: &str, max_bytes: usize) -> &str {
     &text[start..]
 }
 
-fn render_herdr_tail(text: &str, cols: u16, rows: u16, composer_cursor_from_end: usize) -> String {
+fn render_herdr_tail(
+    text: &str,
+    cols: u16,
+    rows: u16,
+    composer_cursor_from_end: usize,
+    reset_scrollback: bool,
+) -> String {
     let cols = usize::from(cols.max(1));
     let rows = usize::from(rows.max(1));
     let mut raw_lines = text.split('\n').collect::<Vec<_>>();
@@ -1297,7 +1315,11 @@ fn render_herdr_tail(text: &str, cols: u16, rows: u16, composer_cursor_from_end:
     let top_padding = rows.saturating_sub(content_rows);
     let scroll_rows = content_rows.saturating_sub(rows);
 
-    let mut rendered = String::from("\x1bc");
+    let mut rendered = String::from(if reset_scrollback {
+        "\x1bc"
+    } else {
+        "\x1b[?25l\x1b[H\x1b[2J"
+    });
     rendered.push_str(&"\r\n".repeat(top_padding));
     for (index, (ansi, _)) in lines.iter().enumerate() {
         if index > 0 {
@@ -1911,6 +1933,7 @@ mod tests {
             10,
             4,
             0,
+            true,
         );
         assert!(rendered.starts_with("\x1bc\r\n\r\n"));
         assert!(rendered.contains("› q"));
@@ -1927,14 +1950,21 @@ mod tests {
     }
 
     #[test]
+    fn interactive_herdr_refresh_preserves_scrollback() {
+        let rendered = render_herdr_tail("› fast\r\nmodel footer", 40, 2, 0, false);
+        assert!(rendered.starts_with("\x1b[?25l\x1b[H\x1b[2J"));
+        assert!(!rendered.starts_with("\x1bc"));
+    }
+
+    #[test]
     fn empty_codex_composer_places_cursor_before_placeholder() {
-        let rendered = render_herdr_tail("› Implement {feature}\r\nmodel footer", 40, 2, 0);
+        let rendered = render_herdr_tail("› Implement {feature}\r\nmodel footer", 40, 2, 0, true);
         assert!(rendered.ends_with("\x1b[1;3H\x1b[7m \x1b[27m\x1b[1;3H\x1b[?25l"));
     }
 
     #[test]
     fn codex_cursor_uses_terminal_cell_width_for_wide_input() {
-        let rendered = render_herdr_tail("› 🙂\r\nmodel footer", 40, 2, 0);
+        let rendered = render_herdr_tail("› 🙂\r\nmodel footer", 40, 2, 0, true);
         assert!(rendered.ends_with("\x1b[1;5H\x1b[7m \x1b[27m\x1b[1;5H\x1b[?25l"));
     }
 
@@ -1954,7 +1984,7 @@ mod tests {
         let mut cursor_from_end = 0;
         update_herdr_composer_cursor("\u{1b}b", frame, &mut cursor_from_end);
         assert_eq!(cursor_from_end, 3);
-        let rendered = render_herdr_tail(frame, 40, 2, cursor_from_end);
+        let rendered = render_herdr_tail(frame, 40, 2, cursor_from_end, true);
         assert!(rendered.ends_with("\x1b[1;7H\x1b[7m \x1b[27m\x1b[1;7H\x1b[?25l"));
     }
 }
