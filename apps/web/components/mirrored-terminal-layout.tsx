@@ -44,11 +44,13 @@ function paneStyle(area: Rect, rect: Rect): CSSProperties {
 
 export function MirroredTerminalLayout({
   tabs,
+  active = true,
   connected,
   liveTitles,
   onTitleChange,
 }: {
   tabs: Tab[];
+  active?: boolean;
   connected: boolean;
   liveTitles: Record<string, string>;
   onTitleChange: (sessionId: string, title: string) => void;
@@ -72,7 +74,7 @@ export function MirroredTerminalLayout({
     return (
       <TerminalPane
         key={tab.session.id}
-        active
+        active={active}
         sessionId={tab.session.id}
         title={liveTitles[tab.session.id] || tab.runtimePaneName || tab.name}
         status={connected ? tab.session.status : "sleeping"}
@@ -97,7 +99,7 @@ export function MirroredTerminalLayout({
             style={paneStyle(layout.area, pane.rect)}
           >
             <TerminalPane
-              active
+              active={active}
               sessionId={tab.session.id}
               title={liveTitles[tab.session.id] || tab.runtimePaneName || tab.name}
               status={connected ? tab.session.status : "sleeping"}

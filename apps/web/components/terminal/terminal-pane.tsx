@@ -56,6 +56,7 @@ const LIGHT_THEME: ITheme = {
 };
 
 const PAGE_SUSPEND_MS = 90_000;
+const INACTIVE_TERMINAL_RETENTION_MS = 90_000;
 const RECONNECT_RESET_AFTER_MS = 60_000;
 const MAX_INPUT_CHARS = 32 * 1024;
 const XTERM_WRITE_PAUSE_BYTES = 1024 * 1024;
@@ -178,6 +179,10 @@ function TerminalPaneImpl({
   const hostRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<XTerm | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
+  const activeRef = useRef(active);
+  const syncBrokerPauseRef = useRef<() => void>(() => {});
+  const refitRef = useRef<() => void>(() => {});
+  const [retained, setRetained] = useState(active);
   // Driver/read-only state is null until the agent's first driver-changed
   // message arrives. The most recent focus/click/keystroke owns the
   // single-writer lease; only a true read-only state needs UI.
@@ -231,7 +236,30 @@ function TerminalPaneImpl({
   useEffect(() => subscribePageActivity(setPageActive), []);
 
   useEffect(() => {
-    if (!active || !pageActive || !hostRef.current) {
+    activeRef.current = active;
+    let releaseTimer: ReturnType<typeof setTimeout> | null = null;
+    let activateFrame = 0;
+    if (active) {
+      activateFrame = requestAnimationFrame(() => {
+        setRetained(true);
+        syncBrokerPauseRef.current();
+        refitRef.current();
+      });
+    } else {
+      termRef.current?.blur();
+      syncBrokerPauseRef.current();
+      releaseTimer = setTimeout(() => setRetained(false), INACTIVE_TERMINAL_RETENTION_MS);
+    }
+    return () => {
+      cancelAnimationFrame(activateFrame);
+      if (releaseTimer) {
+        clearTimeout(releaseTimer);
+      }
+    };
+  }, [active]);
+
+  useEffect(() => {
+    if (!retained || !pageActive || !hostRef.current) {
       return;
     }
     const lowData = prefersLowDataMode();
@@ -239,6 +267,7 @@ function TerminalPaneImpl({
     let term: XTerm | null = null;
     let fitAddon: { fit: () => void } | null = null;
     let raf = 0;
+    let scrollRestoreRaf = 0;
     let resizeTimer: ReturnType<typeof setTimeout> | null = null;
     let observer: ResizeObserver | null = null;
     let onVisibilityRef: (() => void) | null = null;
@@ -272,13 +301,14 @@ function TerminalPaneImpl({
       if (ws?.readyState !== WebSocket.OPEN) {
         return;
       }
-      const shouldPause = visibilityPaused || parserPaused;
+      const shouldPause = visibilityPaused || parserPaused || !activeRef.current;
       if (shouldPause === brokerPaused) {
         return;
       }
       brokerPaused = shouldPause;
       ws.send(JSON.stringify({ type: shouldPause ? "pause" : "resume" }));
     }
+    syncBrokerPauseRef.current = syncBrokerPause;
 
     function writeTerminal(
       data: string | Uint8Array,
@@ -302,17 +332,43 @@ function TerminalPaneImpl({
             return;
           }
           if (followBottom) {
-            term.scrollToBottom();
-          } else if (restoreScrollOffset > 0) {
-            term.scrollToLine(Math.max(0, term.buffer.active.baseY - restoreScrollOffset));
+            try {
+              // Keep the viewport settled before the authoritative composer
+              // cursor is repainted. Deferring this by a frame makes Codex's
+              // caret visibly jump between the footer and input row.
+              term.scrollToBottom();
+            } catch {
+              // A retained tab may become inactive during this write. Its
+              // next active fit/checkpoint restores the bottom safely.
+            }
+            return;
           }
+          if (restoreScrollOffset <= 0) {
+            return;
+          }
+          cancelAnimationFrame(scrollRestoreRaf);
+          scrollRestoreRaf = requestAnimationFrame(() => {
+            if (!term || disposed || !term.element?.isConnected) {
+              return;
+            }
+            try {
+              term.scrollToLine(Math.max(0, term.buffer.active.baseY - restoreScrollOffset));
+            } catch {
+              // xterm can briefly drop its renderer while a hidden terminal
+              // is being resized or disposed. The next frame/checkpoint will
+              // restore the same position once the renderer is available.
+            }
+          });
         };
+        if (followBottom) {
+          restoreScroll();
+        }
         if (restoreCursor && !disposed && term) {
           // Reapply the authoritative cursor after scrollToBottom. Some xterm
           // renderers otherwise paint the cursor at the final footer write
           // even though the checkpoint's last CSI moved it into the composer.
-          term.write(restoreCursor, restoreScroll);
-        } else {
+          term.write(restoreCursor, followBottom ? undefined : restoreScroll);
+        } else if (!followBottom) {
           restoreScroll();
         }
         if (parserPaused && queuedWriteBytes <= XTERM_WRITE_RESUME_BYTES) {
@@ -377,6 +433,7 @@ function TerminalPaneImpl({
       }
       resizeTimer = setTimeout(fitAndResize, 80);
     }
+    refitRef.current = scheduleFit;
 
     // WebSocket lifecycle is its own function so we can re-run it on disconnect.
     // All input sites (term.onData, onVisibility, ResizeObserver) read
@@ -837,6 +894,7 @@ function TerminalPaneImpl({
     return () => {
       disposed = true;
       cancelAnimationFrame(raf);
+      cancelAnimationFrame(scrollRestoreRaf);
       if (reconnectTimer) {
         clearTimeout(reconnectTimer);
       }
@@ -877,6 +935,12 @@ function TerminalPaneImpl({
         window.removeEventListener("orientationchange", onVisualViewportRef);
       }
       manualReconnectRef.current = null;
+      if (syncBrokerPauseRef.current === syncBrokerPause) {
+        syncBrokerPauseRef.current = () => {};
+      }
+      if (refitRef.current === scheduleFit) {
+        refitRef.current = () => {};
+      }
       unsubscribeTheme?.();
       term?.dispose();
       termRef.current = null;
@@ -884,7 +948,7 @@ function TerminalPaneImpl({
         optimisticEchoRef.current = () => {};
       }
     };
-  }, [active, optimisticInput, pageActive, sessionId]);
+  }, [optimisticInput, pageActive, retained, sessionId]);
 
   function claimDrive() {
     const ws = wsRef.current;

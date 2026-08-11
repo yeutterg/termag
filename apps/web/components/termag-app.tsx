@@ -332,15 +332,6 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
       return true;
     });
   }, [activeProject]);
-  const activeRuntimePanes = useMemo(() => {
-    if (!activeProject || !activeTab) {
-      return [];
-    }
-    if (activeProject.runtime !== "herdr" || !activeTab.runtimeTabId) {
-      return [activeTab];
-    }
-    return activeProject.tabs.filter(tab => tab.runtimeTabId === activeTab.runtimeTabId);
-  }, [activeProject, activeTab]);
   const connectedDeviceNames = useMemo(
     () => new Set(agentDevices.filter(device => device.connected).map(device => device.name)),
     [agentDevices]
@@ -1909,25 +1900,48 @@ export function TermagApp({ user, initialProjects, platform, authMode }: TermagA
                     <Shortcut keys={["mod", "enter"]} />
                   </button>
                 </div>
-                <div className="flex min-h-0 flex-1">
-                  {activeProject.runtime === "herdr" ? (
-                    <MirroredTerminalLayout
-                      tabs={activeRuntimePanes}
-                      connected={activeDeviceConnected}
-                      liveTitles={liveTitles}
-                      onTitleChange={handleSessionTitle}
-                    />
-                  ) : (
-                    <TerminalPane
-                      key={activeTab.session.id}
-                      active
-                      sessionId={activeTab.session.id}
-                      title={liveTitles[activeTab.session.id] || activeTab.name}
-                      status={activeDeviceConnected ? activeTab.session.status : "sleeping"}
-                      onTitleChange={handleSessionTitle}
-                      hideHeader
-                    />
-                  )}
+                <div className="relative flex min-h-0 flex-1">
+                  {topTabs.map(tab => {
+                    const paneGroup = tab.runtimeTabId
+                      ? activeProject.tabs.filter(item => item.runtimeTabId === tab.runtimeTabId)
+                      : [tab];
+                    const isActive = tab.runtimeTabId
+                      ? tab.runtimeTabId === activeTab.runtimeTabId
+                      : tab.id === activeTab.id;
+                    const session = tab.session;
+                    if (!session) {
+                      return null;
+                    }
+                    return (
+                      <div
+                        key={tab.runtimeTabId || tab.id}
+                        className={cn(
+                          "absolute inset-0 flex min-h-0",
+                          !isActive && "invisible pointer-events-none"
+                        )}
+                        aria-hidden={!isActive}
+                      >
+                        {activeProject.runtime === "herdr" ? (
+                          <MirroredTerminalLayout
+                            tabs={paneGroup}
+                            active={isActive}
+                            connected={activeDeviceConnected}
+                            liveTitles={liveTitles}
+                            onTitleChange={handleSessionTitle}
+                          />
+                        ) : (
+                          <TerminalPane
+                            active={isActive}
+                            sessionId={session.id}
+                            title={liveTitles[session.id] || tab.name}
+                            status={activeDeviceConnected ? session.status : "sleeping"}
+                            onTitleChange={handleSessionTitle}
+                            hideHeader
+                          />
+                        )}
+                      </div>
+                    );
+                  })}
                 </div>
               </section>
             ) : (
