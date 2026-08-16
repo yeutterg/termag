@@ -1,4 +1,4 @@
-FROM node:22-bookworm-slim AS deps
+FROM node:26-bookworm-slim AS deps
 WORKDIR /app
 # Prisma's native engine links libssl + libcrypto. bookworm-slim ships those
 # but ca-certificates + openssl tooling are needed for engine init at build
@@ -10,7 +10,7 @@ COPY package.json package-lock.json* ./
 COPY apps/web/package.json apps/web/package.json
 RUN npm ci
 
-FROM node:22-bookworm-slim AS builder
+FROM node:26-bookworm-slim AS builder
 WORKDIR /app
 ENV NEXT_TELEMETRY_DISABLED=1
 # Prisma runs during `next build`, so the builder stage must be able to
@@ -29,7 +29,7 @@ WORKDIR /app
 RUN npm prune --omit=dev --ignore-scripts \
   && npm cache clean --force
 
-FROM node:22-bookworm-slim AS runner
+FROM node:26-bookworm-slim AS runner
 WORKDIR /app
 ENV NODE_ENV=production
 ENV NEXT_TELEMETRY_DISABLED=1
