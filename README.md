@@ -128,6 +128,12 @@ terminalz
 Existing `~/.termag/config.json` and `TERMAG_*` variables remain readable during migration. New writes
 go to `~/.terminalz/config.json`. Plain `ws://` is accepted only for exact loopback hosts.
 
+Browser file drops are copied to `.terminalz-uploads` under the selected terminal's working directory
+on its owning machine. Terminalz bracketed-pastes that target-local path after confirmed delivery so
+compatible coding-agent TUIs create a real attachment, and removes staged uploads after 24 hours.
+Hermes tabs running in same-named Docker containers use an existing policy-allowed writable bind
+mount, so Hermes receives a container-local path without a privileged copy operation.
+
 Useful commands:
 
 ```bash

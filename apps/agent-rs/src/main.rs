@@ -41,6 +41,7 @@ const MIN_RECONNECT: Duration = Duration::from_secs(1);
 const MAX_RECONNECT: Duration = Duration::from_secs(30);
 // A connection that survived this long was healthy, not a failing retry.
 const RECONNECT_RESET_AFTER: Duration = Duration::from_secs(60);
+const UPLOAD_CLEANUP_INTERVAL: Duration = Duration::from_secs(60 * 60);
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
@@ -49,6 +50,20 @@ async fn main() -> Result<()> {
     }
     let config = Arc::new(Config::load()?);
     eprintln!("[terminalz] starting v{VERSION} (protocol v{PROTOCOL_VERSION})");
+    let _upload_cleanup_task = tokio::spawn(async move {
+        let mut tick = interval(UPLOAD_CLEANUP_INTERVAL);
+        tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        loop {
+            tick.tick().await;
+            match fs_policy::cleanup_stale_uploads() {
+                Ok(removed) if removed > 0 => {
+                    eprintln!("[terminalz] removed {removed} expired upload(s)")
+                }
+                Ok(_) => {}
+                Err(error) => eprintln!("[terminalz] upload cleanup failed: {error:#}"),
+            }
+        }
+    });
     let mut reconnect = MIN_RECONNECT;
     loop {
         let started = Instant::now();
@@ -367,8 +382,23 @@ async fn handle_request(
                     .context("offset is required")?;
                 let encoded = incoming.string("data").context("data is required")?;
                 let bytes = base64::engine::general_purpose::STANDARD.decode(encoded)?;
+                let container_target = match incoming.string("containerName") {
+                    Some(name) => {
+                        Some(fs_policy::resolve_container_upload_target(config, &name).await?)
+                    }
+                    None => None,
+                };
                 let path = fs_policy::write_upload_chunk(
-                    config, &root, &directory, &name, &upload_id, offset, &bytes,
+                    config,
+                    fs_policy::UploadChunk {
+                        root_key: &root,
+                        relative_directory: &directory,
+                        file_name: &name,
+                        upload_id: &upload_id,
+                        offset,
+                        bytes: &bytes,
+                        container_target: container_target.as_ref(),
+                    },
                 )?;
                 Ok((json!({ "path": path.to_string_lossy() }), Vec::new()))
             }

@@ -56,12 +56,14 @@ const LIGHT_THEME: ITheme = {
 };
 
 const PAGE_SUSPEND_MS = 90_000;
+const INACTIVE_TERMINAL_RETENTION_MS = 90_000;
 const RECONNECT_RESET_AFTER_MS = 60_000;
 const MAX_INPUT_CHARS = 32 * 1024;
 const XTERM_WRITE_PAUSE_BYTES = 1024 * 1024;
 const XTERM_WRITE_RESUME_BYTES = 256 * 1024;
 const FILE_UPLOAD_CHUNK_BYTES = 192 * 1024;
 const FILE_UPLOAD_MAX_BYTES = 16 * 1024 * 1024;
+const FILE_UPLOAD_MAX_FILES = 20;
 const pageActivityListeners = new Set<(active: boolean) => void>();
 let pageVisibilityTimer: ReturnType<typeof setTimeout> | null = null;
 let pageVisibilityBound = false;
@@ -177,6 +179,10 @@ function TerminalPaneImpl({
   const hostRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<XTerm | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
+  const activeRef = useRef(active);
+  const syncBrokerPauseRef = useRef<() => void>(() => {});
+  const refitRef = useRef<() => void>(() => {});
+  const [retained, setRetained] = useState(active);
   // Driver/read-only state is null until the agent's first driver-changed
   // message arrives. The most recent focus/click/keystroke owns the
   // single-writer lease; only a true read-only state needs UI.
@@ -196,9 +202,27 @@ function TerminalPaneImpl({
   // resize the terminal shown in the native Herdr app.
   const suppressFocusClaimRef = useRef(false);
   const uploadWaitersRef = useRef(
-    new Map<string, { resolve: (path: string) => void; reject: (error: Error) => void }>()
+    new Map<
+      string,
+      {
+        socket: WebSocket;
+        resolve: (path: string) => void;
+        reject: (error: Error) => void;
+      }
+    >()
+  );
+  const inputWaitersRef = useRef(
+    new Map<
+      string,
+      {
+        socket: WebSocket;
+        resolve: () => void;
+        reject: (error: Error) => void;
+      }
+    >()
   );
   const optimisticEchoRef = useRef<(data: string) => void>(() => {});
+  const dragDepthRef = useRef(0);
   const [dragActive, setDragActive] = useState(false);
   const [uploading, setUploading] = useState(false);
   // Capture latest onTitleChange so the xterm listener (set up once) always
@@ -212,7 +236,36 @@ function TerminalPaneImpl({
   useEffect(() => subscribePageActivity(setPageActive), []);
 
   useEffect(() => {
-    if (!active || !pageActive || !hostRef.current) {
+    activeRef.current = active;
+    let releaseTimer: ReturnType<typeof setTimeout> | null = null;
+    let activateFrame = 0;
+    if (active) {
+      activateFrame = requestAnimationFrame(() => {
+        setRetained(true);
+        const ws = wsRef.current;
+        if (ws?.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: "wake" }));
+        }
+        refitRef.current();
+      });
+    } else {
+      termRef.current?.blur();
+      const ws = wsRef.current;
+      if (ws?.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: "hibernate" }));
+      }
+      releaseTimer = setTimeout(() => setRetained(false), INACTIVE_TERMINAL_RETENTION_MS);
+    }
+    return () => {
+      cancelAnimationFrame(activateFrame);
+      if (releaseTimer) {
+        clearTimeout(releaseTimer);
+      }
+    };
+  }, [active]);
+
+  useEffect(() => {
+    if (!retained || !pageActive || !hostRef.current) {
       return;
     }
     const lowData = prefersLowDataMode();
@@ -220,6 +273,7 @@ function TerminalPaneImpl({
     let term: XTerm | null = null;
     let fitAddon: { fit: () => void } | null = null;
     let raf = 0;
+    let scrollRestoreRaf = 0;
     let resizeTimer: ReturnType<typeof setTimeout> | null = null;
     let observer: ResizeObserver | null = null;
     let onVisibilityRef: (() => void) | null = null;
@@ -244,6 +298,7 @@ function TerminalPaneImpl({
     let visibilityPaused = document.visibilityState === "hidden";
     let brokerPaused = false;
     let followCheckpoint = false;
+    let checkpointScrollOffset = 0;
     let optimisticSinceCheckpoint = false;
     let optimisticBackground = "";
 
@@ -259,8 +314,14 @@ function TerminalPaneImpl({
       brokerPaused = shouldPause;
       ws.send(JSON.stringify({ type: shouldPause ? "pause" : "resume" }));
     }
+    syncBrokerPauseRef.current = syncBrokerPause;
 
-    function writeTerminal(data: string | Uint8Array, followBottom = false, restoreCursor = "") {
+    function writeTerminal(
+      data: string | Uint8Array,
+      followBottom = false,
+      restoreCursor = "",
+      restoreScrollOffset = 0
+    ) {
       if (!term || disposed) {
         return;
       }
@@ -272,14 +333,49 @@ function TerminalPaneImpl({
       }
       term.write(data, () => {
         queuedWriteBytes = Math.max(0, queuedWriteBytes - byteCount);
-        if (followBottom && !disposed) {
-          term?.scrollToBottom();
+        const restoreScroll = () => {
+          if (!term || disposed) {
+            return;
+          }
+          if (followBottom) {
+            try {
+              // Keep the viewport settled before the authoritative composer
+              // cursor is repainted. Deferring this by a frame makes Codex's
+              // caret visibly jump between the footer and input row.
+              term.scrollToBottom();
+            } catch {
+              // A retained tab may become inactive during this write. Its
+              // next active fit/checkpoint restores the bottom safely.
+            }
+            return;
+          }
+          if (restoreScrollOffset <= 0) {
+            return;
+          }
+          cancelAnimationFrame(scrollRestoreRaf);
+          scrollRestoreRaf = requestAnimationFrame(() => {
+            if (!term || disposed || !term.element?.isConnected) {
+              return;
+            }
+            try {
+              term.scrollToLine(Math.max(0, term.buffer.active.baseY - restoreScrollOffset));
+            } catch {
+              // xterm can briefly drop its renderer while a hidden terminal
+              // is being resized or disposed. The next frame/checkpoint will
+              // restore the same position once the renderer is available.
+            }
+          });
+        };
+        if (followBottom) {
+          restoreScroll();
         }
-        if (restoreCursor && !disposed) {
+        if (restoreCursor && !disposed && term) {
           // Reapply the authoritative cursor after scrollToBottom. Some xterm
           // renderers otherwise paint the cursor at the final footer write
           // even though the checkpoint's last CSI moved it into the composer.
-          term?.write(restoreCursor);
+          term.write(restoreCursor, followBottom ? undefined : restoreScroll);
+        } else if (!followBottom) {
+          restoreScroll();
         }
         if (parserPaused && queuedWriteBytes <= XTERM_WRITE_RESUME_BYTES) {
           parserPaused = false;
@@ -311,11 +407,19 @@ function TerminalPaneImpl({
     }
     optimisticEchoRef.current = echoOptimisticInput;
 
-    function rejectUploadWaiters(message: string) {
-      for (const waiter of uploadWaitersRef.current.values()) {
-        waiter.reject(new Error(message));
+    function rejectPendingTransfers(message: string, socket?: WebSocket) {
+      for (const [key, waiter] of uploadWaitersRef.current) {
+        if (!socket || waiter.socket === socket) {
+          uploadWaitersRef.current.delete(key);
+          waiter.reject(new Error(message));
+        }
       }
-      uploadWaitersRef.current.clear();
+      for (const [key, waiter] of inputWaitersRef.current) {
+        if (!socket || waiter.socket === socket) {
+          inputWaitersRef.current.delete(key);
+          waiter.reject(new Error(message));
+        }
+      }
     }
 
     function fitAndResize() {
@@ -335,6 +439,7 @@ function TerminalPaneImpl({
       }
       resizeTimer = setTimeout(fitAndResize, 80);
     }
+    refitRef.current = scheduleFit;
 
     // WebSocket lifecycle is its own function so we can re-run it on disconnect.
     // All input sites (term.onData, onVisibility, ResizeObserver) read
@@ -416,7 +521,7 @@ function TerminalPaneImpl({
             const backgrounds = [...decoded.matchAll(/\x1b\[(?:48;2;\d+;\d+;\d+|48;5;\d+)m/g)];
             optimisticBackground = backgrounds.at(-1)?.[0] ?? optimisticBackground;
           }
-          writeTerminal(bytes, followCheckpoint, cursor);
+          writeTerminal(bytes, followCheckpoint, cursor, checkpointScrollOffset);
           if (followCheckpoint) {
             if (checkpointFollowTimer) {
               clearTimeout(checkpointFollowTimer);
@@ -435,11 +540,15 @@ function TerminalPaneImpl({
           uploadId?: string;
           offset?: number;
           path?: string;
+          inputId?: string;
         };
         try {
           msg = JSON.parse(event.data);
         } catch {
           return;
+        }
+        if (msg.type === "ready" && !activeRef.current) {
+          ws.send(JSON.stringify({ type: "hibernate" }));
         }
         // Full checkpoint payloads already begin with RIS. Do not clear xterm
         // when this control message arrives: the payload is a separate
@@ -447,7 +556,9 @@ function TerminalPaneImpl({
         // every interactive Herdr redraw. Parsing reset + replacement content
         // together keeps the update visually atomic.
         if (msg.type === "checkpoint") {
-          followCheckpoint = true;
+          const buffer = term?.buffer.active;
+          checkpointScrollOffset = buffer ? Math.max(0, buffer.baseY - buffer.viewportY) : 0;
+          followCheckpoint = checkpointScrollOffset === 0;
           optimisticSinceCheckpoint = false;
         }
         if (msg.type === "resync") {
@@ -493,22 +604,33 @@ function TerminalPaneImpl({
             waiter?.reject(new Error(msg.message || "Upload failed"));
           }
         }
+        if (
+          (msg.type === "terminal-input-complete" || msg.type === "terminal-input-error") &&
+          msg.inputId
+        ) {
+          const waiter = inputWaitersRef.current.get(msg.inputId);
+          inputWaitersRef.current.delete(msg.inputId);
+          if (msg.type === "terminal-input-complete") {
+            waiter?.resolve();
+          } else {
+            waiter?.reject(new Error(msg.message || "Terminal did not accept the uploaded path"));
+          }
+        }
       };
       ws.onclose = event => {
         if (disposed) {
           return;
         }
+        // Reject only work sent through this socket. A replacement may have
+        // already started another upload using the component-level waiter
+        // maps, and a delayed close from the old socket must not cancel it.
+        rejectPendingTransfers("Terminal disconnected during file attachment", ws);
         // Ignore a delayed close from a superseded socket. Letting it schedule
         // another reconnect would create overlapping connections and xterm
         // output duplication after rapid network changes.
         if (wsRef.current !== ws) {
           return;
         }
-        // Upload waiters belong to the current socket generation. A browser
-        // focus event can replace a stale socket while a Finder drop is in
-        // progress; the superseded socket must not reject uploads already
-        // running on its replacement.
-        rejectUploadWaiters("Terminal disconnected during upload");
         wsRef.current = null;
         brokerPaused = false;
         // Code 1008 (policy violation) is the broker's "this session is gone /
@@ -781,6 +903,7 @@ function TerminalPaneImpl({
     return () => {
       disposed = true;
       cancelAnimationFrame(raf);
+      cancelAnimationFrame(scrollRestoreRaf);
       if (reconnectTimer) {
         clearTimeout(reconnectTimer);
       }
@@ -797,7 +920,7 @@ function TerminalPaneImpl({
       if (resizeTimer) {
         clearTimeout(resizeTimer);
       }
-      rejectUploadWaiters("Terminal closed during upload");
+      rejectPendingTransfers("Terminal closed during file attachment");
       wsRef.current?.close();
       wsRef.current = null;
       if (onVisibilityRef) {
@@ -821,6 +944,12 @@ function TerminalPaneImpl({
         window.removeEventListener("orientationchange", onVisualViewportRef);
       }
       manualReconnectRef.current = null;
+      if (syncBrokerPauseRef.current === syncBrokerPause) {
+        syncBrokerPauseRef.current = () => {};
+      }
+      if (refitRef.current === scheduleFit) {
+        refitRef.current = () => {};
+      }
       unsubscribeTheme?.();
       term?.dispose();
       termRef.current = null;
@@ -828,7 +957,7 @@ function TerminalPaneImpl({
         optimisticEchoRef.current = () => {};
       }
     };
-  }, [active, optimisticInput, pageActive, sessionId]);
+  }, [optimisticInput, pageActive, retained, sessionId]);
 
   function claimDrive() {
     const ws = wsRef.current;
@@ -867,17 +996,40 @@ function TerminalPaneImpl({
     }
     return new Promise<string>((resolve, reject) => {
       const key = `${uploadId}:${offset}`;
-      uploadWaitersRef.current.set(key, { resolve, reject });
+      uploadWaitersRef.current.set(key, { socket: ws, resolve, reject });
       ws.send(
         JSON.stringify({ type: "file-upload-chunk", uploadId, fileName: file.name, offset, data })
       );
     });
   }
 
+  function insertUploadedPath(path: string) {
+    const ws = wsRef.current;
+    if (ws?.readyState !== WebSocket.OPEN || driverStateRef.current?.readOnly) {
+      return Promise.reject(new Error("File uploaded, but the terminal is not accepting input"));
+    }
+    const inputId = crypto.randomUUID().replaceAll("-", "");
+    const displayPath = `'${path.replaceAll("'", `'\\''`)}' `;
+    // Bracketed paste is essential for coding-agent TUIs. Codex turns an
+    // explicitly pasted image path into a real image attachment; ordinary
+    // typed characters only leave path text in the composer. Shells and other
+    // TUIs also understand bracketed paste and receive the safely quoted path.
+    const data = `\x1b[200~${displayPath}\x1b[201~`;
+    optimisticEchoRef.current(displayPath);
+    return new Promise<void>((resolve, reject) => {
+      inputWaitersRef.current.set(inputId, { socket: ws, resolve, reject });
+      ws.send(JSON.stringify({ type: "input", inputId, data }));
+    });
+  }
+
   async function uploadDroppedFiles(files: FileList) {
     setUploading(true);
     try {
-      for (const file of Array.from(files).slice(0, 5)) {
+      const droppedFiles = Array.from(files);
+      if (droppedFiles.length > FILE_UPLOAD_MAX_FILES) {
+        throw new Error(`Attach at most ${FILE_UPLOAD_MAX_FILES} files at a time`);
+      }
+      for (const file of droppedFiles) {
         if (file.size > FILE_UPLOAD_MAX_BYTES) {
           throw new Error(`${file.name} exceeds the 16 MiB upload limit`);
         }
@@ -894,11 +1046,10 @@ function TerminalPaneImpl({
           uploadedPath = await uploadChunk(file, uploadId, offset, btoa(binary));
         }
         // Insert a safely shell-quoted local path at the current cursor. This
-        // is terminal input, not broker-side command execution.
-        const inserted = sendInput(`'${uploadedPath.replaceAll("'", `'\\''`)}' `, true);
-        if (!inserted) {
-          throw new Error("File uploaded, but its path could not be inserted into the terminal");
-        }
+        // is terminal input, not broker-side command execution. Unlike normal
+        // keystrokes, wait for the agent to acknowledge that it accepted this
+        // path so a reconnect cannot turn an upload into a false success.
+        await insertUploadedPath(uploadedPath);
         termRef.current?.focus();
       }
     } catch (error) {
@@ -956,6 +1107,30 @@ function TerminalPaneImpl({
         "relative flex min-h-0 flex-1 flex-col overflow-hidden bg-bg",
         !hideHeader && "rounded-lg border border-line"
       )}
+      onDragEnterCapture={event => {
+        event.preventDefault();
+        dragDepthRef.current += 1;
+        setDragActive(true);
+      }}
+      onDragOverCapture={event => event.preventDefault()}
+      onDragLeaveCapture={event => {
+        event.preventDefault();
+        dragDepthRef.current = Math.max(0, dragDepthRef.current - 1);
+        if (dragDepthRef.current === 0) {
+          setDragActive(false);
+        }
+      }}
+      onDropCapture={event => {
+        event.preventDefault();
+        event.stopPropagation();
+        dragDepthRef.current = 0;
+        setDragActive(false);
+        if (event.dataTransfer.files.length) {
+          void uploadDroppedFiles(event.dataTransfer.files);
+        } else {
+          setConnectionIssue({ fatal: false, message: "This drop did not contain a local file" });
+        }
+      }}
     >
       {connectionIssue && (
         <div className="absolute left-2 top-2 z-30 flex max-w-[calc(100%-1rem)] items-center gap-2 rounded-md border border-line bg-panel/95 px-2 py-1 text-[11px] text-muted shadow-lg backdrop-blur">
@@ -1020,23 +1195,6 @@ function TerminalPaneImpl({
         className="min-h-0 flex-1 bg-bg"
         onPointerDown={claimDrive}
         onFocusCapture={claimDrive}
-        onDragEnter={event => {
-          event.preventDefault();
-          setDragActive(true);
-        }}
-        onDragOver={event => event.preventDefault()}
-        onDragLeave={event => {
-          if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
-            setDragActive(false);
-          }
-        }}
-        onDrop={event => {
-          event.preventDefault();
-          setDragActive(false);
-          if (event.dataTransfer.files.length) {
-            void uploadDroppedFiles(event.dataTransfer.files);
-          }
-        }}
         // iPad-first: two-finger horizontal swipe switches tabs. The
         // gesture dispatches a window-level CustomEvent ('termag:tab-swipe')
         // that termag-app resolves against the active project's tab order.
