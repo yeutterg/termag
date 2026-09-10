@@ -184,6 +184,7 @@ private struct HerdrTerminalView: UIViewRepresentable {
         let view = TerminalView(frame: .zero, font: .monospacedSystemFont(ofSize: 14, weight: .regular), options: options)
         view.nativeBackgroundColor = .black
         view.nativeForegroundColor = .white
+        view.isUserInteractionEnabled = false
         view.terminalDelegate = context.coordinator
         context.coordinator.start(view)
         return view
@@ -213,6 +214,7 @@ private struct HerdrTerminalView: UIViewRepresentable {
                     let stream = try await connection.control(pane: pane, cols: cols, rows: rows)
                     guard !Task.isCancelled else { stream.close(); return }
                     self.stream = stream
+                    view?.isUserInteractionEnabled = true
                     defer { stream.close(); self.stream = nil }
                     try await stream.resize(cols: cols, rows: rows)
                     var decoder = HerdrFrameDecoder()
@@ -220,9 +222,13 @@ private struct HerdrTerminalView: UIViewRepresentable {
                         try Task.checkCancellation()
                         for bytes in try decoder.append(data) { view?.feed(byteArray: Array(bytes)[...]) }
                     }
-                    if !Task.isCancelled { view?.feed(text: "\r\n[Disconnected — tap Reconnect]\r\n") }
+                    if !Task.isCancelled {
+                        view?.isUserInteractionEnabled = false
+                        view?.feed(text: "\r\n[Disconnected — tap Reconnect]\r\n")
+                    }
                 } catch {
                     if !Task.isCancelled {
+                        view?.isUserInteractionEnabled = false
                         // Never interpolate remote error payloads into a terminal or log.
                         view?.feed(text: "\r\n[Unable to continue this Herdr stream. Check the session and tap Reconnect.]\r\n")
                     }

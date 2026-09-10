@@ -26,6 +26,9 @@ jobs:
         working-directory: apps/ios
       - name: Test Herdr SSH transport
         run: swift test --package-path apps/ios/Packages/HerdrRemote
+      - name: Prepare native terminal renderer
+        run: bash scripts/prepare-renderer.sh Release
+        working-directory: apps/ios
       - name: Build for iOS Simulator
         # SwiftTerm's reviewed, revision-pinned build plugin only generates version metadata.
         run: xcodebuild -project Terminalz.xcodeproj -scheme Terminalz -sdk iphonesimulator -configuration Release -derivedDataPath build -skipPackagePluginValidation CODE_SIGNING_ALLOWED=NO build

@@ -17,9 +17,11 @@ fi
 
 xcodebuild -version
 xcodegen generate
+bash scripts/prepare-renderer.sh Release
 xcodebuild -project Terminalz.xcodeproj -scheme Terminalz \
   -configuration Release -destination 'generic/platform=iOS' \
   -archivePath "build/Terminalz-${build_number}.xcarchive" \
+  -derivedDataPath build \
   -skipPackagePluginValidation \
   -allowProvisioningUpdates \
   DEVELOPMENT_TEAM="$team_id" PRODUCT_BUNDLE_IDENTIFIER="$bundle_id" \

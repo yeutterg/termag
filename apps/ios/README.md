@@ -20,7 +20,8 @@ or iPad, and Run. Generated Xcode project files and signing configuration stay l
 For a simulator build after generation:
 
 ```sh
-xcodebuild -project Terminalz.xcodeproj -scheme Terminalz -sdk iphonesimulator -configuration Debug -skipPackagePluginValidation CODE_SIGNING_ALLOWED=NO build
+bash scripts/prepare-renderer.sh Debug
+xcodebuild -project Terminalz.xcodeproj -scheme Terminalz -sdk iphonesimulator -configuration Debug -derivedDataPath build -skipPackagePluginValidation CODE_SIGNING_ALLOWED=NO build
 ```
 
 Deploy the matching web server revision first: the client requires its authenticated
@@ -106,6 +107,9 @@ It does not upload anything.
 SwiftTerm is pinned to the reviewed v1.20.0 commit. Its build plugin generates version
 metadata from that checkout; the CLI builds allow it with `-skipPackagePluginValidation`.
 When building interactively, Xcode may ask you to trust `SwiftTermBuildInfoPlugin`.
+The preparation script builds that Foundation-only generator for the host Mac to
+work around Xcode omitting the executable during iOS Release builds. The archive
+script runs this preparation automatically.
 
 Create the matching iOS app record in App Store Connect if one does not exist.
 In Organizer select **Distribute App → App Store Connect**, validate, and upload.
