@@ -13,6 +13,9 @@ export function prefersLowDataMode(): boolean {
   if (typeof window === "undefined" || typeof navigator === "undefined") {
     return false;
   }
+  if (document.documentElement.dataset.terminalzNative === "true") {
+    return true;
+  }
   const connection = (navigator as Navigator & { connection?: NetworkInformationLike }).connection;
   const slowConnection = /^(slow-2g|2g|3g)$/.test(connection?.effectiveType ?? "");
   const compactLayout = window.matchMedia("(max-width: 767px)").matches;

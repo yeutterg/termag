@@ -29,6 +29,10 @@ On mobile and constrained networks, Terminalz keeps visible output exact while b
 compressing WebSockets, requesting smaller reconnect checkpoints, applying compact inventory patches,
 and pausing hidden viewers. Phone xterm scrollback is capped at 500 lines; desktop is 2,000.
 
+A lightweight [SwiftUI iPhone and iPad client](apps/ios/README.md) provides native dark
+navigation and settings with the existing terminal renderer. This first version
+connects to HTTPS password/trusted-network servers and requires building with Xcode.
+
 ## Architecture
 
 ```text

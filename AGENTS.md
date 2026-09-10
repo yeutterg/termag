@@ -30,6 +30,7 @@ or Winston layer.
 ```text
 apps/web/       Next.js UI, route handlers, Prisma/SQLite, PWA, and custom WebSocket broker
 apps/agent-rs/  protocol-v2 Rust daemon plus bootstrap/list/attach CLI
+apps/ios/       SwiftUI iPhone/iPad client; native navigation with a WebKit terminal surface
 infra/          Docker Compose, Caddy, staging, and Homebrew packaging
 scripts/        database and deployment helpers
 docs/           protocol, environment, troubleshooting, and ADRs
