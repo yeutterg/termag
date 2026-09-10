@@ -7,7 +7,7 @@ final class RemoteHerdrStore: ObservableObject {
     @Published var inventory: HerdrSnapshot?
     @Published var error: String?
     @Published var busy = false
-    private(set) var connection: HerdrSSH?
+    @Published private(set) var connection: HerdrSSH?
     private(set) var configuration: HerdrSSHConfiguration?
     private var revision = UUID()
 
@@ -97,10 +97,21 @@ struct RemoteHerdrView: View {
                             .navigationTitle("Herdr")
                             .navigationBarTitleDisplayMode(.inline)
                             .toolbar {
-                                Button("Reconnect", systemImage: "arrow.clockwise") { generation = UUID() }
+                                Button("Reconnect", systemImage: "arrow.clockwise") {
+                                    store.suspend()
+                                    Task { await store.resume(); generation = UUID() }
+                                }
                             }
                     } else {
-                        ContentUnavailableView("Select a pane", systemImage: "terminal")
+                        ContentUnavailableView {
+                            Label("Select a pane", systemImage: "terminal")
+                        } description: {
+                            Text("Choose a pane from the sidebar, or reconnect if the host is unavailable.")
+                        } actions: {
+                            if store.connection == nil {
+                                Button("Reconnect") { Task { await store.resume(); generation = UUID() } }
+                            }
+                        }
                     }
                 }
             } else {
