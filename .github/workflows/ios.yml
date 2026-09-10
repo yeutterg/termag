@@ -11,6 +11,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ios-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
     runs-on: macos-latest
@@ -23,7 +27,8 @@ jobs:
       - name: Test Herdr SSH transport
         run: swift test --package-path apps/ios/Packages/HerdrRemote
       - name: Build for iOS Simulator
-        run: xcodebuild -project Terminalz.xcodeproj -scheme Terminalz -sdk iphonesimulator -configuration Release -derivedDataPath build CODE_SIGNING_ALLOWED=NO build
+        # SwiftTerm's reviewed, revision-pinned build plugin only generates version metadata.
+        run: xcodebuild -project Terminalz.xcodeproj -scheme Terminalz -sdk iphonesimulator -configuration Release -derivedDataPath build -skipPackagePluginValidation CODE_SIGNING_ALLOWED=NO build
         working-directory: apps/ios
       - uses: actions/upload-artifact@v4
         with:

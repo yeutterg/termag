@@ -20,6 +20,7 @@ xcodegen generate
 xcodebuild -project Terminalz.xcodeproj -scheme Terminalz \
   -configuration Release -destination 'generic/platform=iOS' \
   -archivePath "build/Terminalz-${build_number}.xcarchive" \
+  -skipPackagePluginValidation \
   -allowProvisioningUpdates \
   DEVELOPMENT_TEAM="$team_id" PRODUCT_BUNDLE_IDENTIFIER="$bundle_id" \
   CURRENT_PROJECT_VERSION="$build_number" archive

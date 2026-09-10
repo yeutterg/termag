@@ -20,7 +20,7 @@ or iPad, and Run. Generated Xcode project files and signing configuration stay l
 For a simulator build after generation:
 
 ```sh
-xcodebuild -project Terminalz.xcodeproj -scheme Terminalz -sdk iphonesimulator -configuration Debug CODE_SIGNING_ALLOWED=NO build
+xcodebuild -project Terminalz.xcodeproj -scheme Terminalz -sdk iphonesimulator -configuration Debug -skipPackagePluginValidation CODE_SIGNING_ALLOWED=NO build
 ```
 
 Deploy the matching web server revision first: the client requires its authenticated
@@ -102,6 +102,10 @@ The script creates a Release device archive with automatic signing and uses the
 Git commit count as its build number, then opens it in Xcode Organizer. Supply a
 higher build number as the third argument to upload the same revision again.
 It does not upload anything.
+
+SwiftTerm is pinned to the reviewed v1.20.0 commit. Its build plugin generates version
+metadata from that checkout; the CLI builds allow it with `-skipPackagePluginValidation`.
+When building interactively, Xcode may ask you to trust `SwiftTermBuildInfoPlugin`.
 
 Create the matching iOS app record in App Store Connect if one does not exist.
 In Organizer select **Distribute App → App Store Connect**, validate, and upload.
