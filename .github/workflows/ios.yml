@@ -1,0 +1,30 @@
+name: iOS build
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [master]
+    paths: ["apps/ios/**", ".github/workflows/ios.yml"]
+  pull_request:
+    paths: ["apps/ios/**", ".github/workflows/ios.yml"]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - run: brew install xcodegen
+      - run: xcodegen generate
+        working-directory: apps/ios
+      - name: Build for iOS Simulator
+        run: xcodebuild -project Terminalz.xcodeproj -scheme Terminalz -sdk iphonesimulator -configuration Release -derivedDataPath build CODE_SIGNING_ALLOWED=NO build
+        working-directory: apps/ios
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Terminalz-simulator
+          path: apps/ios/build/Build/Products/Release-iphonesimulator/Terminalz.app
+          retention-days: 7
