@@ -31,7 +31,8 @@ and pausing hidden viewers. Phone xterm scrollback is capped at 500 lines; deskt
 
 A lightweight [SwiftUI iPhone and iPad client](apps/ios/README.md) provides native dark
 navigation and settings with the existing terminal renderer. This first version
-connects to HTTPS password/trusted-network servers and requires building with Xcode.
+connects to HTTPS password/trusted-network servers or directly to Herdr over SSH,
+and requires building with Xcode.
 
 ## Architecture
 

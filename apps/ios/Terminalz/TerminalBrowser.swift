@@ -141,6 +141,7 @@ struct ConnectionView: View {
     @EnvironmentObject private var store: TerminalStore
     @State private var address = ""
     @State private var password = ""
+    @State private var directHerdr = false
 
     var body: some View {
         NavigationStack {
@@ -180,10 +181,15 @@ struct ConnectionView: View {
                 if let error = store.error {
                     Section { Text(error).foregroundStyle(.red).accessibilityAddTraits(.updatesFrequently) }
                 }
+                Section {
+                    Button("Connect directly to Herdr over SSH", systemImage: "network") { directHerdr = true }
+                        .frame(minHeight: 44)
+                }
             }
             .disabled(store.busy)
             .navigationTitle("Terminalz")
             .onAppear { address = store.server?.absoluteString ?? "" }
+            .fullScreenCover(isPresented: $directHerdr) { RemoteHerdrView() }
         }
     }
 }

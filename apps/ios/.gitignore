@@ -1,3 +1,5 @@
 Terminalz.xcodeproj/
 build/
 .DS_Store
+.build/
+.swiftpm/

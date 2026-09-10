@@ -9,11 +9,20 @@ settings:
     TARGETED_DEVICE_FAMILY: "1,2"
     SUPPORTS_MACCATALYST: NO
     CODE_SIGN_STYLE: Automatic
+packages:
+  HerdrRemote:
+    path: Packages/HerdrRemote
+  SwiftTerm:
+    url: https://github.com/migueldeicaza/SwiftTerm.git
+    exactVersion: 1.20.0
 targets:
   Terminalz:
     type: application
     platform: iOS
     sources: [Terminalz]
+    dependencies:
+      - package: HerdrRemote
+      - package: SwiftTerm
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: app.terminalz.client

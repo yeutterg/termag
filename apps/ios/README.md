@@ -1,8 +1,9 @@
 # Terminalz for iPhone and iPad
 
 A small SwiftUI client targeting iOS/iPadOS 17+. Uses Apple's standard dark lists,
-forms, navigation bars, SF Symbols, and adaptive three-column navigation. No Swift
-package dependencies. On iPhone the columns collapse into a navigation stack.
+forms, navigation bars, SF Symbols, and adaptive navigation. On iPhone the columns
+collapse into a navigation stack. Direct Herdr mode uses Apple's SwiftNIO SSH and
+SwiftTerm; the Terminalz server mode retains its existing WebKit renderer.
 
 ## Build
 
@@ -45,6 +46,41 @@ or agent-token storage in the app.
   reconnect/sign in after terminating the app. Disconnect clears the local session.
 - This first client browses and attaches to existing sessions. Session creation,
   machine enrollment, and administration remain in the web client.
+
+## Direct Herdr over SSH
+
+Choose **Connect directly to Herdr over SSH** on the connection screen. This mode
+connects from the iPhone/iPad to a Herdr host without a Terminalz server or agent.
+It addresses the same SSH host/session use case as `herdr --remote`, using Herdr's
+documented `api snapshot` and `terminal session control` interfaces rather than
+embedding the desktop executable or its private binary protocol.
+
+Enter a hostname/IP, port, username, SSH password, and existing Herdr session name.
+SSH config aliases, jump hosts, private-key authentication, and automatic installs
+are not supported in this first direct mode. Herdr must already be running and
+support `herdr terminal session control`. For Homebrew installations, set the
+executable path to `/opt/homebrew/bin/herdr` if it is absent from the SSH PATH.
+
+Paste the server's **public host key** from a trusted source (for example, inspect
+`/etc/ssh/ssh_host_ed25519_key.pub` locally on that host). The app pins that key and
+rejects mismatches; it never trusts an unverified network key or stores a private key.
+Connection details and passwords remain in memory only.
+
+The native picker shows the named session's workspaces, tabs, and panes. Select a
+pane to stream into a native terminal with 500 lines of scrollback. Direct mode
+shows one selected pane at a time; the broker mode continues to mirror split layouts.
+Pull to refresh inventory/status; direct mode does not subscribe to broker patches.
+Backgrounding closes SSH and foregrounding reconnects, refreshes inventory, and
+reattaches. After a transport/frame error, tap Reconnect; no partial stream is
+presented as contiguous. This client does not force takeover of another controller.
+
+SSH receive queues, frame sizes, snapshots, and pending input are capped. All data
+stays in memory, and terminal output is never logged. The transport's public API
+exposes only snapshot, terminal attach, input, and resize; it cannot execute a
+user-supplied remote command. Host/session/path values are shell-quoted because
+the SSH exec protocol is interpreted by the host's shell.
+
+Upstream reference: [Herdr remote and terminal-control documentation](https://herdr.dev/docs/persistence-remote/).
 
 ## TestFlight from another Mac
 

@@ -20,6 +20,8 @@ jobs:
       - run: brew install xcodegen
       - run: xcodegen generate
         working-directory: apps/ios
+      - name: Test Herdr SSH transport
+        run: swift test --package-path apps/ios/Packages/HerdrRemote
       - name: Build for iOS Simulator
         run: xcodebuild -project Terminalz.xcodeproj -scheme Terminalz -sdk iphonesimulator -configuration Release -derivedDataPath build CODE_SIGNING_ALLOWED=NO build
         working-directory: apps/ios
