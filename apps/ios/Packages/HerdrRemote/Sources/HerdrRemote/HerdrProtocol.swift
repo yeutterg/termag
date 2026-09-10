@@ -93,8 +93,10 @@ public struct HerdrSnapshot: Decodable, Sendable {
 public struct HerdrFrameDecoder {
     private var pending = Data()
     private var sequence: UInt64?
+    public private(set) var closed = false
     public init() {}
     public mutating func append(_ data: Data) throws -> [Data] {
+        guard !closed else { throw HerdrRemoteError.disconnected }
         guard pending.count + data.count <= 2 * 1024 * 1024 else { throw HerdrRemoteError.oversized }
         pending.append(data)
         var frames: [Data] = []
@@ -103,7 +105,11 @@ public struct HerdrFrameDecoder {
             pending.removeSubrange(...newline)
             guard !line.isEmpty else { continue }
             let record = try JSONDecoder().decode(Record.self, from: line)
-            if record.type == "terminal.closed" { throw HerdrRemoteError.disconnected }
+            if record.type == "terminal.closed" {
+                closed = true
+                pending.removeAll(keepingCapacity: false)
+                break // Deliver preceding frames even when close arrives in the same SSH chunk.
+            }
             guard record.type == "terminal.frame", record.encoding == "ansi",
                   let seq = record.seq, let full = record.full,
                   let encoded = record.bytes, let bytes = Data(base64Encoded: encoded) else {

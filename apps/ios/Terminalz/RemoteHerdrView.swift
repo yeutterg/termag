@@ -38,6 +38,11 @@ final class RemoteHerdrStore: ObservableObject {
         connection = nil
         Task { await old?.close() }
     }
+    func disconnect() {
+        suspend()
+        configuration = nil
+        inventory = nil
+    }
     func resume() async {
         guard connection == nil, let configuration else { return }
         do { try await connect(configuration) }
@@ -82,7 +87,7 @@ struct RemoteHerdrView: View {
                     .navigationTitle(store.configuration?.host ?? "Herdr")
                     .navigationBarTitleDisplayMode(.inline)
                     .refreshable { await store.refresh() }
-                    .toolbar { Button("Disconnect") { store.suspend(); dismiss() } }
+                    .toolbar { Button("Disconnect") { store.disconnect(); dismiss() } }
                     .safeAreaInset(edge: .bottom) {
                         VStack(spacing: 4) {
                             Text("Session: \(store.configuration?.session ?? "default")").font(.caption)
@@ -157,7 +162,7 @@ struct RemoteHerdrView: View {
                     }
                     .textInputAutocapitalization(.never).autocorrectionDisabled()
                     .navigationTitle("Direct Herdr")
-                    .toolbar { Button("Cancel") { store.suspend(); dismiss() } }
+                    .toolbar { Button("Cancel") { store.disconnect(); dismiss() } }
                 }
             }
         }
@@ -168,7 +173,7 @@ struct RemoteHerdrView: View {
         .task(id: scenePhase) {
             if scenePhase == .active { await store.resume(); generation = UUID() }
         }
-        .onDisappear { store.suspend() }
+        .onDisappear { store.disconnect() }
     }
 }
 
@@ -182,6 +187,7 @@ private struct HerdrTerminalView: UIViewRepresentable {
         options.kittyImageCacheLimitBytes = 1024 * 1024
         options.enableSixelReported = false
         let view = TerminalView(frame: .zero, font: .monospacedSystemFont(ofSize: 14, weight: .regular), options: options)
+        view.getTerminal().silentLog = true // Also suppress parser diagnostics in Debug builds.
         view.nativeBackgroundColor = .black
         view.nativeForegroundColor = .white
         view.isUserInteractionEnabled = false
@@ -221,6 +227,7 @@ private struct HerdrTerminalView: UIViewRepresentable {
                     for try await data in stream.output {
                         try Task.checkCancellation()
                         for bytes in try decoder.append(data) { view?.feed(byteArray: Array(bytes)[...]) }
+                        if decoder.closed { break }
                     }
                     if !Task.isCancelled {
                         view?.isUserInteractionEnabled = false

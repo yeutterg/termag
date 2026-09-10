@@ -27,6 +27,13 @@ final class ProtocolTests: XCTestCase {
         var decoder = HerdrFrameDecoder()
         XCTAssertThrowsError(try decoder.append(Data(repeating: 65, count: 2 * 1024 * 1024 + 1)))
     }
+    func testFinalFrameIsDeliveredBeforeCloseInSameChunk() throws {
+        var decoder = HerdrFrameDecoder()
+        let data = frame(1, full: true) + Data("{\"type\":\"terminal.closed\"}\n".utf8)
+        XCTAssertEqual(try decoder.append(data), [Data([0x1b, 0x63, 0xff, 0, 0x1b])])
+        XCTAssertTrue(decoder.closed)
+        XCTAssertThrowsError(try decoder.append(frame(2)))
+    }
     func testCommandValuesAreQuoted() throws {
         let config = try HerdrSSHConfiguration(host: "example.com", port: 22, username: "me", password: "pass",
             hostPublicKey: "public", session: "work'; echo unsafe", executable: "/opt/homebrew/bin/herdr")
